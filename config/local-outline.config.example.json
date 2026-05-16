@@ -1,0 +1,11 @@
+{
+  "host": "127.0.0.1",
+  "port": 4173,
+  "auth": {
+    "username": "me",
+    "passwordHash": "运行 npm run auth:hash -- \"你的登录密码\" 后，把输出的 passwordHash 填到这里",
+    "sessionSecret": "运行 npm run auth:hash -- \"你的登录密码\" 后，把输出的 sessionSecret 填到这里",
+    "sessionMaxAgeHours": 168,
+    "secureCookies": false
+  }
+}

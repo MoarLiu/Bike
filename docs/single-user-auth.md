@@ -1,0 +1,55 @@
+# 单用户认证部署
+
+Local Outline 的主数据仍然保存在使用者浏览器的 IndexedDB 中。公网部署时，认证层的目标是阻止陌生人访问你的应用入口和静态资源，避免他们打开同一个站点、导入/覆盖自己的数据或误以为这是公开服务。
+
+## 为什么不用前端配置
+
+Vite 前端配置会被打包进浏览器可下载的 JS 文件。账号、密码、哈希或密钥只要进入前端包，就不能视为秘密。因此公网部署使用 `server/auth-server.mjs`：
+
+- 服务器读取 `config/local-outline.config.json`。
+- 未登录请求会跳转到 `/login`。
+- 登录成功后设置 `HttpOnly`、`SameSite=Strict` 的会话 Cookie。
+- 登录后才会返回 `dist` 中的应用文件和资源。
+
+## 创建配置
+
+```bash
+cp config/local-outline.config.example.json config/local-outline.config.json
+npm run auth:hash -- "你的登录密码"
+```
+
+把输出填入配置：
+
+```json
+{
+  "host": "127.0.0.1",
+  "port": 4173,
+  "auth": {
+    "username": "me",
+    "passwordHash": "pbkdf2$310000$...",
+    "sessionSecret": "...",
+    "sessionMaxAgeHours": 168,
+    "secureCookies": true
+  }
+}
+```
+
+`secureCookies` 在 HTTPS 后面应设置为 `true`；本机 HTTP 调试时用 `false`。
+
+## 启动
+
+```bash
+npm run start:web
+```
+
+如果你用反向代理，把公网域名代理到配置里的 `host:port`。建议让服务监听 `127.0.0.1`，只让反向代理暴露到公网。
+
+## 更换密码
+
+重新执行：
+
+```bash
+npm run auth:hash -- "新的登录密码"
+```
+
+替换 `passwordHash`。如果也替换 `sessionSecret`，已有登录会全部失效。
