@@ -77,4 +77,3 @@ npm run start:web
 - 用 File System Access API 绑定固定工作区文件夹，实现更接近原生的打开/保存体验。
 - 用 Electron Builder 或 Tauri 打包 macOS 应用。
 - 增加版本历史、节点级反向链接、附件本地库、PDF/图片导出。
-- 做 SwiftUI 原生版时复用当前 JSON 数据结构，iCloud 用 ubiquity container 或 iCloud Drive 文档同步。

@@ -1,8 +1,6 @@
 node_modules/
 dist/
 release/
-native-macos/.build/
-native-macos/release/
 build/win-icon-png/
 config/local-outline.config.json
 .DS_Store
