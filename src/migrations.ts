@@ -52,6 +52,7 @@ const normalizeNode = (
     underline: rawNode.underline === true,
     strike: rawNode.strike === true,
     highlight: rawNode.highlight === true,
+    isTodo: rawNode.isTodo === true,
     icon: typeof rawNode.icon === "string" ? rawNode.icon : undefined,
     imageName:
       typeof rawNode.imageName === "string" ? rawNode.imageName : undefined,

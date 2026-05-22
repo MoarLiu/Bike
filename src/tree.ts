@@ -157,34 +157,28 @@ export const insertParent = (
   targetId: string,
   parent: OutlineNode,
 ): OutlineNode[] => {
-  const parentId = findParentNodeId(nodes, targetId);
-  if (parentId) {
-    return insertSiblingAfter(nodes, parentId, parent);
-  }
-  // If target is a top-level node, insert as its sibling
-  return insertSiblingAfter(nodes, targetId, parent);
+  const next = cloneNodes(nodes);
+  const located = locateNode(next, targetId);
+  if (!located) return nodes;
+  const siblings = siblingsAtPath(next, located.path);
+  const index = located.path[located.path.length - 1];
+  const [node] = siblings.splice(index, 1);
+  parent.children = [node];
+  parent.collapsed = false;
+  siblings.splice(index, 0, parent);
+  return next;
 };
 
 export const removeNode = (
   nodes: OutlineNode[],
   targetId: string,
 ): OutlineNode[] => {
-  const index = nodes.findIndex((n) => n.id === targetId);
-  if (index !== -1) {
-    const next = [...nodes];
-    next.splice(index, 1);
-    return next.length ? next : [createNode("新主题")];
-  }
-  const nextList = nodes.map((node) => {
-    if (node.children && node.children.length > 0) {
-      const nextChildren = removeNode(node.children, targetId);
-      if (nextChildren !== node.children) {
-        return { ...node, children: nextChildren };
-      }
-    }
-    return node;
-  });
-  return nextList;
+  const next = cloneNodes(nodes);
+  const located = locateNode(next, targetId);
+  if (!located) return nodes;
+  const siblings = siblingsAtPath(next, located.path);
+  siblings.splice(located.path[located.path.length - 1], 1);
+  return next.length ? next : [createNode("新主题")];
 };
 
 export const indentNode = (

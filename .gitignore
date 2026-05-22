@@ -6,3 +6,5 @@ config/local-outline.config.json
 .DS_Store
 npm-debug.log*
 *.local
+.playwright-cli/
+*.zip
