@@ -1,0 +1,8 @@
+.build/
+.build-*/
+.swiftpm/
+DerivedData/
+*.xcuserdata/
+dist/
+release/
+*.dmg
