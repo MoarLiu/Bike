@@ -252,6 +252,24 @@ final class AppStore: ObservableObject {
         setActiveNodes(TreeOperations.moveNode(document.nodes, targetId: activeNodeId, direction: direction))
     }
 
+    func navigateActiveUp() {
+        guard let activeNodeId else { return }
+        let nodes = visibleNodes
+        let flatRows = TreeOperations.flatten(nodes, respectCollapsed: true)
+        if let index = flatRows.firstIndex(where: { $0.node.id == activeNodeId }), index > 0 {
+            self.activeNodeId = flatRows[index - 1].node.id
+        }
+    }
+
+    func navigateActiveDown() {
+        guard let activeNodeId else { return }
+        let nodes = visibleNodes
+        let flatRows = TreeOperations.flatten(nodes, respectCollapsed: true)
+        if let index = flatRows.firstIndex(where: { $0.node.id == activeNodeId }), index < flatRows.count - 1 {
+            self.activeNodeId = flatRows[index + 1].node.id
+        }
+    }
+
     func focusActiveNode() {
         guard let activeNodeId else {
             show("请选择一个主题")

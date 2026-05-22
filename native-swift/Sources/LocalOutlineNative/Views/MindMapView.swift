@@ -6,43 +6,71 @@ struct MindMapView: View {
     var nodes: [OutlineNodeDTO]
     @State private var scale: CGFloat = 1
     @State private var offset: CGSize = .zero
+    @State private var accumulatedOffset: CGSize = .zero
 
     var body: some View {
         GeometryReader { proxy in
+            let layout = MindMapLayout.layout(title: title, nodes: nodes)
             ZStack(alignment: .topLeading) {
-                Canvas { context, _ in
-                    let layout = MindMapLayout.layout(title: title, nodes: nodes)
-                    context.translateBy(x: offset.width + 40, y: offset.height + proxy.size.height / 2 - layout.height / 2)
-                    context.scaleBy(x: scale, y: scale)
-                    for edge in layout.edges {
-                        var path = Path()
-                        path.move(to: CGPoint(x: edge.from.maxX, y: edge.from.midY))
-                        path.addCurve(
-                            to: CGPoint(x: edge.to.minX, y: edge.to.midY),
-                            control1: CGPoint(x: edge.from.maxX + 54, y: edge.from.midY),
-                            control2: CGPoint(x: edge.to.minX - 54, y: edge.to.midY)
-                        )
-                        context.stroke(path, with: .color(.secondary.opacity(0.45)), lineWidth: 1.5)
+                // Background capture layer for infinite panning
+                Color.clear
+                    .contentShape(Rectangle())
+                    .gesture(
+                        DragGesture()
+                            .onChanged { gesture in
+                                offset = CGSize(
+                                    width: accumulatedOffset.width + gesture.translation.width,
+                                    height: accumulatedOffset.height + gesture.translation.height
+                                )
+                            }
+                            .onEnded { gesture in
+                                accumulatedOffset = CGSize(
+                                    width: accumulatedOffset.width + gesture.translation.width,
+                                    height: accumulatedOffset.height + gesture.translation.height
+                                )
+                                offset = accumulatedOffset
+                            }
+                    )
+
+                // Draggable and Scalable Unified mind map container
+                ZStack(alignment: .topLeading) {
+                    // 1. Connection lines
+                    Canvas { context, _ in
+                        for edge in layout.edges {
+                            var path = Path()
+                            path.move(to: CGPoint(x: edge.from.maxX, y: edge.from.midY))
+                            path.addCurve(
+                                to: CGPoint(x: edge.to.minX, y: edge.to.midY),
+                                control1: CGPoint(x: edge.from.maxX + 54, y: edge.from.midY),
+                                control2: CGPoint(x: edge.to.minX - 54, y: edge.to.midY)
+                            )
+                            context.stroke(path, with: .color(.secondary.opacity(0.45)), lineWidth: 1.5)
+                        }
+                    }
+                    .frame(width: layout.width, height: layout.height)
+
+                    // 2. Nodes positioned at 1:1 local coordinate layout
+                    ForEach(layout.items) { item in
+                        MindMapNode(item: item)
+                            .position(x: item.rect.midX, y: item.rect.midY)
                     }
                 }
-                .gesture(DragGesture().onChanged { offset = $0.translation })
-                .onScrollPhaseChange { _, _ in }
+                .frame(width: layout.width, height: layout.height)
+                .scaleEffect(scale)
+                .offset(x: offset.width + 40, y: offset.height + proxy.size.height / 2 - layout.height / 2)
+                .animation(.interactiveSpring(response: 0.15, dampingFraction: 0.86), value: offset)
+                .animation(.spring(response: 0.3, dampingFraction: 0.85), value: scale)
 
-                let layout = MindMapLayout.layout(title: title, nodes: nodes)
-                ForEach(layout.items) { item in
-                    MindMapNode(item: item)
-                        .position(
-                            x: 40 + offset.width + (item.rect.midX * scale),
-                            y: proxy.size.height / 2 - layout.height / 2 + offset.height + (item.rect.midY * scale)
-                        )
-                        .scaleEffect(scale)
-                }
-
+                // Static zoom overlay (independent of zoom and drag)
                 HStack {
                     Button { scale = min(scale * 1.18, 2.5) } label: { Image(systemName: "plus.magnifyingglass") }
                     Text("\(Int(scale * 100))%").font(.caption.monospacedDigit())
                     Button { scale = max(scale * 0.85, 0.35) } label: { Image(systemName: "minus.magnifyingglass") }
-                    Button { scale = 1; offset = .zero } label: { Image(systemName: "arrow.counterclockwise") }
+                    Button {
+                        scale = 1
+                        offset = .zero
+                        accumulatedOffset = .zero
+                    } label: { Image(systemName: "arrow.counterclockwise") }
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)

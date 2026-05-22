@@ -69,15 +69,21 @@ private struct OutlineRowView: View {
 
     var body: some View {
         HStack(alignment: .center, spacing: 6) {
-            Button {
-                store.updateNode(row.node.id) { $0.collapsed.toggle() }
-            } label: {
-                Image(systemName: row.node.children.isEmpty ? "circle.fill" : (row.node.collapsed ? "chevron.right" : "chevron.down"))
-                    .font(.system(size: row.node.children.isEmpty ? 6 : 12))
-                    .frame(width: 18)
+            Group {
+                if row.node.children.isEmpty {
+                    Color.clear
+                        .frame(width: 18, height: 18)
+                } else {
+                    Button {
+                        store.updateNode(row.node.id) { $0.collapsed.toggle() }
+                    } label: {
+                        Image(systemName: row.node.collapsed ? "chevron.right" : "chevron.down")
+                            .font(.system(size: 11, weight: .medium))
+                            .frame(width: 18, height: 18)
+                    }
+                    .buttonStyle(.borderless)
+                }
             }
-            .buttonStyle(.borderless)
-            .disabled(row.node.children.isEmpty)
             .padding(.leading, CGFloat(row.depth) * 24)
 
             if row.node.isTodo == true {
@@ -100,7 +106,7 @@ private struct OutlineRowView: View {
             OutlineNodeTextEditor(text: Binding(
                 get: { row.node.text },
                 set: { text in store.updateNode(row.node.id) { $0.text = text } }
-            ), placeholder: "输入主题", fontSize: fontSize(row.node), fontWeight: fontWeight(row.node), italic: row.node.italic == true, textColor: nsTextColor(row.node), strikethrough: row.node.strike == true || (row.node.checked && row.node.isTodo == true), onSubmit: {
+            ), placeholder: "输入主题", fontSize: fontSize(row.node), fontWeight: fontWeight(row.node), italic: row.node.italic == true, textColor: nsTextColor(row.node), strikethrough: row.node.strike == true || (row.node.checked && row.node.isTodo == true), isActive: store.activeNodeId == row.node.id, onSubmit: {
                 store.insertAfter(row.node.id)
             }, onIndent: {
                 store.activeNodeId = row.node.id
@@ -108,6 +114,12 @@ private struct OutlineRowView: View {
             }, onOutdent: {
                 store.activeNodeId = row.node.id
                 store.outdentActive()
+            }, onMoveUp: {
+                store.activeNodeId = row.node.id
+                store.navigateActiveUp()
+            }, onMoveDown: {
+                store.activeNodeId = row.node.id
+                store.navigateActiveDown()
             }, onSelect: {
                 store.activeNodeId = row.node.id
             }, menuActions: OutlineNodeTextMenuActions(

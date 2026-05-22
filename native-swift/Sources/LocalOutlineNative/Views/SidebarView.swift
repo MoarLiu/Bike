@@ -40,6 +40,24 @@ struct SidebarView: View {
                     ForEach(store.matchingDocuments) { document in
                         DocumentRow(document: document)
                             .tag(document.id)
+                            .contextMenu {
+                                Button("打开文档") {
+                                    store.selectDocument(document.id)
+                                }
+                                Button("创建副本") {
+                                    store.selectDocument(document.id)
+                                    store.duplicateDocument()
+                                }
+                                Divider()
+                                Button("删除文档", role: .destructive) {
+                                    store.selectDocument(document.id)
+                                    if store.workspace.documents.count > 1 {
+                                        store.showDeleteConfirmation = true
+                                    } else {
+                                        store.show("至少保留一个文档")
+                                    }
+                                }
+                            }
                     }
                 }
             }
@@ -64,10 +82,13 @@ struct SidebarView: View {
                 }
             }
 
-            HStack {
+            HStack(spacing: 12) {
                 Button { store.backupToICloud() } label: { Image(systemName: "icloud") }
+                    .help("备份当前数据到 iCloud")
                 Button { store.useDarkMode.toggle() } label: { Image(systemName: store.useDarkMode ? "sun.max" : "moon") }
+                    .help(store.useDarkMode ? "切换到明亮模式" : "切换到暗黑模式")
                 Button { ICloudBackupService.openDirectoryInFinder() } label: { Image(systemName: "folder") }
+                    .help("在 Finder 中打开 iCloud 备份目录")
                 Spacer()
             }
             .buttonStyle(.borderless)

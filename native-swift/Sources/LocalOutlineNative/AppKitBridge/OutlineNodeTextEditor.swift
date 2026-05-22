@@ -21,9 +21,12 @@ struct OutlineNodeTextEditor: NSViewRepresentable {
     var italic: Bool
     var textColor: NSColor
     var strikethrough: Bool
+    var isActive: Bool
     var onSubmit: () -> Void
     var onIndent: () -> Void
     var onOutdent: () -> Void
+    var onMoveUp: () -> Void
+    var onMoveDown: () -> Void
     var onSelect: () -> Void
     var menuActions: OutlineNodeTextMenuActions
 
@@ -44,8 +47,8 @@ struct OutlineNodeTextEditor: NSViewRepresentable {
         view.isHorizontallyResizable = false
         view.isVerticallyResizable = false
         view.textContainerInset = NSSize(width: 0, height: 2)
-        view.textContainer?.lineBreakMode = .byTruncatingTail
-        view.textContainer?.maximumNumberOfLines = 1
+        view.textContainer?.lineBreakMode = .byWordWrapping
+        view.textContainer?.maximumNumberOfLines = 0
         view.textContainer?.widthTracksTextView = true
         view.textContainer?.heightTracksTextView = true
         view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -64,6 +67,13 @@ struct OutlineNodeTextEditor: NSViewRepresentable {
         applyStyle(to: nsView, context: context)
         nsView.placeholderString = placeholder
         nsView.needsDisplay = true
+        
+        if isActive && nsView.window?.firstResponder !== nsView {
+            DispatchQueue.main.async {
+                nsView.window?.makeFirstResponder(nsView)
+                nsView.setSelectedRange(NSRange(location: nsView.string.count, length: 0))
+            }
+        }
     }
 
     func makeCoordinator() -> Coordinator {
@@ -196,27 +206,65 @@ struct OutlineNodeTextEditor: NSViewRepresentable {
 
         func textDidEndEditing(_ notification: Notification) {
             isEditing = false
-            (notification.object as? NSTextView)?.needsDisplay = true
+            if let view = notification.object as? NSTextView {
+                text = view.string
+                view.needsDisplay = true
+            }
         }
 
         func textDidChange(_ notification: Notification) {
             guard let view = notification.object as? NSTextView else { return }
-            text = view.string.replacingOccurrences(of: "\n", with: " ")
+            view.invalidateIntrinsicContentSize()
             view.needsDisplay = true
         }
 
         func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
             if commandSelector == #selector(NSResponder.insertNewline(_:)) {
-                submit()
-                return true
+                if let event = NSApp.currentEvent, event.modifierFlags.contains(.shift) {
+                    textView.insertNewlineIgnoringFieldEditor(nil)
+                    textView.invalidateIntrinsicContentSize()
+                    return true
+                } else {
+                    text = textView.string
+                    submit()
+                    return true
+                }
             }
             if commandSelector == #selector(NSResponder.insertTab(_:)) {
+                text = textView.string
                 parent.onIndent()
                 return true
             }
             if commandSelector == #selector(NSResponder.insertBacktab(_:)) {
+                text = textView.string
                 parent.onOutdent()
                 return true
+            }
+            if commandSelector == #selector(NSResponder.moveUp(_:)) {
+                guard let layoutManager = textView.layoutManager else { return false }
+                let selectedRange = textView.selectedRange()
+                let glyphIndex = layoutManager.glyphIndexForCharacter(at: selectedRange.location)
+                let lineRect = layoutManager.lineFragmentRect(forGlyphAt: glyphIndex, effectiveRange: nil)
+                let firstLineRect = layoutManager.lineFragmentRect(forGlyphAt: 0, effectiveRange: nil)
+                if lineRect.origin.y == firstLineRect.origin.y {
+                    text = textView.string
+                    parent.onMoveUp()
+                    return true
+                }
+            }
+            if commandSelector == #selector(NSResponder.moveDown(_:)) {
+                guard let layoutManager = textView.layoutManager else { return false }
+                let selectedRange = textView.selectedRange()
+                let glyphIndex = layoutManager.glyphIndexForCharacter(at: selectedRange.location)
+                let lineRect = layoutManager.lineFragmentRect(forGlyphAt: glyphIndex, effectiveRange: nil)
+                let totalGlyphs = layoutManager.numberOfGlyphs
+                let lastGlyphIndex = totalGlyphs > 0 ? totalGlyphs - 1 : 0
+                let lastLineRect = layoutManager.lineFragmentRect(forGlyphAt: lastGlyphIndex, effectiveRange: nil)
+                if lineRect.origin.y == lastLineRect.origin.y {
+                    text = textView.string
+                    parent.onMoveDown()
+                    return true
+                }
             }
             return false
         }
@@ -228,8 +276,14 @@ final class ContextMenuTextView: NSTextView {
     var placeholderString = ""
 
     override var intrinsicContentSize: NSSize {
-        let currentFont = font ?? NSFont.systemFont(ofSize: NSFont.systemFontSize)
-        let height = ceil(currentFont.ascender - currentFont.descender + currentFont.leading) + 6
+        guard let layoutManager = layoutManager, let textContainer = textContainer else {
+            return super.intrinsicContentSize
+        }
+        layoutManager.ensureLayout(for: textContainer)
+        let usedRect = layoutManager.usedRect(for: textContainer)
+        let fontHeight = font?.pointSize ?? 14
+        let padding: CGFloat = 8
+        let height = max(fontHeight + padding, ceil(usedRect.height) + textContainerInset.height * 2)
         return NSSize(width: NSView.noIntrinsicMetric, height: height)
     }
 
