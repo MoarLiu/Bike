@@ -2322,8 +2322,12 @@ textarea.markdown-source:focus {
   padding: 80px;
   border: 0;
   border-radius: 0;
-  background: linear-gradient(135deg, #141416 0%, #1e1e22 100%);
-  color: #f3f3f5;
+  background: linear-gradient(135deg, var(--surface) 0%, var(--surface-raised) 100%);
+  color: var(--text);
+}
+
+.presentation-view:fullscreen::backdrop {
+  background: var(--surface);
 }
 
 .slide-deck {
@@ -2376,7 +2380,7 @@ textarea.markdown-source:focus {
 }
 
 .presentation-view:fullscreen h1 {
-  background: linear-gradient(135deg, #ffffff 30%, #a18cfa 100%);
+  background: linear-gradient(135deg, var(--text) 30%, var(--primary) 100%);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
 }
@@ -2503,7 +2507,7 @@ textarea.markdown-source:focus {
 }
 
 .presentation-view:fullscreen .slide-controls {
-  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  border-top: 1px solid var(--border);
 }
 
 .slide-btn {
