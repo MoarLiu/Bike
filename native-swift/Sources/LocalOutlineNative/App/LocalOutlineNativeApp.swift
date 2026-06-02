@@ -44,9 +44,9 @@ struct LocalOutlineNativeApp: App {
                     .keyboardShortcut("o", modifiers: [.command])
                 Button("导出工作区...") { store.exportWorkspace() }
                 Divider()
-                Button("iCloud 备份") { store.backupToICloud() }
+                Button("创建 JSON 备份") { store.backupToICloud() }
                 Button("载入 iCloud 备份") { store.loadICloudBackup() }
-                Button("打开备份目录") { ICloudBackupService.openDirectoryInFinder() }
+                Button("打开 Markdown 目录") { LocalOutlineStorage.openDocumentsDirectoryInFinder() }
             }
             CommandMenu("大纲") {
                 Button("新增同级") {

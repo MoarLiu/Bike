@@ -4,6 +4,41 @@ struct ContentView: View {
     @EnvironmentObject private var store: AppStore
 
     var body: some View {
+        Group {
+            switch store.loadState {
+            case .loading:
+                WorkspaceLoadingView()
+            case .loaded:
+                WorkspaceEditorView()
+            case .failed(let message):
+                WorkspaceLoadErrorView(message: message)
+            }
+        }
+        .overlay(alignment: .bottom) {
+            if let notice = store.notice {
+                Text(notice)
+                    .font(.caption)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+                    .padding(.bottom, 14)
+                    .transition(.opacity.combined(with: .scale(scale: 0.98)))
+            }
+        }
+        .animation(.easeOut(duration: 0.18), value: store.notice)
+        .alert("确认删除", isPresented: $store.showDeleteConfirmation) {
+            Button("取消", role: .cancel) {}
+            Button("删除", role: .destructive) { store.deleteActiveDocument() }
+        } message: {
+            Text("此操作会删除当前文档。")
+        }
+    }
+}
+
+private struct WorkspaceEditorView: View {
+    @EnvironmentObject private var store: AppStore
+
+    var body: some View {
         NavigationSplitView {
             SidebarView()
                 .navigationSplitViewColumnWidth(min: 240, ideal: 280, max: 360)
@@ -25,24 +60,54 @@ struct ContentView: View {
                 }
             }
         }
-        .overlay(alignment: .bottom) {
-            if let notice = store.notice {
-                Text(notice)
-                    .font(.caption)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
-                    .padding(.bottom, 14)
-                    .transition(.opacity.combined(with: .scale(scale: 0.98)))
+    }
+}
+
+private struct WorkspaceLoadingView: View {
+    var body: some View {
+        VStack(spacing: 12) {
+            ProgressView()
+                .controlSize(.large)
+            Text("正在载入工作区")
+                .font(.headline)
+            Text("正在读取 iCloud Drive/LocalOutline 中的 Markdown 文档。")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+private struct WorkspaceLoadErrorView: View {
+    @EnvironmentObject private var store: AppStore
+    var message: String
+
+    var body: some View {
+        VStack(spacing: 14) {
+            Image(systemName: "exclamationmark.triangle")
+                .font(.system(size: 34, weight: .semibold))
+                .foregroundStyle(.orange)
+            Text("工作区载入失败")
+                .font(.title3.weight(.semibold))
+            Text(message)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .textSelection(.enabled)
+                .frame(maxWidth: 560)
+            HStack(spacing: 10) {
+                Button { store.load() } label: {
+                    Label("重试", systemImage: "arrow.clockwise")
+                }
+                .buttonStyle(.borderedProminent)
+                Button { LocalOutlineStorage.openDocumentsDirectoryInFinder() } label: {
+                    Label("打开 Markdown 目录", systemImage: "folder")
+                }
+                .buttonStyle(.bordered)
             }
         }
-        .animation(.easeOut(duration: 0.18), value: store.notice)
-        .alert("确认删除", isPresented: $store.showDeleteConfirmation) {
-            Button("取消", role: .cancel) {}
-            Button("删除", role: .destructive) { store.deleteActiveDocument() }
-        } message: {
-            Text("此操作会删除当前文档。")
-        }
+        .padding(28)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
@@ -107,21 +172,7 @@ struct TopBarView: View {
             }
             .labelsHidden()
             .pickerStyle(.segmented)
-            .frame(width: 460)
-
-            Button {
-                store.duplicateDocument()
-            } label: {
-                Image(systemName: "doc.on.doc")
-            }
-            .help("复制文档")
-
-            Button(role: .destructive) {
-                store.showDeleteConfirmation = true
-            } label: {
-                Image(systemName: "trash")
-            }
-            .help("删除文档")
+            .frame(width: 460, alignment: .trailing)
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 14)
@@ -159,7 +210,7 @@ struct ToolStripView: View {
                 Button { store.exportActivePDF() } label: { Label("PDF", systemImage: "doc.richtext") }
                 Button { store.exportWorkspace() } label: { Label("工作区", systemImage: "doc.badge.gearshape") }
                 Divider().frame(height: 22)
-                Button { store.backupToICloud() } label: { Label("iCloud 备份", systemImage: "icloud.and.arrow.up") }
+                Button { store.backupToICloud() } label: { Label("JSON 备份", systemImage: "icloud.and.arrow.up") }
                 Button { store.loadICloudBackup() } label: { Label("载入备份", systemImage: "icloud.and.arrow.down") }
             }
             .buttonStyle(.bordered)
@@ -180,12 +231,12 @@ struct SettingsView: View {
                 set: { store.setDarkMode($0) }
             ))
             HStack {
-                Text("iCloud 备份目录")
+                Text("Markdown 保存目录")
                 Spacer()
-                Text(ICloudBackupService.directoryURL().path)
+                Text(LocalOutlineStorage.documentsDirectoryURL().path)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
-                Button("在 Finder 中打开") { ICloudBackupService.openDirectoryInFinder() }
+                Button("在 Finder 中打开") { LocalOutlineStorage.openDocumentsDirectoryInFinder() }
             }
         }
         .padding()

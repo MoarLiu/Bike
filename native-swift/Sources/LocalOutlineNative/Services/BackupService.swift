@@ -19,8 +19,7 @@ enum ICloudBackupService {
     static let stampedBackupPrefix = "localoutline-workspace-"
 
     static func directoryURL() -> URL {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Mobile Documents/com~apple~CloudDocs/LocalOutline", isDirectory: true)
+        LocalOutlineStorage.backupDirectoryURL()
     }
 
     static func save(workspace: WorkspaceV1DTO, directory: URL = directoryURL()) -> BackupResult {
@@ -68,7 +67,26 @@ enum ICloudBackupService {
     }
 
     static func openDirectoryInFinder() {
-        NSWorkspace.shared.activateFileViewerSelecting([directoryURL()])
+        LocalOutlineStorage.openDocumentsDirectoryInFinder()
+    }
+}
+
+enum LocalOutlineStorage {
+    static let folderName = "LocalOutline"
+
+    static func documentsDirectoryURL() -> URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Mobile Documents/com~apple~CloudDocs/\(folderName)", isDirectory: true)
+    }
+
+    static func backupDirectoryURL() -> URL {
+        documentsDirectoryURL().appendingPathComponent(".backups", isDirectory: true)
+    }
+
+    static func openDocumentsDirectoryInFinder() {
+        let url = documentsDirectoryURL()
+        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        NSWorkspace.shared.activateFileViewerSelecting([url])
     }
 }
 

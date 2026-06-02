@@ -8,9 +8,16 @@ private struct WorkspaceUndoSnapshot {
     var focusNodeId: String?
 }
 
+enum WorkspaceLoadState: Equatable {
+    case loading
+    case loaded
+    case failed(String)
+}
+
 @MainActor
 final class AppStore: ObservableObject {
     @Published var workspace: WorkspaceV1DTO = SampleData.starterWorkspace()
+    @Published var loadState: WorkspaceLoadState = .loading
     @Published var mode: ViewMode = .outline
     @Published var markdownPaneMode: MarkdownPaneMode = .split
     @Published var activeNodeId: String?
@@ -44,6 +51,17 @@ final class AppStore: ObservableObject {
 
     var activeDocument: OutlineDocumentDTO? {
         workspace.documents.first { $0.id == workspace.activeDocumentId } ?? workspace.documents.first
+    }
+
+    var isWorkspaceReady: Bool {
+        loadState == .loaded
+    }
+
+    var loadErrorMessage: String? {
+        if case .failed(let message) = loadState {
+            return message
+        }
+        return nil
     }
 
     var activeNode: OutlineNodeDTO? {
@@ -95,28 +113,37 @@ final class AppStore: ObservableObject {
     }
 
     func load() {
+        saveTask?.cancel()
+        loadState = .loading
         do {
             workspace = try repository.loadWorkspace()
             activeNodeId = TreeOperations.firstNodeId(activeDocument?.nodes ?? [])
             focusNodeId = nil
             clearUndoHistory()
             applyAppearance()
+            loadState = .loaded
         } catch {
+            loadState = .failed(error.localizedDescription)
             show("载入失败：\(error.localizedDescription)")
         }
     }
 
     func flushSaveNow() {
+        guard isWorkspaceReady else {
+            show("工作区尚未载入，无法保存")
+            return
+        }
         saveTask?.cancel()
         do {
             try repository.saveWorkspace(workspace)
-            show("已保存到本地")
+            show("已保存到 iCloud Drive/LocalOutline")
         } catch {
             show("保存失败：\(error.localizedDescription)")
         }
     }
 
     func createManualSnapshot() {
+        guard canEditWorkspace() else { return }
         do {
             try repository.createSnapshot(reason: "manual", workspace: workspace)
             show("已创建本地快照")
@@ -126,6 +153,7 @@ final class AppStore: ObservableObject {
     }
 
     func scheduleSave() {
+        guard isWorkspaceReady else { return }
         saveTask?.cancel()
         let current = workspace
         saveTask = Task { [repository] in
@@ -140,6 +168,7 @@ final class AppStore: ObservableObject {
     }
 
     func selectDocument(_ id: String) {
+        guard canEditWorkspace() else { return }
         workspace.activeDocumentId = id
         focusNodeId = nil
         activeNodeId = TreeOperations.firstNodeId(activeDocument?.nodes ?? [])
@@ -148,6 +177,7 @@ final class AppStore: ObservableObject {
     }
 
     func createDocument() {
+        guard canEditWorkspace() else { return }
         recordUndoSnapshot()
         let id = UUID().uuidString
         let document = OutlineDocumentDTO(id: id, title: Defaults.documentTitle, nodes: [OutlineNodeDTO(text: "新主题")])
@@ -160,6 +190,7 @@ final class AppStore: ObservableObject {
     }
 
     func duplicateDocument() {
+        guard canEditWorkspace() else { return }
         guard var source = activeDocument else { return }
         recordUndoSnapshot()
         source.id = UUID().uuidString
@@ -175,6 +206,7 @@ final class AppStore: ObservableObject {
     }
 
     func deleteActiveDocument() {
+        guard canEditWorkspace() else { return }
         guard workspace.documents.count > 1, let activeDocument else {
             show("至少保留一个文档")
             return
@@ -189,6 +221,7 @@ final class AppStore: ObservableObject {
     }
 
     func updateTitle(_ title: String) {
+        guard canEditWorkspace() else { return }
         guard let documentId = activeDocument?.id else { return }
         patchActiveDocument(coalescingKey: "title:\(documentId)") { document in
             document.title = title.isEmpty ? Defaults.documentTitle : title
@@ -199,6 +232,7 @@ final class AppStore: ObservableObject {
     }
 
     func setMarkdownSource(_ value: String, coalescingKey: String? = nil) {
+        guard canEditWorkspace() else { return }
         guard var document = activeDocument else { return }
         let normalized = MarkdownCodec.normalizeSource(value)
         guard MarkdownCodec.documentMarkdown(document) != normalized else { return }
@@ -209,6 +243,7 @@ final class AppStore: ObservableObject {
     }
 
     func setActiveNodes(_ nodes: [OutlineNodeDTO]) {
+        guard canEditWorkspace() else { return }
         guard var document = activeDocument, document.nodes != nodes else { return }
         recordUndoSnapshot()
         document.nodes = nodes
@@ -219,11 +254,13 @@ final class AppStore: ObservableObject {
     }
 
     func updateNode(_ id: String, _ transform: (inout OutlineNodeDTO) -> Void) {
+        guard canEditWorkspace() else { return }
         guard let document = activeDocument else { return }
         setActiveNodes(TreeOperations.updateNode(document.nodes, id: id, transform: transform))
     }
 
     func updateNodeText(_ id: String, text: String) {
+        guard canEditWorkspace() else { return }
         guard let document = activeDocument,
               TreeOperations.findNode(in: document.nodes, id: id)?.text != text else { return }
         recordUndoSnapshot(coalescingKey: "nodeText:\(id)")
@@ -239,6 +276,7 @@ final class AppStore: ObservableObject {
     }
 
     func insertAfter(_ id: String) {
+        guard canEditWorkspace() else { return }
         guard let document = activeDocument else { return }
         let node = OutlineNodeDTO(text: "")
         setActiveNodes(TreeOperations.insertSiblingAfter(document.nodes, targetId: id, newNode: node))
@@ -246,6 +284,7 @@ final class AppStore: ObservableObject {
     }
 
     func insertChild(_ id: String) {
+        guard canEditWorkspace() else { return }
         guard let document = activeDocument else { return }
         let node = OutlineNodeDTO(text: "")
         setActiveNodes(TreeOperations.addChild(document.nodes, targetId: id, child: node))
@@ -253,6 +292,7 @@ final class AppStore: ObservableObject {
     }
 
     func insertMindMapRootChild() {
+        guard canEditWorkspace() else { return }
         if let focusNodeId {
             insertChild(focusNodeId)
             show("已新增子节点")
@@ -266,6 +306,7 @@ final class AppStore: ObservableObject {
     }
 
     func removeNode(_ id: String) {
+        guard canEditWorkspace() else { return }
         guard let document = activeDocument else { return }
         let next = TreeOperations.removeNode(document.nodes, targetId: id)
         setActiveNodes(next)
@@ -275,16 +316,19 @@ final class AppStore: ObservableObject {
     }
 
     func indentActive() {
+        guard canEditWorkspace() else { return }
         guard let document = activeDocument, let activeNodeId else { return }
         setActiveNodes(TreeOperations.indentNode(document.nodes, targetId: activeNodeId))
     }
 
     func outdentActive() {
+        guard canEditWorkspace() else { return }
         guard let document = activeDocument, let activeNodeId else { return }
         setActiveNodes(TreeOperations.outdentNode(document.nodes, targetId: activeNodeId))
     }
 
     func moveActive(_ direction: Int) {
+        guard canEditWorkspace() else { return }
         guard let document = activeDocument, let activeNodeId else { return }
         setActiveNodes(TreeOperations.moveNode(document.nodes, targetId: activeNodeId, direction: direction))
     }
@@ -308,6 +352,7 @@ final class AppStore: ObservableObject {
     }
 
     func focusActiveNode() {
+        guard canEditWorkspace() else { return }
         guard let activeNodeId else {
             show("请选择一个主题")
             return
@@ -316,6 +361,7 @@ final class AppStore: ObservableObject {
     }
 
     func focusOnNode(_ id: String) {
+        guard canEditWorkspace() else { return }
         guard let document = activeDocument, let node = TreeOperations.findNode(in: document.nodes, id: id) else {
             show("主题不存在")
             return
@@ -326,6 +372,7 @@ final class AppStore: ObservableObject {
     }
 
     func clearFocus() {
+        guard canEditWorkspace() else { return }
         guard focusNodeId != nil else { return }
         focusNodeId = nil
         show("已退出聚焦")
@@ -336,6 +383,7 @@ final class AppStore: ObservableObject {
     }
 
     func undoLastDocumentChange() {
+        guard canEditWorkspace() else { return }
         guard let snapshot = undoStack.popLast() else { return }
         restoreUndoSnapshot(snapshot)
         show("已撤销")
@@ -354,6 +402,10 @@ final class AppStore: ObservableObject {
     }
 
     func exportActive(format: ExportFormat) {
+        guard isWorkspaceReady else {
+            show("工作区尚未载入，无法导出")
+            return
+        }
         guard let document = activeDocument else { return }
         do {
             let result = try ImportExportCodec.exportDocument(document, format: format)
@@ -366,6 +418,10 @@ final class AppStore: ObservableObject {
     }
 
     func exportActivePDF() {
+        guard isWorkspaceReady else {
+            show("工作区尚未载入，无法导出")
+            return
+        }
         guard let document = activeDocument else { return }
         let filename = "\(TreeOperations.sanitizeFilenameBase(document.title)).pdf"
         guard let url = FilePanelService.savePanel(filename: filename) else { return }
@@ -378,6 +434,10 @@ final class AppStore: ObservableObject {
     }
 
     func exportWorkspace() {
+        guard isWorkspaceReady else {
+            show("工作区尚未载入，无法导出")
+            return
+        }
         guard let url = FilePanelService.savePanel(filename: "localoutline-workspace.json") else { return }
         do {
             try ImportExportCodec.exportWorkspace(workspace).write(to: url, options: .atomic)
@@ -388,6 +448,7 @@ final class AppStore: ObservableObject {
     }
 
     func importFile() {
+        guard canEditWorkspace() else { return }
         guard let url = FilePanelService.openImportPanel() else { return }
         do {
             let imported = try ImportExportCodec.importFile(data: Data(contentsOf: url), filename: url.lastPathComponent)
@@ -415,11 +476,16 @@ final class AppStore: ObservableObject {
     }
 
     func backupToICloud() {
+        guard isWorkspaceReady else {
+            show("工作区尚未载入，无法备份")
+            return
+        }
         let result = ICloudBackupService.save(workspace: workspace)
-        show(result.ok ? "iCloud 备份已保存：\(result.path ?? "")" : result.error ?? "备份失败")
+        show(result.ok ? "JSON 备份已保存：\(result.path ?? "")" : result.error ?? "备份失败")
     }
 
     func loadICloudBackup() {
+        guard canEditWorkspace() else { return }
         switch ICloudBackupService.load() {
         case .success(let (next, path)):
             do {
@@ -438,6 +504,10 @@ final class AppStore: ObservableObject {
     }
 
     func copyNodeLink(_ node: OutlineNodeDTO) {
+        guard isWorkspaceReady else {
+            show("工作区尚未载入，无法复制链接")
+            return
+        }
         guard let activeDocument else { return }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString("[[\(activeDocument.title)#\(node.text.isEmpty ? Defaults.nodeText : node.text)]]", forType: .string)
@@ -457,6 +527,7 @@ final class AppStore: ObservableObject {
     }
 
     private func patchActiveDocument(coalescingKey: String? = nil, _ mutate: (inout OutlineDocumentDTO) -> Void) {
+        guard canEditWorkspace() else { return }
         guard var document = activeDocument else { return }
         let previous = document
         mutate(&document)
@@ -466,12 +537,14 @@ final class AppStore: ObservableObject {
     }
 
     private func replaceActiveDocument(_ document: OutlineDocumentDTO) {
+        guard isWorkspaceReady else { return }
         guard let index = workspace.documents.firstIndex(where: { $0.id == document.id }) else { return }
         workspace.documents[index] = document
         scheduleSave()
     }
 
     private func applyActiveNodes(_ nodes: [OutlineNodeDTO]) {
+        guard isWorkspaceReady else { return }
         guard var document = activeDocument else { return }
         document.nodes = nodes
         document.updatedAt = Date.isoNow
@@ -500,6 +573,7 @@ final class AppStore: ObservableObject {
     }
 
     private func restoreUndoSnapshot(_ snapshot: WorkspaceUndoSnapshot) {
+        guard isWorkspaceReady else { return }
         workspace = TreeOperations.normalizeWorkspace(snapshot.workspace)
         activeNodeId = validNodeId(snapshot.activeNodeId) ?? TreeOperations.firstNodeId(activeDocument?.nodes ?? [])
         focusNodeId = validNodeId(snapshot.focusNodeId)
@@ -520,6 +594,14 @@ final class AppStore: ObservableObject {
 
     private func applyAppearance() {
         NSApp.appearance = NSAppearance(named: useDarkMode ? .darkAqua : .aqua)
+    }
+
+    private func canEditWorkspace() -> Bool {
+        guard isWorkspaceReady else {
+            show("工作区尚未载入，无法编辑")
+            return false
+        }
+        return true
     }
 
     private func rekey(_ nodes: [OutlineNodeDTO]) -> [OutlineNodeDTO] {

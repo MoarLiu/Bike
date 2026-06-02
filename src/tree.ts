@@ -288,6 +288,21 @@ export const mergeNodes = (
   const nextWithoutSource = removeNode(nodes, sourceId);
   return updateNode(nextWithoutSource, targetId, (node) => {
     node.text = (node.text || "") + (sourceNode.text || "");
+    node.note = [node.note, sourceNode.note].filter(Boolean).join("\n");
+    node.checked = node.checked || sourceNode.checked;
+    node.isTodo = node.isTodo || sourceNode.isTodo;
+    if (node.color === "plain" && sourceNode.color !== "plain") {
+      node.color = sourceNode.color;
+    }
+    node.bold = node.bold || sourceNode.bold;
+    node.italic = node.italic || sourceNode.italic;
+    node.underline = node.underline || sourceNode.underline;
+    node.strike = node.strike || sourceNode.strike;
+    node.highlight = node.highlight || sourceNode.highlight;
+    node.icon = node.icon ?? sourceNode.icon;
+    node.imageName = node.imageName ?? sourceNode.imageName;
+    node.imageAlt = node.imageAlt ?? sourceNode.imageAlt;
+    node.table = node.table ?? sourceNode.table?.map((row) => [...row]);
     node.children = [...(node.children || []), ...(sourceNode.children || [])];
   });
 };

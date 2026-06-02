@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 struct MindMapView: View {
@@ -7,59 +8,75 @@ struct MindMapView: View {
     @State private var scale: CGFloat = 1
     @State private var offset: CGSize = .zero
     @State private var accumulatedOffset: CGSize = .zero
+    @State private var editingNodeId: String? = nil
+    @State private var editingDraftText: String = ""
+    @State private var shouldIgnoreFocusLoss = false
 
     var body: some View {
         GeometryReader { proxy in
             let layout = MindMapLayout.layout(title: title, nodes: nodes)
             ZStack(alignment: .topLeading) {
-                // Background capture layer for infinite panning
-                Color.clear
-                    .contentShape(Rectangle())
-                    .gesture(
-                        DragGesture()
-                            .onChanged { gesture in
-                                offset = CGSize(
-                                    width: accumulatedOffset.width + gesture.translation.width,
-                                    height: accumulatedOffset.height + gesture.translation.height
-                                )
-                            }
-                            .onEnded { gesture in
-                                accumulatedOffset = CGSize(
-                                    width: accumulatedOffset.width + gesture.translation.width,
-                                    height: accumulatedOffset.height + gesture.translation.height
-                                )
-                                offset = accumulatedOffset
-                            }
-                    )
-
-                // Draggable and Scalable Unified mind map container
                 ZStack(alignment: .topLeading) {
-                    // 1. Connection lines
-                    Canvas { context, _ in
-                        for edge in layout.edges {
-                            var path = Path()
-                            path.move(to: CGPoint(x: edge.from.maxX, y: edge.from.midY))
-                            path.addCurve(
-                                to: CGPoint(x: edge.to.minX, y: edge.to.midY),
-                                control1: CGPoint(x: edge.from.maxX + 54, y: edge.from.midY),
-                                control2: CGPoint(x: edge.to.minX - 54, y: edge.to.midY)
+                    Color.clear
+                        .contentShape(Rectangle())
+
+                    ZStack(alignment: .topLeading) {
+                        Canvas { context, _ in
+                            for edge in layout.edges {
+                                var path = Path()
+                                path.move(to: CGPoint(x: edge.from.maxX, y: edge.from.midY))
+                                path.addCurve(
+                                    to: CGPoint(x: edge.to.minX, y: edge.to.midY),
+                                    control1: CGPoint(x: edge.from.maxX + 54, y: edge.from.midY),
+                                    control2: CGPoint(x: edge.to.minX - 54, y: edge.to.midY)
+                                )
+                                context.stroke(path, with: .color(.secondary.opacity(0.45)), lineWidth: 1.5)
+                            }
+                        }
+                        .frame(width: layout.width, height: layout.height)
+
+                        ForEach(layout.items) { item in
+                            MindMapNode(
+                                item: item,
+                                editingNodeId: $editingNodeId,
+                                editingDraftText: $editingDraftText,
+                                shouldIgnoreFocusLoss: $shouldIgnoreFocusLoss,
+                                cancelEditing: { _ = cancelEditingAndClearSelection() }
                             )
-                            context.stroke(path, with: .color(.secondary.opacity(0.45)), lineWidth: 1.5)
+                                .position(x: item.rect.midX, y: item.rect.midY)
                         }
                     }
                     .frame(width: layout.width, height: layout.height)
-
-                    // 2. Nodes positioned at 1:1 local coordinate layout
-                    ForEach(layout.items) { item in
-                        MindMapNode(item: item)
-                            .position(x: item.rect.midX, y: item.rect.midY)
-                    }
+                    .scaleEffect(scale)
+                    .offset(x: offset.width + 40, y: offset.height + proxy.size.height / 2 - layout.height / 2)
+                    .animation(.spring(response: 0.3, dampingFraction: 0.85), value: scale)
                 }
-                .frame(width: layout.width, height: layout.height)
-                .scaleEffect(scale)
-                .offset(x: offset.width + 40, y: offset.height + proxy.size.height / 2 - layout.height / 2)
-                .animation(.interactiveSpring(response: 0.15, dampingFraction: 0.86), value: offset)
-                .animation(.spring(response: 0.3, dampingFraction: 0.85), value: scale)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .contentShape(Rectangle())
+                .simultaneousGesture(
+                    SpatialTapGesture()
+                        .onEnded { tap in
+                            clearSelectionIfNeeded(at: tap.location, layout: layout, viewportHeight: proxy.size.height)
+                        }
+                )
+                .simultaneousGesture(
+                    DragGesture(minimumDistance: 3)
+                        .onChanged { gesture in
+                            guard editingNodeId == nil else { return }
+                            offset = CGSize(
+                                width: accumulatedOffset.width + gesture.translation.width,
+                                height: accumulatedOffset.height + gesture.translation.height
+                            )
+                        }
+                        .onEnded { gesture in
+                            guard editingNodeId == nil else { return }
+                            accumulatedOffset = CGSize(
+                                width: accumulatedOffset.width + gesture.translation.width,
+                                height: accumulatedOffset.height + gesture.translation.height
+                            )
+                            offset = accumulatedOffset
+                        }
+                )
 
                 // Static zoom overlay (independent of zoom and drag)
                 HStack {
@@ -79,49 +96,268 @@ struct MindMapView: View {
                 .padding(14)
             }
         }
+        .overlay {
+            MindMapInputMonitor(
+                onScroll: { deltaY in
+                    zoomByScroll(deltaY)
+                },
+                onEscape: {
+                    cancelEditingAndClearSelection()
+                }
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .allowsHitTesting(false)
+        }
         .background(.quaternary.opacity(0.45))
+    }
+
+    private func clearSelectionIfNeeded(at location: CGPoint, layout: MindMapLayout.Result, viewportHeight: CGFloat) {
+        guard !locationHitsNode(location, layout: layout, viewportHeight: viewportHeight) else { return }
+        commitEditingAndClearSelection()
+    }
+
+    private func commitEditingAndClearSelection() {
+        if let editingNodeId {
+            store.updateNodeText(editingNodeId, text: editingDraftText)
+        }
+        _ = cancelEditingAndClearSelection()
+    }
+
+    @discardableResult
+    private func cancelEditingAndClearSelection() -> Bool {
+        guard editingNodeId != nil || store.activeNodeId != nil else { return false }
+        shouldIgnoreFocusLoss = true
+        store.finishCoalescedUndo()
+        editingNodeId = nil
+        store.activeNodeId = nil
+        return true
+    }
+
+    private func zoomByScroll(_ deltaY: CGFloat) -> Bool {
+        guard editingNodeId == nil, abs(deltaY) > 0.1 else { return false }
+        let factor = exp(deltaY * 0.002)
+        scale = min(max(scale * factor, 0.35), 2.5)
+        return true
+    }
+
+    private func locationHitsNode(_ location: CGPoint, layout: MindMapLayout.Result, viewportHeight: CGFloat) -> Bool {
+        let mapOffset = CGPoint(x: offset.width + 40, y: offset.height + viewportHeight / 2 - layout.height / 2)
+        let mapCenter = CGPoint(x: layout.width / 2, y: layout.height / 2)
+        let localPoint = CGPoint(
+            x: mapCenter.x + (location.x - mapOffset.x - mapCenter.x) / scale,
+            y: mapCenter.y + (location.y - mapOffset.y - mapCenter.y) / scale
+        )
+        return layout.items.contains { $0.rect.insetBy(dx: -8, dy: -8).contains(localPoint) }
     }
 }
 
 private struct MindMapNode: View {
     @EnvironmentObject private var store: AppStore
     var item: MindMapLayout.Item
+    @Binding var editingNodeId: String?
+    @Binding var editingDraftText: String
+    @Binding var shouldIgnoreFocusLoss: Bool
+    var cancelEditing: () -> Void
+
+    @FocusState private var isTextFieldFocused: Bool
 
     var body: some View {
-        Text(item.title)
-            .font(item.depth == 0 ? .headline : .body)
-            .lineLimit(3)
-            .multilineTextAlignment(.center)
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
-            .frame(width: item.rect.width, height: item.rect.height)
-            .background(background, in: RoundedRectangle(cornerRadius: 8))
-            .overlay(RoundedRectangle(cornerRadius: 8).stroke(store.activeNodeId == item.id ? Color.accentColor : Color.secondary.opacity(0.24), lineWidth: store.activeNodeId == item.id ? 2 : 1))
-            .contentShape(Rectangle())
-            .onTapGesture {
-                if item.id != MindMapLayout.rootId {
-                    store.activeNodeId = item.id
+        if editingNodeId == item.id {
+            TextField("", text: $editingDraftText, axis: .vertical)
+                .textFieldStyle(.plain)
+                .font(item.depth == 0 ? .headline : .body)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .frame(width: item.rect.width, height: item.rect.height)
+                .background(background, in: RoundedRectangle(cornerRadius: 8))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.accentColor, lineWidth: 2))
+                .focused($isTextFieldFocused)
+                .onSubmit {
+                    commitEdit()
                 }
-            }
-            .contextMenu {
-                if item.id == MindMapLayout.rootId {
-                    Button("新增子节点") { store.insertMindMapRootChild() }
-                } else {
-                    Button("新增同级") { store.insertAfter(item.id) }
-                    Button("新增子级") { store.insertChild(item.id) }
-                    if store.focusNodeId == item.id {
-                        Button("退出聚焦") { store.clearFocus() }
-                    } else {
-                        Button("进入此主题") { store.focusOnNode(item.id) }
+                .onExitCommand {
+                    cancelEditing()
+                }
+                .onChange(of: isTextFieldFocused) { _, isFocused in
+                    if !isFocused {
+                        handleFocusLoss()
                     }
-                    Divider()
-                    Button("删除", role: .destructive) { store.removeNode(item.id) }
                 }
-            }
+                .onAppear {
+                    if editingNodeId == item.id {
+                        beginEditing()
+                    }
+                }
+        } else {
+            Text(item.title)
+                .font(item.depth == 0 ? .headline : .body)
+                .lineLimit(3)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .frame(width: item.rect.width, height: item.rect.height)
+                .background(background, in: RoundedRectangle(cornerRadius: 8))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(store.activeNodeId == item.id ? Color.accentColor : Color.secondary.opacity(0.24), lineWidth: store.activeNodeId == item.id ? 2 : 1))
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    if item.id != MindMapLayout.rootId {
+                        store.activeNodeId = item.id
+                    }
+                }
+                .simultaneousGesture(
+                    TapGesture(count: 2)
+                        .onEnded {
+                            startEditing()
+                        }
+                )
+                .contextMenu {
+                    if item.id == MindMapLayout.rootId {
+                        Button("新增子节点") { store.insertMindMapRootChild() }
+                    } else {
+                        Button("新增同级") { store.insertAfter(item.id) }
+                        Button("新增子级") { store.insertChild(item.id) }
+                        if store.focusNodeId == item.id {
+                            Button("退出聚焦") { store.clearFocus() }
+                        } else {
+                            Button("进入此主题") { store.focusOnNode(item.id) }
+                        }
+                        Divider()
+                        Button("删除", role: .destructive) { store.removeNode(item.id) }
+                    }
+                }
+        }
     }
 
     private var background: Color {
         item.depth == 0 ? Color.accentColor.opacity(0.16) : Color(nsColor: .controlBackgroundColor)
+    }
+
+    private func startEditing() {
+        guard item.id != MindMapLayout.rootId else { return }
+        store.activeNodeId = item.id
+        editingNodeId = item.id
+    }
+
+    private func beginEditing() {
+        shouldIgnoreFocusLoss = false
+        editingDraftText = TreeOperations.findNode(in: store.activeDocument?.nodes ?? [], id: item.id)?.text ?? ""
+        DispatchQueue.main.async {
+            isTextFieldFocused = true
+        }
+    }
+
+    private func handleFocusLoss() {
+        if shouldIgnoreFocusLoss {
+            shouldIgnoreFocusLoss = false
+            return
+        }
+        let shouldCloseEditor = editingNodeId == item.id
+        DispatchQueue.main.async {
+            if shouldIgnoreFocusLoss {
+                shouldIgnoreFocusLoss = false
+                return
+            }
+            saveEdit()
+            if shouldCloseEditor, editingNodeId == item.id {
+                shouldIgnoreFocusLoss = true
+                editingNodeId = nil
+            }
+        }
+    }
+
+    private func saveEdit() {
+        store.updateNodeText(item.id, text: editingDraftText)
+        store.finishCoalescedUndo()
+    }
+
+    private func commitEdit() {
+        saveEdit()
+        shouldIgnoreFocusLoss = true
+        editingNodeId = nil
+    }
+}
+
+private struct MindMapInputMonitor: NSViewRepresentable {
+    var onScroll: (CGFloat) -> Bool
+    var onEscape: () -> Bool
+
+    func makeNSView(context: Context) -> MindMapInputMonitorView {
+        MindMapInputMonitorView()
+    }
+
+    func updateNSView(_ nsView: MindMapInputMonitorView, context: Context) {
+        nsView.onScroll = onScroll
+        nsView.onEscape = onEscape
+        nsView.installMonitorsIfNeeded()
+    }
+}
+
+private final class MindMapInputMonitorView: NSView {
+    var onScroll: ((CGFloat) -> Bool)?
+    var onEscape: (() -> Bool)?
+
+    private let monitors = MindMapEventMonitorBag()
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window == nil {
+            removeMonitors()
+        } else {
+            installMonitorsIfNeeded()
+        }
+    }
+
+    func installMonitorsIfNeeded() {
+        guard window != nil else { return }
+        if monitors.scrollMonitor == nil {
+            monitors.scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+                guard let self,
+                      self.contains(event),
+                      abs(event.scrollingDeltaY) >= abs(event.scrollingDeltaX) else {
+                    return event
+                }
+                return self.onScroll?(event.scrollingDeltaY) == true ? nil : event
+            }
+        }
+        if monitors.keyMonitor == nil {
+            monitors.keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                guard let self, self.window === event.window, event.keyCode == 53 else {
+                    return event
+                }
+                return self.onEscape?() == true ? nil : event
+            }
+        }
+    }
+
+    private func contains(_ event: NSEvent) -> Bool {
+        guard window === event.window else { return false }
+        let point = convert(event.locationInWindow, from: nil)
+        return bounds.contains(point)
+    }
+
+    private func removeMonitors() {
+        monitors.removeAll()
+    }
+}
+
+private final class MindMapEventMonitorBag {
+    var scrollMonitor: Any?
+    var keyMonitor: Any?
+
+    deinit {
+        removeAll()
+    }
+
+    func removeAll() {
+        if let scrollMonitor {
+            NSEvent.removeMonitor(scrollMonitor)
+            self.scrollMonitor = nil
+        }
+        if let keyMonitor {
+            NSEvent.removeMonitor(keyMonitor)
+            self.keyMonitor = nil
+        }
     }
 }
 

@@ -84,11 +84,11 @@ struct SidebarView: View {
 
             HStack(spacing: 12) {
                 Button { store.backupToICloud() } label: { Image(systemName: "icloud") }
-                    .help("备份当前数据到 iCloud")
+                    .help("创建 JSON 备份")
                 Button { store.toggleDarkMode() } label: { Image(systemName: store.useDarkMode ? "sun.max" : "moon") }
                     .help(store.useDarkMode ? "切换到明亮模式" : "切换到暗黑模式")
-                Button { ICloudBackupService.openDirectoryInFinder() } label: { Image(systemName: "folder") }
-                    .help("在 Finder 中打开 iCloud 备份目录")
+                Button { LocalOutlineStorage.openDocumentsDirectoryInFinder() } label: { Image(systemName: "folder") }
+                    .help("在 Finder 中打开 Markdown 保存目录")
                 Spacer()
             }
             .buttonStyle(.borderless)
@@ -96,8 +96,8 @@ struct SidebarView: View {
             HStack(alignment: .top, spacing: 8) {
                 Image(systemName: "checkmark.icloud")
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("本地保存").font(.caption.bold())
-                    Text(store.notice ?? "本地自动保存已开启").font(.caption2).foregroundStyle(.secondary).lineLimit(2)
+                    Text("iCloud Markdown").font(.caption.bold())
+                    Text(store.notice ?? "自动保存到 iCloud Drive/LocalOutline").font(.caption2).foregroundStyle(.secondary).lineLimit(2)
                 }
                 Spacer()
             }

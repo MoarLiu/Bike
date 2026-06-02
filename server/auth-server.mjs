@@ -1,4 +1,4 @@
-import { createHmac, pbkdf2Sync, timingSafeEqual } from "node:crypto";
+import { createHmac, pbkdf2, timingSafeEqual } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
 import { createServer } from "node:http";
@@ -17,6 +17,11 @@ const configPath = process.env.LOCAL_OUTLINE_CONFIG
   ? path.resolve(process.env.LOCAL_OUTLINE_CONFIG)
   : defaultConfigPath;
 const cookieName = "local_outline_session";
+const loginAttempts = new Map();
+const maxLoginFailures = 8;
+const maxLoginAttemptEntries = 5000;
+const loginWindowMs = 15 * 60 * 1000;
+const maxLoginDelayMs = 30 * 1000;
 
 const contentTypes = {
   ".css": "text/css; charset=utf-8",
@@ -69,6 +74,7 @@ const readConfig = async () => {
       sessionSecret: String(auth.sessionSecret),
       sessionMaxAgeHours: Number(auth.sessionMaxAgeHours || 168),
       secureCookies: Boolean(auth.secureCookies),
+      trustProxyHeaders: Boolean(auth.trustProxyHeaders),
     },
   };
 };
@@ -214,16 +220,83 @@ const verifyPassword = (password, passwordHash) => {
   if (scheme !== "pbkdf2" || !iterationText || !salt || !expectedHash) return false;
   const iterations = Number(iterationText);
   if (!Number.isFinite(iterations) || iterations < 100000) return false;
-  const actual = pbkdf2Sync(password, salt, iterations, 32, "sha256").toString(
-    "base64url",
-  );
-  const actualBuffer = Buffer.from(actual);
-  const expectedBuffer = Buffer.from(expectedHash);
-  return (
-    actualBuffer.length === expectedBuffer.length &&
-    timingSafeEqual(actualBuffer, expectedBuffer)
-  );
+  return new Promise((resolve) => {
+    pbkdf2(password, salt, iterations, 32, "sha256", (error, derivedKey) => {
+      if (error) {
+        resolve(false);
+        return;
+      }
+      const actualBuffer = Buffer.from(derivedKey.toString("base64url"));
+      const expectedBuffer = Buffer.from(expectedHash);
+      resolve(
+        actualBuffer.length === expectedBuffer.length &&
+          timingSafeEqual(actualBuffer, expectedBuffer),
+      );
+    });
+  });
 };
+
+const clientIp = (request, config) => {
+  const source = config.auth.trustProxyHeaders
+    ? request.headers["x-forwarded-for"]
+    : request.socket.remoteAddress;
+  return String(source || request.socket.remoteAddress || "unknown").split(",")[0].trim();
+};
+
+const loginAttemptKeys = (request, username, config) => [
+  { key: `ip:${clientIp(request, config)}:${username}`, scope: "ip" },
+  { key: `user:${username}`, scope: "user" },
+];
+
+const pruneLoginAttempts = () => {
+  const now = Date.now();
+  for (const [key, attempt] of loginAttempts) {
+    if (now - attempt.firstAt > loginWindowMs && now >= attempt.nextAllowedAt) {
+      loginAttempts.delete(key);
+    }
+  }
+  if (loginAttempts.size <= maxLoginAttemptEntries) return;
+  const overflow = loginAttempts.size - maxLoginAttemptEntries;
+  for (const key of [...loginAttempts.entries()]
+    .sort((a, b) => a[1].firstAt - b[1].firstAt)
+    .slice(0, overflow)
+    .map(([key]) => key)) {
+    loginAttempts.delete(key);
+  }
+};
+
+const loginAttempt = (key) => {
+  pruneLoginAttempts();
+  const now = Date.now();
+  const existing = loginAttempts.get(key);
+  if (!existing || now - existing.firstAt > loginWindowMs) {
+    const fresh = { failures: 0, firstAt: now, nextAllowedAt: 0 };
+    loginAttempts.set(key, fresh);
+    return fresh;
+  }
+  return existing;
+};
+
+const loginDelayMs = (failures) =>
+  Math.min(maxLoginDelayMs, Math.max(0, 2 ** Math.max(0, failures - 3) * 1000));
+
+const registerLoginFailure = (keys) => {
+  for (const { key } of keys) {
+    const attempt = loginAttempt(key);
+    attempt.failures += 1;
+    attempt.nextAllowedAt = Date.now() + loginDelayMs(attempt.failures);
+  }
+};
+
+const clearLoginFailures = (keys) => {
+  keys.forEach(({ key }) => loginAttempts.delete(key));
+};
+
+const isLoginLimited = (keys) =>
+  keys.some(({ key, scope }) => {
+    const attempt = loginAttempt(key);
+    return Date.now() < attempt.nextAllowedAt || (scope === "ip" && attempt.failures >= maxLoginFailures);
+  });
 
 const readRequestBody = (request) =>
   new Promise((resolve, reject) => {
@@ -305,10 +378,19 @@ const handleRequest = async (request, response, config) => {
     const params = new URLSearchParams(await readRequestBody(request));
     const username = String(params.get("username") || "");
     const password = String(params.get("password") || "");
+    const attemptKeys = loginAttemptKeys(request, username, config);
+    if (isLoginLimited(attemptKeys)) {
+      send(response, 429, loginPage("登录尝试过多，请稍后再试"), {
+        "Content-Type": "text/html; charset=utf-8",
+        "Retry-After": "30",
+      });
+      return;
+    }
     if (
       username === config.auth.username &&
-      verifyPassword(password, config.auth.passwordHash)
+      await verifyPassword(password, config.auth.passwordHash)
     ) {
+      clearLoginFailures(attemptKeys);
       response.writeHead(302, {
         Location: "/",
         "Set-Cookie": `${cookieName}=${encodeURIComponent(
@@ -319,6 +401,7 @@ const handleRequest = async (request, response, config) => {
       response.end();
       return;
     }
+    registerLoginFailure(attemptKeys);
     send(response, 401, loginPage("账号或密码不正确"), {
       "Content-Type": "text/html; charset=utf-8",
     });

@@ -70,7 +70,7 @@ import {
 import { documentToMarkdown, parseMarkdownDocument } from "./markdown";
 import { firstDocument, migrateWorkspace } from "./migrations";
 import { createStarterWorkspace } from "./sample";
-import { loadWorkspace, saveWorkspace } from "./storage";
+import { loadWorkspace, saveWorkspace, type WorkspaceSaveResult } from "./storage";
 import type { OutlineDocument, OutlineNode, ViewMode, Workspace } from "./types";
 import {
   addChild,
@@ -211,6 +211,7 @@ const nodeMenuColors = [
 function App() {
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
   const [ready, setReady] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [mode, setMode] = useState<AppViewMode>("outline");
   const [markdownPaneMode, setMarkdownPaneMode] = useState<MarkdownPaneMode>("split");
   const [markdownDraft, setMarkdownDraft] = useState("");
@@ -243,10 +244,43 @@ function App() {
     setNoticeKey((k) => k + 1);
   };
 
+  const showSaveResult = (result: WorkspaceSaveResult) => {
+    if (!result.ok) {
+      showNotice(`保存失败：${result.error.message}`);
+      return;
+    }
+    if (result.target === "localstorage") {
+      showNotice("IndexedDB 不可用，已临时保存到浏览器备用存储");
+    }
+  };
+
   const replaceWorkspace = (next: Workspace) => {
     workspaceRef.current = next;
     setWorkspace(next);
     return next;
+  };
+
+  const initializeWorkspace = (isMounted = () => true) => {
+    setLoadError(null);
+    setReady(false);
+    return loadWorkspace().then((result) => {
+      if (!isMounted()) return;
+      if (result.status === "error") {
+        const message = `数据加载失败，已暂停自动保存：${result.error.message}`;
+        setLoadError(message);
+        showNotice(message);
+        return;
+      }
+      const next = result.status === "loaded" ? result.workspace : createStarterWorkspace();
+      replaceWorkspace(next);
+      setActiveNodeId(firstNodeIdInWorkspace(next));
+      setReady(true);
+    }).catch((error) => {
+      if (!isMounted()) return;
+      const message = `数据加载失败，已暂停自动保存：${error instanceof Error ? error.message : String(error)}`;
+      setLoadError(message);
+      showNotice(message);
+    });
   };
 
   useEffect(() => {
@@ -268,13 +302,7 @@ function App() {
 
   useEffect(() => {
     let mounted = true;
-    loadWorkspace().then((stored) => {
-      if (!mounted) return;
-      const next = stored ?? createStarterWorkspace();
-      replaceWorkspace(next);
-      setActiveNodeId(firstNodeIdInWorkspace(next));
-      setReady(true);
-    });
+    initializeWorkspace(() => mounted);
     return () => {
       mounted = false;
     };
@@ -283,7 +311,7 @@ function App() {
   useEffect(() => {
     if (!workspace || !ready) return;
     const handle = window.setTimeout(() => {
-      saveWorkspace(workspace);
+      saveWorkspace(workspace).then(showSaveResult);
     }, 250);
     return () => window.clearTimeout(handle);
   }, [workspace, ready]);
@@ -545,8 +573,12 @@ function App() {
       event.stopPropagation();
       const nextWorkspace = flushPendingEditsRef.current() ?? workspaceRef.current;
       if (!nextWorkspace) return;
-      await saveWorkspace(nextWorkspace);
-      showNotice("已保存到本地");
+      const result = await saveWorkspace(nextWorkspace);
+      if (result.ok) {
+        showNotice(result.target === "indexeddb" ? "已保存到本地" : "IndexedDB 不可用，已临时保存到浏览器备用存储");
+      } else {
+        showNotice(`保存失败：${result.error.message}`);
+      }
     };
 
     window.addEventListener("keydown", handleSaveShortcut, { capture: true });
@@ -946,11 +978,15 @@ function App() {
       showNotice(result.error ?? "没有找到可用的 iCloud 备份");
       return;
     }
-    const next = migrateWorkspace(result.payload);
-    replaceWorkspace(next);
-    setActiveNodeId(firstNodeIdInWorkspace(next));
-    setFocusNodeId(null);
-    showNotice(`已载入 iCloud 备份：${result.path}`);
+    try {
+      const next = migrateWorkspace(result.payload);
+      replaceWorkspace(next);
+      setActiveNodeId(firstNodeIdInWorkspace(next));
+      setFocusNodeId(null);
+      showNotice(`已载入 iCloud 备份：${result.path}`);
+    } catch (error) {
+      showNotice(`载入备份失败：${error instanceof Error ? error.message : String(error)}`);
+    }
   };
 
   const handleImport = async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -987,6 +1023,20 @@ function App() {
       inputRefs.current.delete(id);
     }
   };
+
+  if (loadError) {
+    return (
+      <main className="loading loading-error">
+        <section>
+          <h1>无法打开本地工作区</h1>
+          <p>{loadError}</p>
+          <button type="button" onClick={() => initializeWorkspace()}>
+            重试
+          </button>
+        </section>
+      </main>
+    );
+  }
 
   if (!workspace || !activeDocument) {
     return <div className="loading">正在打开本地工作区...</div>;

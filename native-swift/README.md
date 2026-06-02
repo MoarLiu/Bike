@@ -6,16 +6,17 @@
 
 - Minimum target: macOS 15+
 - Bundle id: `com.localoutline.native`
-- Runtime: SwiftUI + AppKit bridges + SwiftData, with a JSON fallback for command-line self-tests
+- Runtime: SwiftUI + AppKit bridges + SwiftData compatibility/migration, with Markdown files as the primary storage
 - Compatibility format: current `Workspace version: 1` JSON
-- iCloud backup path: `~/Library/Mobile Documents/com~apple~CloudDocs/LocalOutline/`
+- Markdown storage path: `~/Library/Mobile Documents/com~apple~CloudDocs/LocalOutline/`
+- JSON backup path: `~/Library/Mobile Documents/com~apple~CloudDocs/LocalOutline/.backups/`
 
 This workspace currently uses SwiftPM. `scripts/build_and_run.sh` builds a native `.app` bundle under `native-swift/dist/`. The release script writes a local DMG under `native-swift/release/`; build outputs are ignored by `native-swift/.gitignore`.
 
 ## Persistence / Backup
 
 - `Sources/LocalOutlineNative/Persistence/Records.swift` contains the SwiftData models.
-- `Sources/LocalOutlineNative/Persistence/WorkspaceRepository.swift` owns workspace load/save, debounced-save persistence targets, JSON fallback storage, snapshot creation/listing, and snapshot restore.
+- `Sources/LocalOutlineNative/Persistence/WorkspaceRepository.swift` owns workspace load/save, debounced-save persistence targets, iCloud Drive Markdown storage, legacy migration, snapshot creation/listing, and snapshot restore.
 - `Sources/LocalOutlineNative/Services/AppStore.swift` debounces autosave with a cancellable `Task.sleep`.
 - `Sources/LocalOutlineNative/Services/BackupService.swift` contains `ICloudBackupService` and `FilePanelService`.
 - `Sources/LocalOutlineNative/Core/SelfTestRunner.swift` covers JSON compatibility, repository save/load, snapshots, restore, and iCloud backup file behavior.

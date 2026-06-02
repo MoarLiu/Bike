@@ -11,8 +11,12 @@ final class WorkspaceRepository {
     private let context: ModelContext
     #endif
 
-    private let storeURL: URL
     private let snapshotsURL: URL
+    private let backupsURL: URL
+    private let markdownDirectoryURL: URL
+    private let metadataURL: URL
+    private let legacyStoreURL: URL
+    private let legacyICloudBackupURL: URL
 
     init(inMemory: Bool = false, baseURL: URL? = nil) throws {
         #if !LOCAL_OUTLINE_CLI_BUILD
@@ -27,18 +31,37 @@ final class WorkspaceRepository {
         context = ModelContext(container)
         #endif
 
-        let base = baseURL ?? (
+        let legacyBase = (
             inMemory
                 ? URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("LocalOutlineNative-\(UUID().uuidString)", isDirectory: true)
                 : FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Local Outline Native", isDirectory: true)
         )
+        let base = baseURL ?? LocalOutlineStorage.documentsDirectoryURL()
         try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
-        storeURL = base.appendingPathComponent("workspace.json")
-        snapshotsURL = base.appendingPathComponent("snapshots", isDirectory: true)
+        markdownDirectoryURL = base
+        metadataURL = base.appendingPathComponent(".localoutline-workspace.json")
+        legacyICloudBackupURL = base.appendingPathComponent(ICloudBackupService.latestBackupFilename)
+        legacyStoreURL = legacyBase.appendingPathComponent("workspace.json")
+        snapshotsURL = base.appendingPathComponent(".snapshots", isDirectory: true)
+        backupsURL = base.appendingPathComponent(".backups", isDirectory: true)
         try FileManager.default.createDirectory(at: snapshotsURL, withIntermediateDirectories: true)
     }
 
     func loadWorkspace() throws -> WorkspaceV1DTO {
+        let markdownWorkspace = try loadMarkdownWorkspaceIfAvailable()
+        if let markdownWorkspace {
+            return markdownWorkspace
+        }
+
+        if FileManager.default.fileExists(atPath: legacyStoreURL.path) {
+            let data = try Data(contentsOf: legacyStoreURL)
+            let workspace = try ImportExportCodec.jsonDecoder.decode(WorkspaceV1DTO.self, from: data)
+            let normalized = TreeOperations.normalizeWorkspace(workspace)
+            try saveWorkspace(normalized)
+            try archiveLegacyRootBackups()
+            return normalized
+        }
+
         #if !LOCAL_OUTLINE_CLI_BUILD
         let documents = try context.fetch(FetchDescriptor<DocumentRecord>(sortBy: [SortDescriptor(\DocumentRecord.sortKey)]))
             .filter { $0.deletedAt == nil }
@@ -57,18 +80,25 @@ final class WorkspaceRepository {
                 )
             }
             let active = try setting("activeDocumentId") ?? docs.first?.id ?? ""
-            return TreeOperations.normalizeWorkspace(WorkspaceV1DTO(activeDocumentId: active, documents: docs))
+            let normalized = TreeOperations.normalizeWorkspace(WorkspaceV1DTO(activeDocumentId: active, documents: docs))
+            try saveWorkspace(normalized)
+            try archiveLegacyRootBackups()
+            return normalized
         }
         #endif
 
-        guard FileManager.default.fileExists(atPath: storeURL.path) else {
-            let starter = SampleData.starterWorkspace()
-            try saveWorkspace(starter)
-            return starter
+        if FileManager.default.fileExists(atPath: legacyICloudBackupURL.path) {
+            let data = try Data(contentsOf: legacyICloudBackupURL)
+            let workspace = try ImportExportCodec.jsonDecoder.decode(WorkspaceV1DTO.self, from: data)
+            let normalized = TreeOperations.normalizeWorkspace(workspace)
+            try saveWorkspace(normalized)
+            try archiveLegacyRootBackups()
+            return normalized
         }
-        let data = try Data(contentsOf: storeURL)
-        let workspace = try ImportExportCodec.jsonDecoder.decode(WorkspaceV1DTO.self, from: data)
-        return TreeOperations.normalizeWorkspace(workspace)
+
+        let starter = SampleData.starterWorkspace()
+        try saveWorkspace(starter)
+        return starter
     }
 
     func replaceWorkspace(_ workspace: WorkspaceV1DTO, snapshotReason: String? = "replace") throws {
@@ -88,7 +118,7 @@ final class WorkspaceRepository {
         try context.save()
         #endif
 
-        try saveJSON(normalized)
+        try saveMarkdownWorkspace(normalized)
     }
 
     func saveWorkspace(_ workspace: WorkspaceV1DTO) throws {
@@ -143,9 +173,193 @@ final class WorkspaceRepository {
         return normalized
     }
 
-    private func saveJSON(_ workspace: WorkspaceV1DTO) throws {
-        let data = try ImportExportCodec.exportWorkspace(workspace)
-        try data.write(to: storeURL, options: .atomic)
+    private func loadMarkdownWorkspaceIfAvailable() throws -> WorkspaceV1DTO? {
+        guard FileManager.default.fileExists(atPath: markdownDirectoryURL.path) else { return nil }
+        let metadata = try loadMetadata()
+        let urls = try FileManager.default.contentsOfDirectory(
+            at: markdownDirectoryURL,
+            includingPropertiesForKeys: [.contentModificationDateKey, .creationDateKey],
+            options: [.skipsHiddenFiles]
+        )
+        let markdownURLs = urls
+            .filter { ["md", "markdown"].contains($0.pathExtension.lowercased()) }
+            .sorted { left, right in
+                let leftSort = metadata.documents.first { $0.filename == left.lastPathComponent }?.sortKey ?? Int.max
+                let rightSort = metadata.documents.first { $0.filename == right.lastPathComponent }?.sortKey ?? Int.max
+                if leftSort != rightSort { return leftSort < rightSort }
+                return left.lastPathComponent.localizedStandardCompare(right.lastPathComponent) == .orderedAscending
+            }
+        guard !markdownURLs.isEmpty else { return nil }
+
+        var documents: [OutlineDocumentDTO] = []
+        var loadedMetadataDocuments: [PersistedDocumentMetadata] = []
+        for (index, url) in markdownURLs.enumerated() {
+            let content = try String(contentsOf: url, encoding: .utf8)
+            let fileId = url.lastPathComponent
+            let item = metadata.documents.first { $0.filename == fileId }
+            let values = try url.resourceValues(forKeys: [.contentModificationDateKey, .creationDateKey])
+            let fileModifiedAt = values.contentModificationDate.map { ISO8601DateFormatter.localOutline.string(from: $0) }
+            let modifiedAt = item?.updatedAt ?? fileModifiedAt ?? Date.isoNow
+            let createdAt = item?.createdAt ?? values.creationDate.map { ISO8601DateFormatter.localOutline.string(from: $0) } ?? modifiedAt
+            let document = MarkdownCodec.parseDocument(
+                content,
+                filename: url.lastPathComponent,
+                previousDocument: item.map {
+                    OutlineDocumentDTO(
+                        id: $0.id,
+                        title: $0.title,
+                        createdAt: createdAt,
+                        updatedAt: $0.updatedAt,
+                        nodes: [OutlineNodeDTO(text: Defaults.nodeText)]
+                    )
+                },
+                documentId: item?.id,
+                now: modifiedAt
+            )
+            var normalizedDocument = document
+            normalizedDocument.createdAt = createdAt
+            normalizedDocument.updatedAt = modifiedAt
+            documents.append(normalizedDocument)
+            loadedMetadataDocuments.append(PersistedDocumentMetadata(
+                id: normalizedDocument.id,
+                filename: fileId,
+                title: normalizedDocument.title,
+                createdAt: normalizedDocument.createdAt,
+                updatedAt: normalizedDocument.updatedAt,
+                sortKey: index
+            ))
+        }
+
+        let active = documents.contains { $0.id == metadata.activeDocumentId } ? metadata.activeDocumentId : documents[0].id
+        let loadedMetadata = PersistedWorkspaceMetadata(activeDocumentId: active, documents: loadedMetadataDocuments)
+        if loadedMetadata != metadata {
+            try writeMetadata(loadedMetadata)
+        }
+        return TreeOperations.normalizeWorkspace(WorkspaceV1DTO(activeDocumentId: active, documents: documents))
+    }
+
+    private func saveMarkdownWorkspace(_ workspace: WorkspaceV1DTO) throws {
+        try FileManager.default.createDirectory(at: markdownDirectoryURL, withIntermediateDirectories: true)
+        let previous = try loadMetadata()
+        var usedFilenames = Set<String>()
+        var metadataDocuments: [PersistedDocumentMetadata] = []
+        var supersededURLs: [URL] = []
+
+        for (index, document) in workspace.documents.enumerated() {
+            let prior = previous.documents.first { $0.id == document.id }
+            let filename = markdownFilename(for: document, prior: prior, usedFilenames: &usedFilenames)
+            let targetURL = markdownDirectoryURL.appendingPathComponent(filename)
+            if let prior, prior.filename != filename {
+                let oldURL = markdownDirectoryURL.appendingPathComponent(prior.filename)
+                if FileManager.default.fileExists(atPath: oldURL.path), !FileManager.default.fileExists(atPath: targetURL.path) {
+                    try FileManager.default.moveItem(at: oldURL, to: targetURL)
+                } else if FileManager.default.fileExists(atPath: oldURL.path) {
+                    supersededURLs.append(oldURL)
+                }
+            }
+            let data = Data((MarkdownCodec.documentMarkdown(document) + "\n").utf8)
+            if FileManager.default.fileExists(atPath: targetURL.path) {
+                let existingData = try Data(contentsOf: targetURL)
+                if existingData != data {
+                    try data.write(to: targetURL, options: .atomic)
+                }
+            } else {
+                try data.write(to: targetURL, options: .atomic)
+            }
+            metadataDocuments.append(PersistedDocumentMetadata(
+                id: document.id,
+                filename: filename,
+                title: document.title,
+                createdAt: document.createdAt,
+                updatedAt: document.updatedAt,
+                sortKey: index
+            ))
+        }
+
+        let currentFilenames = Set(metadataDocuments.map { $0.filename.lowercased() })
+        for url in supersededURLs where !currentFilenames.contains(url.lastPathComponent.lowercased()) {
+            if FileManager.default.fileExists(atPath: url.path) {
+                try FileManager.default.removeItem(at: url)
+            }
+        }
+
+        let activeIds = Set(workspace.documents.map(\.id))
+        for stale in previous.documents where !activeIds.contains(stale.id) {
+            guard !currentFilenames.contains(stale.filename.lowercased()) else { continue }
+            let staleURL = markdownDirectoryURL.appendingPathComponent(stale.filename)
+            if FileManager.default.fileExists(atPath: staleURL.path) {
+                try FileManager.default.removeItem(at: staleURL)
+            }
+        }
+
+        let metadata = PersistedWorkspaceMetadata(activeDocumentId: workspace.activeDocumentId, documents: metadataDocuments)
+        try writeMetadata(metadata)
+    }
+
+    private func markdownFilename(
+        for document: OutlineDocumentDTO,
+        prior: PersistedDocumentMetadata?,
+        usedFilenames: inout Set<String>
+    ) -> String {
+        let base = TreeOperations.sanitizeFilenameBase(document.title)
+        let currentBase = prior?.filename.replacingOccurrences(of: #"\.(md|markdown)$"#, with: "", options: [.regularExpression, .caseInsensitive])
+        let titleChanged = prior.map { $0.title != document.title } ?? true
+        let preferredBase = titleChanged ? base : currentBase ?? base
+        var candidate = "\(preferredBase).md"
+        var suffix = 2
+        while usedFilenames.contains(candidate.lowercased()) {
+            candidate = "\(preferredBase) \(suffix).md"
+            suffix += 1
+        }
+        usedFilenames.insert(candidate.lowercased())
+        return candidate
+    }
+
+    private func loadMetadata() throws -> PersistedWorkspaceMetadata {
+        guard FileManager.default.fileExists(atPath: metadataURL.path) else {
+            return PersistedWorkspaceMetadata(activeDocumentId: "", documents: [])
+        }
+        let data = try Data(contentsOf: metadataURL)
+        return (try? ImportExportCodec.jsonDecoder.decode(PersistedWorkspaceMetadata.self, from: data))
+            ?? PersistedWorkspaceMetadata(activeDocumentId: "", documents: [])
+    }
+
+    private func writeMetadata(_ metadata: PersistedWorkspaceMetadata) throws {
+        let metadataData = try ImportExportCodec.jsonEncoder.encode(metadata)
+        try metadataData.write(to: metadataURL, options: .atomic)
+    }
+
+    private func archiveLegacyRootBackups() throws {
+        guard FileManager.default.fileExists(atPath: markdownDirectoryURL.path) else { return }
+        let urls = try FileManager.default.contentsOfDirectory(
+            at: markdownDirectoryURL,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        )
+        let backupURLs = urls.filter { url in
+            let name = url.lastPathComponent
+            return name == ICloudBackupService.latestBackupFilename
+                || (name.hasPrefix(ICloudBackupService.stampedBackupPrefix) && name.hasSuffix(".json"))
+        }
+        guard !backupURLs.isEmpty else { return }
+
+        try FileManager.default.createDirectory(at: backupsURL, withIntermediateDirectories: true)
+        for url in backupURLs {
+            let destination = uniqueArchivedBackupURL(for: url.lastPathComponent)
+            try FileManager.default.moveItem(at: url, to: destination)
+        }
+    }
+
+    private func uniqueArchivedBackupURL(for filename: String) -> URL {
+        let base = (filename as NSString).deletingPathExtension
+        let ext = (filename as NSString).pathExtension
+        var candidate = backupsURL.appendingPathComponent(filename)
+        var suffix = 2
+        while FileManager.default.fileExists(atPath: candidate.path) {
+            candidate = backupsURL.appendingPathComponent("\(base)-migrated-\(suffix).\(ext)")
+            suffix += 1
+        }
+        return candidate
     }
 
     private func snapshotReason(from url: URL) -> String {
@@ -199,4 +413,18 @@ struct SnapshotInfo: Identifiable, Equatable {
     var reason: String
     var createdAt: Date
     var url: URL
+}
+
+private struct PersistedWorkspaceMetadata: Codable, Equatable {
+    var activeDocumentId: String
+    var documents: [PersistedDocumentMetadata]
+}
+
+private struct PersistedDocumentMetadata: Codable, Equatable {
+    var id: String
+    var filename: String
+    var title: String
+    var createdAt: String
+    var updatedAt: String
+    var sortKey: Int
 }
