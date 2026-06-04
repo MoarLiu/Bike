@@ -1,6 +1,6 @@
 {
   "name": "local-outline",
-  "version": "1.1.2",
+  "version": "1.2.0",
   "private": true,
   "description": "Local-first outline note and mind map app with optional iCloud Drive backup.",
   "main": "electron/main.cjs",
@@ -11,6 +11,9 @@
     "preview": "vite preview --host 127.0.0.1",
     "auth:hash": "node scripts/hash-password.mjs",
     "icon:win": "node scripts/create-windows-icon.mjs",
+    "mcp:localoutline": "node mcp/localoutline-server.mjs",
+    "mcp:test": "node --test mcp/*.test.mjs",
+    "mcp:smoke": "node mcp/localoutline-server.smoke.mjs",
     "serve:auth": "node server/auth-server.mjs",
     "start:web": "npm run build && npm run serve:auth",
     "electron:dev": "concurrently -k \"vite --host 127.0.0.1\" \"wait-on http://127.0.0.1:5173 && electron .\"",
@@ -19,11 +22,13 @@
     "electron:dist:win": "npm run build && electron-builder --win zip --x64"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@pdf-lib/fontkit": "^1.1.1",
     "lucide-react": "^0.468.0",
     "pdf-lib": "^1.17.1",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react-dom": "^18.3.1",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/react": "^18.3.3",
@@ -46,6 +51,8 @@
     "files": [
       "dist/**/*",
       "electron/**/*",
+      "mcp/localoutline-core.mjs",
+      "mcp/localoutline-server.mjs",
       "package.json"
     ],
     "afterPack": "scripts/after-pack.cjs",

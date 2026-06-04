@@ -2,7 +2,7 @@
 
 一个参考幕布产品逻辑的本地优先大纲工具：以树状大纲为核心数据模型，同一份数据可切换为大纲、思维导图和演示视图。数据默认存储在浏览器本地 IndexedDB，桌面版可自动备份到 iCloud Drive。
 
-当前版本：1.1.2。
+当前版本：1.2.0。
 
 ## 运行
 
@@ -30,6 +30,54 @@ npm run electron:dist:win
 ```
 
 产物会输出到 `release/`，包括 macOS 的 `Local Outline-版本号-arm64.dmg` 和 Windows 的 `Local Outline-版本号-x64.zip`。当前使用本机 ad-hoc/未签名打包，适合个人安装测试；正式分发给其他用户时需要接入 Apple Developer ID 签名、notarization 或 Windows 代码签名。
+
+## MCP 服务
+
+1.2.0 增加了只读 MCP 服务，方便 Codex、Claude 等 agent 读取本地大纲。MVP 默认读取工作区 JSON 文件，macOS 上会优先使用 Electron 备份路径：
+
+```text
+~/Library/Mobile Documents/com~apple~CloudDocs/LocalOutline/localoutline-workspace.json
+```
+
+如果该文件不存在，会自动尝试 Swift 原生版备份路径：
+
+```text
+~/Library/Mobile Documents/com~apple~CloudDocs/LocalOutline/.backups/localoutline-workspace.json
+```
+
+启动 MCP 服务：
+
+```bash
+npm run mcp:localoutline
+```
+
+如果要指定工作区文件：
+
+```bash
+LOCAL_OUTLINE_WORKSPACE_PATH=/absolute/path/to/localoutline-workspace.json npm run mcp:localoutline
+```
+
+可用能力：
+
+- Tools：`get_workspace_summary`、`list_documents`、`search_outline`、`get_document`、`get_node`、`export_document`。
+- Resources：`localoutline://workspace/summary`、`localoutline://documents`、`localoutline://document/{documentId}`、`localoutline://document-markdown/{documentId}`、`localoutline://node/{documentId}/{nodeId}`。
+- Prompts：`summarize_outline`、`outline_to_prd`、`outline_to_tasks`、`review_outline_structure`。
+
+Codex/Claude Desktop 可按 stdio MCP server 配置本地命令，例如：
+
+```json
+{
+  "mcpServers": {
+    "localoutline": {
+      "command": "npm",
+      "args": ["--prefix", "/absolute/path/to/local-outline", "run", "mcp:localoutline"],
+      "env": {
+        "LOCAL_OUTLINE_WORKSPACE_PATH": "/absolute/path/to/localoutline-workspace.json"
+      }
+    }
+  }
+}
+```
 
 ## 公网单用户部署
 
@@ -75,9 +123,11 @@ npm run start:web
 - 本地优先：浏览器 IndexedDB 自动保存，Ctrl/Cmd+S 可触发本地保存。
 - 输入空间：大纲编辑宽度提升到约 1040px，脑图节点支持更长单行文本。
 - iCloud 备份：浏览器版可选择 iCloud Drive 文件夹写入；Electron 版写入 `~/Library/Mobile Documents/com~apple~CloudDocs/LocalOutline/`。
+- MCP 服务：只读暴露本地工作区摘要、文档列表、全文搜索、文档读取、节点上下文和导出能力。
 
 ## 后续方向
 
 - 用 File System Access API 绑定固定工作区文件夹，实现更接近原生的打开/保存体验。
 - 用 Electron Builder 或 Tauri 打包 macOS 应用。
 - 增加版本历史、节点级反向链接、附件本地库、PDF/图片导出。
+- MCP 后续增加受控写入、dry-run 预览、快照和冲突检测。
