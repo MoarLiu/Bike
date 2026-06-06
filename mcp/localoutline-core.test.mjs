@@ -101,6 +101,33 @@ const makeStore = async ({ mode = "readonly" } = {}) => {
   });
 };
 
+const makeChain = (prefix, depth) => {
+  const root = {
+    id: `${prefix}_0`,
+    text: `${prefix} 0`,
+    note: "",
+    checked: false,
+    collapsed: false,
+    color: "plain",
+    children: [],
+  };
+  let current = root;
+  for (let index = 1; index < depth; index += 1) {
+    const child = {
+      id: `${prefix}_${index}`,
+      text: `${prefix} ${index}`,
+      note: "",
+      checked: false,
+      collapsed: false,
+      color: "plain",
+      children: [],
+    };
+    current.children = [child];
+    current = child;
+  }
+  return root;
+};
+
 test("summarizes and lists workspace documents", async () => {
   const store = await makeStore();
   const snapshot = await store.load();
@@ -152,6 +179,20 @@ test("searches title, node text, and notes with breadcrumbs", async () => {
 
   const textMatches = searchOutline(snapshot, { query: "Tool", fields: ["text"] });
   assert.equal(textMatches.matches[0].nodeId, "node_tools");
+});
+
+test("search results do not exceed the requested limit", async () => {
+  const store = await makeStore();
+  const snapshot = await store.load();
+
+  const matches = searchOutline(snapshot, {
+    query: "需求",
+    fields: ["text", "note"],
+    limit: 1,
+  });
+
+  assert.equal(matches.matches.length, 1);
+  assert.equal(matches.truncated, true);
 });
 
 test("returns compact documents, markdown, nodes, and exports", async () => {
@@ -402,6 +443,86 @@ test("dry-run create_node returns confirmation args with stable ids and revision
   }).node;
   assert.equal(node.text, "预览后确认");
   assert.equal(node.children[0].id, preview.confirmationArgs.children[0].id);
+});
+
+test("rejects write payloads that exceed node depth without stack overflow", async () => {
+  const store = await makeStore();
+  const snapshot = await store.load();
+  const root = { text: "root", children: [] };
+  let current = root;
+  for (let index = 0; index < 2000; index += 1) {
+    const child = { text: `deep ${index}`, children: [] };
+    current.children = [child];
+    current = child;
+  }
+
+  await assert.rejects(
+    createDocumentForMcp(store, {
+      expectedRevision: snapshot.revision,
+      dryRun: true,
+      title: "Too deep",
+      initialNodes: [root],
+    }),
+    (error) => {
+      assert.match(error.message, /写入节点深度超过上限 64/);
+      assert.doesNotMatch(error.stack ?? "", /Maximum call stack size exceeded/);
+      return true;
+    },
+  );
+});
+
+test("rejects write payloads that exceed maxDocumentNodes", async () => {
+  const store = await makeStore();
+  store.config.maxDocumentNodes = 4;
+  const snapshot = await store.load();
+
+  await assert.rejects(
+    appendChildrenForMcp(store, {
+      expectedRevision: snapshot.revision,
+      dryRun: true,
+      documentId: "doc_mcp",
+      children: [{ text: "extra A" }, { text: "extra B" }],
+    }),
+    /写入节点数量超过上限 4/,
+  );
+});
+
+test("rejects move_node when the resulting subtree depth exceeds the write limit", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "localoutline-mcp-"));
+  const workspacePath = path.join(directory, "localoutline-workspace.json");
+  const workspace = {
+    version: 1,
+    activeDocumentId: "doc_deep_move",
+    documents: [
+      {
+        id: "doc_deep_move",
+        title: "Deep Move",
+        createdAt: "2026-06-04T08:00:00.000Z",
+        updatedAt: "2026-06-04T09:00:00.000Z",
+        nodes: [makeChain("source", 50), makeChain("target", 50)],
+      },
+    ],
+  };
+  await fs.writeFile(workspacePath, JSON.stringify(workspace, null, 2), "utf8");
+  const store = new WorkspaceStore({
+    workspacePath,
+    mode: "readonly",
+    debug: true,
+    maxSearchResults: 50,
+    maxDocumentNodes: 2000,
+  });
+  const snapshot = await store.load();
+
+  await assert.rejects(
+    moveNodeForMcp(store, {
+      expectedRevision: snapshot.revision,
+      dryRun: true,
+      documentId: "doc_deep_move",
+      nodeId: "source_0",
+      targetParentNodeId: "target_49",
+    }),
+    /写入节点深度超过上限 64/,
+  );
 });
 
 test("rejects real writes in readonly mode and stale revisions", async () => {

@@ -36,6 +36,8 @@ npm run auth:hash -- "你的登录密码"
 
 `secureCookies` 在 HTTPS 后面应设置为 `true`；本机 HTTP 调试时用 `false`。
 
+`trustProxyHeaders` 默认保持 `false`。只有当服务部署在可信反向代理后面，且代理会覆盖客户端传入的 `X-Forwarded-For` 头时，才应开启它。
+
 ## 启动
 
 ```bash

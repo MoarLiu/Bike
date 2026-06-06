@@ -22,6 +22,24 @@ const maxLoginFailures = 8;
 const maxLoginAttemptEntries = 5000;
 const loginWindowMs = 15 * 60 * 1000;
 const maxLoginDelayMs = 30 * 1000;
+const contentSecurityPolicy = [
+  "default-src 'self'",
+  "script-src 'self'",
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' data:",
+  "font-src 'self' data:",
+  "connect-src 'self'",
+  "object-src 'none'",
+  "base-uri 'self'",
+  "form-action 'self'",
+  "frame-ancestors 'none'",
+].join("; ");
+const securityHeaders = {
+  "Content-Security-Policy": contentSecurityPolicy,
+  "X-Content-Type-Options": "nosniff",
+  "X-Frame-Options": "DENY",
+  "Referrer-Policy": "same-origin",
+};
 
 const contentTypes = {
   ".css": "text/css; charset=utf-8",
@@ -142,8 +160,18 @@ const html = (body) => `<!doctype html>
 <body>${body}</body>
 </html>`;
 
+const escapeHtml = (value) =>
+  String(value).replace(/[&<>"']/g, (character) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    "\"": "&quot;",
+    "'": "&#39;",
+  })[character]);
+
 const send = (response, statusCode, body, headers = {}) => {
   response.writeHead(statusCode, {
+    ...securityHeaders,
     "Cache-Control": "no-store",
     ...headers,
   });
@@ -152,6 +180,7 @@ const send = (response, statusCode, body, headers = {}) => {
 
 const redirect = (response, location) => {
   response.writeHead(302, {
+    ...securityHeaders,
     Location: location,
     "Cache-Control": "no-store",
   });
@@ -316,7 +345,7 @@ const loginPage = (error = "") =>
   html(`<main>
   <h1>Local Outline</h1>
   <p>请输入部署配置里的单用户账号。登录后才能访问你的本地优先大纲工具。</p>
-  ${error ? `<div class="error">${error}</div>` : ""}
+  ${error ? `<div class="error">${escapeHtml(error)}</div>` : ""}
   <form method="post" action="/auth/login">
     <label>
       账号
@@ -339,7 +368,7 @@ const serveStatic = async (request, response) => {
   const pathname = rawPathname === "/" ? "/index.html" : rawPathname;
   const filePath = path.normalize(path.join(distDir, pathname));
 
-  if (!filePath.startsWith(distDir)) {
+  if (filePath !== distDir && !filePath.startsWith(`${distDir}${path.sep}`)) {
     send(response, 403, "Forbidden", { "Content-Type": "text/plain; charset=utf-8" });
     return;
   }
@@ -354,6 +383,7 @@ const serveStatic = async (request, response) => {
 
   const extension = path.extname(target).toLowerCase();
   response.writeHead(200, {
+    ...securityHeaders,
     "Content-Type": contentTypes[extension] || "application/octet-stream",
     "Cache-Control":
       extension === ".html" ? "no-store" : "private, max-age=31536000, immutable",
@@ -392,6 +422,7 @@ const handleRequest = async (request, response, config) => {
     ) {
       clearLoginFailures(attemptKeys);
       response.writeHead(302, {
+        ...securityHeaders,
         Location: "/",
         "Set-Cookie": `${cookieName}=${encodeURIComponent(
           createSessionToken(config),
@@ -413,6 +444,7 @@ const handleRequest = async (request, response, config) => {
     url.pathname === "/auth/logout"
   ) {
     response.writeHead(302, {
+      ...securityHeaders,
       Location: "/login",
       "Set-Cookie": `${cookieName}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0`,
       "Cache-Control": "no-store",

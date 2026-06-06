@@ -15,6 +15,7 @@ const HARD_LIMIT = 100;
 const WRITE_LOCK_TIMEOUT_MS = 5000;
 const WRITE_LOCK_STALE_MS = 10 * 60 * 1000;
 const WRITE_LOCK_RETRY_MS = 50;
+const MAX_WRITE_NODE_DEPTH = 64;
 const ISO_UTC_TIMESTAMP_PATTERN =
   /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d{1,3}))?Z$/;
 
@@ -833,7 +834,56 @@ const createdNodeIds = (nodes) => {
   return ids;
 };
 
-const nodeConfirmationInput = (node) => ({
+const subtreeMaxRelativeDepth = (node) => {
+  let maxDepth = 0;
+  const stack = [{ node, depth: 0 }];
+  while (stack.length) {
+    const frame = stack.pop();
+    if (!frame?.node) continue;
+    maxDepth = Math.max(maxDepth, frame.depth);
+    const children = nodeChildren(frame.node);
+    for (let index = 0; index < children.length; index += 1) {
+      stack.push({ node: children[index], depth: frame.depth + 1 });
+    }
+  }
+  return maxDepth;
+};
+
+const writeNodeLimits = (store) => ({
+  maxDepth: MAX_WRITE_NODE_DEPTH,
+  maxNodes: optionalNumber(store?.config?.maxDocumentNodes, 2000, 1, 50000),
+});
+
+const assertWritableNodeBudget = (
+  rawNodes,
+  { maxDepth = MAX_WRITE_NODE_DEPTH, maxNodes, existingNodes = 0, baseDepth = 0 },
+) => {
+  const roots = Array.isArray(rawNodes) ? rawNodes : [rawNodes];
+  let addedNodes = 0;
+  const stack = roots.map((node) => ({ node, depth: baseDepth }));
+
+  while (stack.length) {
+    const frame = stack.pop();
+    addedNodes += 1;
+    if (frame.depth > maxDepth) {
+      throw new Error(`写入节点深度超过上限 ${maxDepth}`);
+    }
+    if (existingNodes + addedNodes > maxNodes) {
+      throw new Error(`写入节点数量超过上限 ${maxNodes}`);
+    }
+
+    const children = isRecord(frame.node) && Array.isArray(frame.node.children)
+      ? frame.node.children
+      : [];
+    for (let index = 0; index < children.length; index += 1) {
+      stack.push({ node: children[index], depth: frame.depth + 1 });
+    }
+  }
+
+  return addedNodes;
+};
+
+const nodeConfirmationFields = (node) => ({
   id: node.id,
   text: node.text,
   note: node.note,
@@ -841,26 +891,59 @@ const nodeConfirmationInput = (node) => ({
   collapsed: node.collapsed === true,
   color: normalizeColor(node.color),
   isTodo: node.isTodo === true,
-  children: nodeChildren(node).map(nodeConfirmationInput),
+  children: [],
 });
 
-const createWritableNode = (rawNode = {}, usedIds) => {
+const nodeConfirmationInput = (node) => {
+  const root = nodeConfirmationFields(node);
+  const stack = [{ source: node, target: root }];
+
+  while (stack.length) {
+    const { source, target } = stack.pop();
+    const children = nodeChildren(source);
+    for (let index = 0; index < children.length; index += 1) {
+      const child = nodeConfirmationFields(children[index]);
+      target.children[index] = child;
+      stack.push({ source: children[index], target: child });
+    }
+  }
+
+  return root;
+};
+
+const createWritableNodeShallow = (rawNode = {}, usedIds) => {
+  const raw = isRecord(rawNode) ? rawNode : {};
   const node = {
-    ...createNode(textOr(rawNode.text, DEFAULT_NODE_TEXT)),
-    id: uniqueId(rawNode.id, usedIds),
-    note: textOr(rawNode.note, ""),
-    checked: rawNode.checked === true,
-    collapsed: rawNode.collapsed === true,
-    color: normalizeColor(textOr(rawNode.color, "plain")),
-    isTodo: rawNode.isTodo === true || rawNode.checked === true,
+    ...createNode(textOr(raw.text, DEFAULT_NODE_TEXT)),
+    id: uniqueId(raw.id, usedIds),
+    note: textOr(raw.note, ""),
+    checked: raw.checked === true,
+    collapsed: raw.collapsed === true,
+    color: normalizeColor(textOr(raw.color, "plain")),
+    isTodo: raw.isTodo === true || raw.checked === true,
     children: [],
   };
-  if (Array.isArray(rawNode.children)) {
-    node.children = rawNode.children.map((child) =>
-      createWritableNode(child, usedIds),
-    );
-  }
+
   return node;
+};
+
+const createWritableNode = (rawNode = {}, usedIds) => {
+  const root = createWritableNodeShallow(rawNode, usedIds);
+  const stack = [{ rawNode, target: root }];
+
+  while (stack.length) {
+    const frame = stack.pop();
+    const children = isRecord(frame.rawNode) && Array.isArray(frame.rawNode.children)
+      ? frame.rawNode.children
+      : [];
+    for (let index = 0; index < children.length; index += 1) {
+      const child = createWritableNodeShallow(children[index], usedIds);
+      frame.target.children[index] = child;
+      stack.push({ rawNode: children[index], target: child });
+    }
+  }
+
+  return root;
 };
 
 const workspaceDocumentById = (workspace, documentId) => {
@@ -869,14 +952,25 @@ const workspaceDocumentById = (workspace, documentId) => {
   return document;
 };
 
-const locateNodeMutable = (nodes, nodeId, pathPrefix = []) => {
-  for (let index = 0; index < nodes.length; index += 1) {
-    const node = nodes[index];
-    const pathToNode = [...pathPrefix, index];
-    if (node.id === nodeId) return { node, path: pathToNode };
-    const child = locateNodeMutable(node.children || [], nodeId, pathToNode);
-    if (child) return child;
+const locateNodeMutable = (nodes, nodeId) => {
+  const stack = [];
+  for (let index = nodes.length - 1; index >= 0; index -= 1) {
+    stack.push({ node: nodes[index], path: [index] });
   }
+
+  while (stack.length) {
+    const frame = stack.pop();
+    if (!frame?.node) continue;
+    if (frame.node.id === nodeId) return { node: frame.node, path: frame.path };
+    const children = nodeChildren(frame.node);
+    for (let index = children.length - 1; index >= 0; index -= 1) {
+      stack.push({
+        node: children[index],
+        path: [...frame.path, index],
+      });
+    }
+  }
+
   return null;
 };
 
@@ -967,7 +1061,14 @@ export const createDocumentForMcp = async (store, args = {}) =>
     reason: args.reason,
     writeTimestamp: args.writeTimestamp,
     apply: (workspace, { now }) => {
+      const limits = writeNodeLimits(store);
       const usedIds = collectUsedIds(workspace);
+      assertWritableNodeBudget(
+        Array.isArray(args.initialNodes) && args.initialNodes.length
+          ? args.initialNodes
+          : [{ text: DEFAULT_NODE_TEXT }],
+        limits,
+      );
       const initialNodes = Array.isArray(args.initialNodes)
         ? args.initialNodes.map((node) => createWritableNode(node, usedIds))
         : [];
@@ -1048,6 +1149,19 @@ export const createNodeForMcp = async (store, args = {}) =>
     writeTimestamp: args.writeTimestamp,
     apply: (workspace, { now }) => {
       const document = workspaceDocumentById(workspace, args.documentId);
+      const parent = args.parentNodeId
+        ? locateNodeMutable(document.nodes, args.parentNodeId)
+        : null;
+      if (args.parentNodeId && !parent) {
+        throw new Error(`找不到父节点：${args.parentNodeId}`);
+      }
+      const parentDepth = parent ? parent.path.length : 0;
+      const limits = writeNodeLimits(store);
+      assertWritableNodeBudget(args, {
+        ...limits,
+        existingNodes: countNodes(document.nodes),
+        baseDepth: parentDepth,
+      });
       const usedIds = collectUsedIds(workspace);
       const node = createWritableNode(args, usedIds);
       const insertion = insertNodes({
@@ -1094,6 +1208,19 @@ export const appendChildrenForMcp = async (store, args = {}) =>
       if (!Array.isArray(args.children) || args.children.length === 0) {
         throw new Error("children 至少需要一个节点");
       }
+      const parent = args.parentNodeId
+        ? locateNodeMutable(document.nodes, args.parentNodeId)
+        : null;
+      if (args.parentNodeId && !parent) {
+        throw new Error(`找不到父节点：${args.parentNodeId}`);
+      }
+      const parentDepth = parent ? parent.path.length : 0;
+      const limits = writeNodeLimits(store);
+      assertWritableNodeBudget(args.children, {
+        ...limits,
+        existingNodes: countNodes(document.nodes),
+        baseDepth: parentDepth,
+      });
       const usedIds = collectUsedIds(workspace);
       const nodes = args.children.map((node) => createWritableNode(node, usedIds));
       const insertion = insertNodes({
@@ -1233,6 +1360,12 @@ export const moveNodeForMcp = async (store, args = {}) =>
         source.path.every((part, index) => targetBeforeMove.path[index] === part)
       ) {
         throw new Error("不能把节点移动到自己的子节点下面");
+      }
+      const targetBaseDepth = targetBeforeMove ? targetBeforeMove.path.length : 0;
+      const nextMaxDepth = targetBaseDepth + subtreeMaxRelativeDepth(source.node);
+      const { maxDepth } = writeNodeLimits(store);
+      if (nextMaxDepth > maxDepth) {
+        throw new Error(`写入节点深度超过上限 ${maxDepth}`);
       }
 
       const sourceSiblings = siblingsAtPathMutable(document.nodes, source.path);
@@ -1421,6 +1554,14 @@ export const searchOutline = (
         breadcrumb: [document.title],
         path: [],
       });
+      if (matches.length >= max) {
+        return {
+          query: trimmedQuery,
+          limit: max,
+          matches,
+          truncated: true,
+        };
+      }
     }
 
     const entries = snapshot.index.nodesByDocumentId.get(document.id)?.entries ?? [];
@@ -1438,6 +1579,14 @@ export const searchOutline = (
           breadcrumb: entry.breadcrumb,
           path: entry.path,
         });
+        if (matches.length >= max) {
+          return {
+            query: trimmedQuery,
+            limit: max,
+            matches,
+            truncated: true,
+          };
+        }
       }
 
       if (
@@ -1454,15 +1603,14 @@ export const searchOutline = (
           breadcrumb: entry.breadcrumb,
           path: entry.path,
         });
-      }
-
-      if (matches.length >= max) {
-        return {
-          query: trimmedQuery,
-          limit: max,
-          matches,
-          truncated: true,
-        };
+        if (matches.length >= max) {
+          return {
+            query: trimmedQuery,
+            limit: max,
+            matches,
+            truncated: true,
+          };
+        }
       }
     }
   }

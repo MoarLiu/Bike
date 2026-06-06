@@ -87,18 +87,16 @@ const writeCommonInputSchema = {
 
 const positionSchema = z.enum(["first", "last"]).optional().default("last");
 
-const writableNodeSchema = z.lazy(() =>
-  z.object({
-    id: z.string().min(1).optional(),
-    text: z.string().optional(),
-    note: z.string().optional(),
-    checked: z.boolean().optional(),
-    collapsed: z.boolean().optional(),
-    color: z.enum(["plain", "blue", "green", "amber", "rose"]).optional(),
-    isTodo: z.boolean().optional(),
-    children: z.array(writableNodeSchema).optional().default([]),
-  }),
-);
+const writableNodeSchema = z.object({
+  id: z.string().min(1).optional(),
+  text: z.string().optional(),
+  note: z.string().optional(),
+  checked: z.boolean().optional(),
+  collapsed: z.boolean().optional(),
+  color: z.enum(["plain", "blue", "green", "amber", "rose"]).optional(),
+  isTodo: z.boolean().optional(),
+  children: z.array(z.any()).optional().default([]),
+});
 
 export const createLocalOutlineMcpServer = async ({
   store,
