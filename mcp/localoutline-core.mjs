@@ -12,6 +12,11 @@ export const CURRENT_WORKSPACE_VERSION = 1;
 const VALID_COLORS = new Set(["plain", "blue", "green", "amber", "rose"]);
 const DEFAULT_LIMIT = 20;
 const HARD_LIMIT = 100;
+const WRITE_LOCK_TIMEOUT_MS = 5000;
+const WRITE_LOCK_STALE_MS = 10 * 60 * 1000;
+const WRITE_LOCK_RETRY_MS = 50;
+const ISO_UTC_TIMESTAMP_PATTERN =
+  /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d{1,3}))?Z$/;
 
 const isRecord = (value) => typeof value === "object" && value !== null;
 
@@ -38,9 +43,19 @@ const normalizeTable = (value) => {
 const uid = () =>
   `node_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 9)}`;
 
+const documentUid = () =>
+  `doc_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 9)}`;
+
 const uniqueId = (value, usedIds) => {
   const candidate = textOr(value, "").trim();
   const id = candidate && !usedIds.has(candidate) ? candidate : uid();
+  usedIds.add(id);
+  return id;
+};
+
+const uniqueDocumentId = (value, usedIds) => {
+  const candidate = textOr(value, "").trim();
+  const id = candidate && !usedIds.has(candidate) ? candidate : documentUid();
   usedIds.add(id);
   return id;
 };
@@ -247,6 +262,13 @@ const optionalBoolean = (value, fallback = false) => {
   return fallback;
 };
 
+const normalizeMode = (value) =>
+  typeof value === "string" && value.trim().toLowerCase() === "write"
+    ? "write"
+    : "readonly";
+
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 export const loadMcpConfig = async ({
   env = process.env,
   homeDir = os.homedir(),
@@ -263,7 +285,7 @@ export const loadMcpConfig = async ({
       ? fileConfig.workspacePath
       : "");
 
-  const mode =
+  const rawMode =
     env.LOCAL_OUTLINE_MCP_MODE?.trim() ||
     (isRecord(fileConfig) && typeof fileConfig.mode === "string"
       ? fileConfig.mode
@@ -279,7 +301,7 @@ export const loadMcpConfig = async ({
 
   return {
     workspacePath,
-    mode,
+    mode: normalizeMode(rawMode),
     debug: optionalBoolean(
       env.LOCAL_OUTLINE_MCP_DEBUG,
       boolOr(isRecord(fileConfig) ? fileConfig.debug : undefined, false),
@@ -435,12 +457,19 @@ export class WorkspaceStore {
   constructor(config) {
     this.config = config;
     this.cache = null;
+    this.mutationQueue = Promise.resolve();
   }
 
-  async load() {
+  async readSnapshot({ useCache = true, includeRaw = false } = {}) {
     const stats = await fs.stat(this.config.workspacePath);
     const cacheKey = `${stats.mtimeMs}:${stats.size}`;
-    if (this.cache?.cacheKey === cacheKey) return this.cache.snapshot;
+    if (useCache && this.cache?.cacheKey === cacheKey) {
+      if (!includeRaw) return this.cache.snapshot;
+      return {
+        ...this.cache.snapshot,
+        raw: await fs.readFile(this.config.workspacePath, "utf8"),
+      };
+    }
 
     const raw = await fs.readFile(this.config.workspacePath, "utf8");
     const workspace = migrateWorkspace(JSON.parse(raw));
@@ -462,12 +491,831 @@ export class WorkspaceStore {
       config: this.config,
     };
     this.cache = { cacheKey, snapshot };
-    return snapshot;
+    return includeRaw ? { ...snapshot, raw } : snapshot;
+  }
+
+  async load() {
+    return this.readSnapshot();
+  }
+
+  async mutate({
+    operation,
+    expectedRevision,
+    dryRun = true,
+    reason = "",
+    writeTimestamp = "",
+    apply,
+  }) {
+    const run = () =>
+      this.runMutation({
+        operation,
+        expectedRevision,
+        dryRun,
+        reason,
+        writeTimestamp,
+        apply,
+      });
+    const result = this.mutationQueue.then(run, run);
+    this.mutationQueue = result.catch(() => {});
+    return result;
+  }
+
+  async runMutation({
+    operation,
+    expectedRevision,
+    dryRun = true,
+    reason = "",
+    writeTimestamp = "",
+    apply,
+  }) {
+    if (typeof apply !== "function") throw new Error("缺少写入操作");
+    if (!textOr(expectedRevision, "").trim()) {
+      throw new Error("写入工具必须提供 expectedRevision");
+    }
+    const requestedTimestamp = normalizeWriteTimestamp(writeTimestamp);
+    const normalizedDryRun = dryRun !== false;
+    const run = () =>
+      this.runMutationUnlocked({
+        operation,
+        expectedRevision,
+        dryRun: normalizedDryRun,
+        reason,
+        writeTimestamp: requestedTimestamp,
+        apply,
+      });
+
+    if (!normalizedDryRun && this.config.mode === "write") {
+      return this.withWorkspaceWriteLock(run);
+    }
+
+    return run();
+  }
+
+  async runMutationUnlocked({
+    operation,
+    expectedRevision,
+    dryRun,
+    reason = "",
+    writeTimestamp = "",
+    apply,
+  }) {
+    const current = await this.readSnapshot({
+      useCache: false,
+      includeRaw: true,
+    });
+    if (expectedRevision !== current.revision) {
+      throw new Error("workspace revision 冲突，请重新读取工作区后再写入");
+    }
+
+    const now = writeTimestamp || new Date().toISOString();
+    const draft = cloneWorkspace(current.workspace);
+    const preview = apply(draft, { now, current });
+    const normalizedWorkspace = migrateWorkspace(draft);
+    const nextRaw = `${JSON.stringify(normalizedWorkspace, null, 2)}\n`;
+    const nextRevision = hashContent(nextRaw);
+    const confirmationArgs = preview.confirmationArgs
+      ? {
+          ...preview.confirmationArgs,
+          ...(textOr(reason, "") ? { reason: textOr(reason, "") } : {}),
+          expectedRevision: current.revision,
+          dryRun: false,
+          writeTimestamp: now,
+        }
+      : undefined;
+    const baseResult = {
+      operation,
+      dryRun,
+      applied: false,
+      mode: this.config.mode,
+      workspaceRevision: current.revision,
+      nextWorkspaceRevision: nextRevision,
+      reason: textOr(reason, ""),
+      ...preview,
+      ...(confirmationArgs ? { confirmationArgs } : {}),
+    };
+
+    if (dryRun) return baseResult;
+    if (this.config.mode !== "write") {
+      throw new Error("LocalOutline MCP 当前为 readonly 模式，拒绝真实写入");
+    }
+    const latestRaw = await this.assertCurrentRevision(current.revision);
+
+    const backup = await this.writeBackupSnapshot({
+      operation,
+      raw: latestRaw,
+      now,
+    });
+    await this.writeWorkspaceAtomically(nextRaw, {
+      expectedRevision: current.revision,
+    });
+    this.cache = null;
+    const nextSnapshot = await this.load();
+
+    return {
+      ...baseResult,
+      applied: true,
+      workspaceRevision: current.revision,
+      nextWorkspaceRevision: nextSnapshot.revision,
+      snapshot: backup,
+    };
+  }
+
+  async withWorkspaceWriteLock(callback) {
+    const release = await this.acquireWorkspaceWriteLock();
+    try {
+      return await callback();
+    } finally {
+      await release();
+    }
+  }
+
+  async acquireWorkspaceWriteLock() {
+    const lockPath = workspaceLockPath(this.config.workspacePath);
+    const startedAt = Date.now();
+    while (Date.now() - startedAt <= WRITE_LOCK_TIMEOUT_MS) {
+      const ownerToken = crypto.randomBytes(16).toString("hex");
+      try {
+        await fs.writeFile(lockPath, this.lockFileContent(ownerToken), {
+          encoding: "utf8",
+          flag: "wx",
+        });
+        return async () => {
+          await releaseWorkspaceWriteLock(lockPath, ownerToken);
+        };
+      } catch (error) {
+        if (error?.code !== "EEXIST") throw error;
+        await removeStaleLock(lockPath);
+        await delay(WRITE_LOCK_RETRY_MS);
+      }
+    }
+    throw new Error("工作区正在被另一个 LocalOutline MCP 写入，请稍后重试");
+  }
+
+  lockFileContent(ownerToken) {
+    return `${JSON.stringify(
+      {
+        pid: process.pid,
+        ownerToken,
+        createdAt: new Date().toISOString(),
+        workspacePath: path.basename(this.config.workspacePath),
+      },
+      null,
+      2,
+    )}\n`;
+  }
+
+  async assertCurrentRevision(expectedRevision) {
+    const raw = await fs.readFile(this.config.workspacePath, "utf8");
+    if (hashContent(raw) !== expectedRevision) {
+      throw new Error("workspace revision 冲突，请重新读取工作区后再写入");
+    }
+    return raw;
+  }
+
+  async writeBackupSnapshot({ operation, raw, now }) {
+    const backupDirectory = path.join(
+      path.dirname(this.config.workspacePath),
+      ".backups",
+    );
+    await fs.mkdir(backupDirectory, { recursive: true });
+    const revisionPrefix = hashContent(raw).slice(0, 12);
+    const randomSuffix = crypto.randomBytes(4).toString("hex");
+    const filename = `localoutline-mcp-${backupTimestamp(now)}-${revisionPrefix}-${sanitizeOperationName(operation)}-${randomSuffix}.json`;
+    const backupPath = path.join(backupDirectory, filename);
+    await fs.writeFile(backupPath, raw, { encoding: "utf8", flag: "wx" });
+    return {
+      filename,
+      path: this.config.debug ? backupPath : path.join(".backups", filename),
+      pathIsRedacted: !this.config.debug,
+      createdAt: now,
+    };
+  }
+
+  async writeWorkspaceAtomically(raw, { expectedRevision } = {}) {
+    const directory = path.dirname(this.config.workspacePath);
+    const basename = path.basename(this.config.workspacePath);
+    const tempPath = path.join(
+      directory,
+      `.${basename}.${process.pid}.${Date.now()}.${crypto.randomBytes(4).toString("hex")}.tmp`,
+    );
+    await fs.writeFile(tempPath, raw, "utf8");
+    try {
+      if (expectedRevision) await this.assertCurrentRevision(expectedRevision);
+      await fs.rename(tempPath, this.config.workspacePath);
+    } catch (error) {
+      await fs.unlink(tempPath).catch(() => {});
+      throw error;
+    }
   }
 }
 
 export const createWorkspaceStore = async (options = {}) =>
   new WorkspaceStore(options.config ?? (await loadMcpConfig(options)));
+
+const hashContent = (value) => crypto.createHash("sha256").update(value).digest("hex");
+
+const cloneWorkspace = (workspace) => JSON.parse(JSON.stringify(workspace));
+
+const workspaceLockPath = (workspacePath) =>
+  path.join(path.dirname(workspacePath), `.${path.basename(workspacePath)}.lock`);
+
+const parseWorkspaceLock = (raw) => {
+  try {
+    const parsed = JSON.parse(raw);
+    return isRecord(parsed) && typeof parsed.ownerToken === "string"
+      ? parsed
+      : {};
+  } catch {
+    return {};
+  }
+};
+
+const readWorkspaceLock = async (lockPath) => {
+  const [raw, stats] = await Promise.all([
+    fs.readFile(lockPath, "utf8"),
+    fs.stat(lockPath),
+  ]);
+  return {
+    raw,
+    ownerToken: parseWorkspaceLock(raw).ownerToken,
+    modifiedAt: stats.mtimeMs,
+  };
+};
+
+const unlinkLockIfRawMatches = async (lockPath, raw) => {
+  try {
+    if ((await fs.readFile(lockPath, "utf8")) === raw) {
+      await fs.unlink(lockPath);
+    }
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
+};
+
+const releaseWorkspaceWriteLock = async (lockPath, ownerToken) => {
+  try {
+    const lock = await readWorkspaceLock(lockPath);
+    if (lock.ownerToken === ownerToken) await fs.unlink(lockPath);
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
+};
+
+const removeStaleLock = async (lockPath) => {
+  try {
+    const lock = await readWorkspaceLock(lockPath);
+    if (Date.now() - lock.modifiedAt >= WRITE_LOCK_STALE_MS) {
+      if (lock.ownerToken) {
+        await releaseWorkspaceWriteLock(lockPath, lock.ownerToken);
+      } else {
+        await unlinkLockIfRawMatches(lockPath, lock.raw);
+      }
+    }
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
+};
+
+const normalizeWriteTimestamp = (value) => {
+  const requested = textOr(value, "").trim();
+  if (!requested) return "";
+  const match = ISO_UTC_TIMESTAMP_PATTERN.exec(requested);
+  if (!match) {
+    throw new Error(
+      "writeTimestamp 必须是 ISO 8601 UTC 时间，例如 2026-06-05T08:00:00.000Z",
+    );
+  }
+  const parsed = Date.parse(requested);
+  const canonical = `${match[1]}.${(match[2] ?? "").padEnd(3, "0")}Z`;
+  if (!Number.isFinite(parsed) || new Date(parsed).toISOString() !== canonical) {
+    throw new Error(
+      "writeTimestamp 必须是 ISO 8601 UTC 时间，例如 2026-06-05T08:00:00.000Z",
+    );
+  }
+  return canonical;
+};
+
+const backupTimestamp = (iso) =>
+  new Date(iso).toISOString().replace(/[-:]/g, "").replace(/\.(\d{3})Z$/, "-$1Z");
+
+const sanitizeOperationName = (value) =>
+  textOr(value, "write")
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 60) || "write";
+
+const collectUsedIds = (workspace) => {
+  const usedIds = new Set();
+  const stack = [];
+  for (const document of workspace.documents || []) {
+    usedIds.add(document.id);
+    for (const node of document.nodes || []) stack.push(node);
+  }
+  while (stack.length) {
+    const node = stack.pop();
+    if (!node) continue;
+    usedIds.add(node.id);
+    for (const child of nodeChildren(node)) stack.push(child);
+  }
+  return usedIds;
+};
+
+const createdNodeIds = (nodes) => {
+  const ids = [];
+  const stack = [...nodes];
+  while (stack.length) {
+    const node = stack.pop();
+    if (!node) continue;
+    ids.push(node.id);
+    for (const child of nodeChildren(node)) stack.push(child);
+  }
+  return ids;
+};
+
+const nodeConfirmationInput = (node) => ({
+  id: node.id,
+  text: node.text,
+  note: node.note,
+  checked: node.checked === true,
+  collapsed: node.collapsed === true,
+  color: normalizeColor(node.color),
+  isTodo: node.isTodo === true,
+  children: nodeChildren(node).map(nodeConfirmationInput),
+});
+
+const createWritableNode = (rawNode = {}, usedIds) => {
+  const node = {
+    ...createNode(textOr(rawNode.text, DEFAULT_NODE_TEXT)),
+    id: uniqueId(rawNode.id, usedIds),
+    note: textOr(rawNode.note, ""),
+    checked: rawNode.checked === true,
+    collapsed: rawNode.collapsed === true,
+    color: normalizeColor(textOr(rawNode.color, "plain")),
+    isTodo: rawNode.isTodo === true || rawNode.checked === true,
+    children: [],
+  };
+  if (Array.isArray(rawNode.children)) {
+    node.children = rawNode.children.map((child) =>
+      createWritableNode(child, usedIds),
+    );
+  }
+  return node;
+};
+
+const workspaceDocumentById = (workspace, documentId) => {
+  const document = workspace.documents.find((candidate) => candidate.id === documentId);
+  if (!document) throw new Error(`找不到文档：${documentId}`);
+  return document;
+};
+
+const locateNodeMutable = (nodes, nodeId, pathPrefix = []) => {
+  for (let index = 0; index < nodes.length; index += 1) {
+    const node = nodes[index];
+    const pathToNode = [...pathPrefix, index];
+    if (node.id === nodeId) return { node, path: pathToNode };
+    const child = locateNodeMutable(node.children || [], nodeId, pathToNode);
+    if (child) return child;
+  }
+  return null;
+};
+
+const siblingsAtPathMutable = (nodes, nodePath) => {
+  if (nodePath.length === 1) return nodes;
+  let parent = nodes[nodePath[0]];
+  for (let index = 1; index < nodePath.length - 1; index += 1) {
+    parent = parent.children[nodePath[index]];
+  }
+  return parent.children;
+};
+
+const insertNodes = ({ document, parentNodeId, nodes, position = "last" }) => {
+  let container = document.nodes;
+  let parent = null;
+  if (parentNodeId) {
+    const locatedParent = locateNodeMutable(document.nodes, parentNodeId);
+    if (!locatedParent) throw new Error(`找不到父节点：${parentNodeId}`);
+    parent = locatedParent.node;
+    parent.collapsed = false;
+    container = parent.children;
+  }
+  const index = position === "first" ? 0 : container.length;
+  container.splice(index, 0, ...nodes);
+  return {
+    parentId: parent?.id ?? null,
+    index,
+    insertedNodeIds: createdNodeIds(nodes),
+  };
+};
+
+const markDocumentUpdated = (document, now) => {
+  document.updatedAt = now;
+  delete document.markdownSource;
+  delete document.markdownUpdatedAt;
+};
+
+const writeResult = ({
+  operation,
+  summary,
+  documentIds = [],
+  nodeIds = [],
+  changes = [],
+  confirmationArgs,
+}) => ({
+  summary,
+  affected: {
+    documentIds,
+    nodeIds,
+  },
+  preview: {
+    operation,
+    changes,
+  },
+  ...(confirmationArgs ? { confirmationArgs } : {}),
+});
+
+const hasOwn = (value, key) =>
+  Object.prototype.hasOwnProperty.call(isRecord(value) ? value : {}, key);
+
+const updateNodeFields = (node, args) => {
+  const changes = [];
+  const setField = (field, value, normalizer = (next) => next) => {
+    if (!hasOwn(args, field)) return;
+    const nextValue = normalizer(value);
+    if (node[field] === nextValue) return;
+    changes.push({ field, before: node[field], after: nextValue });
+    node[field] = nextValue;
+  };
+
+  setField("text", args.text, (value) => textOr(value, ""));
+  setField("note", args.note, (value) => textOr(value, ""));
+  setField("color", args.color, (value) => normalizeColor(textOr(value, "plain")));
+  setField("collapsed", args.collapsed, (value) => value === true);
+  setField("checked", args.checked, (value) => value === true);
+  setField("isTodo", args.isTodo, (value) => value === true);
+  if (changes.some((change) => change.field === "checked") && node.checked) {
+    node.isTodo = true;
+  }
+  return changes;
+};
+
+export const createDocumentForMcp = async (store, args = {}) =>
+  store.mutate({
+    operation: "create_document",
+    expectedRevision: args.expectedRevision,
+    dryRun: args.dryRun,
+    reason: args.reason,
+    writeTimestamp: args.writeTimestamp,
+    apply: (workspace, { now }) => {
+      const usedIds = collectUsedIds(workspace);
+      const initialNodes = Array.isArray(args.initialNodes)
+        ? args.initialNodes.map((node) => createWritableNode(node, usedIds))
+        : [];
+      const document = {
+        id: uniqueDocumentId(args.documentId, usedIds),
+        title: textOr(args.title, "").trim() || DEFAULT_DOCUMENT_TITLE,
+        createdAt: now,
+        updatedAt: now,
+        nodes: initialNodes.length
+          ? initialNodes
+          : [createWritableNode({ text: DEFAULT_NODE_TEXT }, usedIds)],
+      };
+      workspace.documents.push(document);
+      workspace.activeDocumentId = document.id;
+      return writeResult({
+        operation: "create_document",
+        summary: `创建文档：${document.title}`,
+        documentIds: [document.id],
+        nodeIds: createdNodeIds(document.nodes),
+        changes: [
+          {
+            type: "create_document",
+            documentId: document.id,
+            title: document.title,
+            nodeCount: countNodes(document.nodes),
+          },
+        ],
+        confirmationArgs: {
+          documentId: document.id,
+          title: document.title,
+          initialNodes: document.nodes.map(nodeConfirmationInput),
+        },
+      });
+    },
+  });
+
+export const updateDocumentTitleForMcp = async (store, args = {}) =>
+  store.mutate({
+    operation: "update_document_title",
+    expectedRevision: args.expectedRevision,
+    dryRun: args.dryRun,
+    reason: args.reason,
+    writeTimestamp: args.writeTimestamp,
+    apply: (workspace, { now }) => {
+      const document = workspaceDocumentById(workspace, args.documentId);
+      const title = textOr(args.title, "").trim();
+      if (!title) throw new Error("title 不能为空");
+      const before = document.title;
+      document.title = title;
+      markDocumentUpdated(document, now);
+      return writeResult({
+        operation: "update_document_title",
+        summary: `更新文档标题：${before} -> ${title}`,
+        documentIds: [document.id],
+        changes: [
+          {
+            type: "update_document_title",
+            documentId: document.id,
+            field: "title",
+            before,
+            after: title,
+          },
+        ],
+        confirmationArgs: {
+          documentId: document.id,
+          title,
+        },
+      });
+    },
+  });
+
+export const createNodeForMcp = async (store, args = {}) =>
+  store.mutate({
+    operation: "create_node",
+    expectedRevision: args.expectedRevision,
+    dryRun: args.dryRun,
+    reason: args.reason,
+    writeTimestamp: args.writeTimestamp,
+    apply: (workspace, { now }) => {
+      const document = workspaceDocumentById(workspace, args.documentId);
+      const usedIds = collectUsedIds(workspace);
+      const node = createWritableNode(args, usedIds);
+      const insertion = insertNodes({
+        document,
+        parentNodeId: args.parentNodeId,
+        nodes: [node],
+        position: args.position,
+      });
+      markDocumentUpdated(document, now);
+      return writeResult({
+        operation: "create_node",
+        summary: `创建节点：${node.text || DEFAULT_NODE_TEXT}`,
+        documentIds: [document.id],
+        nodeIds: insertion.insertedNodeIds,
+        changes: [
+          {
+            type: "create_node",
+            documentId: document.id,
+            parentNodeId: insertion.parentId,
+            index: insertion.index,
+            nodeId: node.id,
+            text: node.text,
+          },
+        ],
+        confirmationArgs: {
+          documentId: document.id,
+          ...(insertion.parentId ? { parentNodeId: insertion.parentId } : {}),
+          position: args.position === "first" ? "first" : "last",
+          ...nodeConfirmationInput(node),
+        },
+      });
+    },
+  });
+
+export const appendChildrenForMcp = async (store, args = {}) =>
+  store.mutate({
+    operation: "append_children",
+    expectedRevision: args.expectedRevision,
+    dryRun: args.dryRun,
+    reason: args.reason,
+    writeTimestamp: args.writeTimestamp,
+    apply: (workspace, { now }) => {
+      const document = workspaceDocumentById(workspace, args.documentId);
+      if (!Array.isArray(args.children) || args.children.length === 0) {
+        throw new Error("children 至少需要一个节点");
+      }
+      const usedIds = collectUsedIds(workspace);
+      const nodes = args.children.map((node) => createWritableNode(node, usedIds));
+      const insertion = insertNodes({
+        document,
+        parentNodeId: args.parentNodeId,
+        nodes,
+        position: "last",
+      });
+      markDocumentUpdated(document, now);
+      return writeResult({
+        operation: "append_children",
+        summary: `追加 ${nodes.length} 个子节点`,
+        documentIds: [document.id],
+        nodeIds: insertion.insertedNodeIds,
+        changes: [
+          {
+            type: "append_children",
+            documentId: document.id,
+            parentNodeId: insertion.parentId,
+            index: insertion.index,
+            count: nodes.length,
+            nodeIds: insertion.insertedNodeIds,
+          },
+        ],
+        confirmationArgs: {
+          documentId: document.id,
+          ...(insertion.parentId ? { parentNodeId: insertion.parentId } : {}),
+          children: nodes.map(nodeConfirmationInput),
+        },
+      });
+    },
+  });
+
+export const updateNodeForMcp = async (store, args = {}) =>
+  store.mutate({
+    operation: "update_node",
+    expectedRevision: args.expectedRevision,
+    dryRun: args.dryRun,
+    reason: args.reason,
+    writeTimestamp: args.writeTimestamp,
+    apply: (workspace, { now }) => {
+      const document = workspaceDocumentById(workspace, args.documentId);
+      const located = locateNodeMutable(document.nodes, args.nodeId);
+      if (!located) throw new Error(`找不到节点：${args.nodeId}`);
+      const fieldChanges = updateNodeFields(located.node, args);
+      if (!fieldChanges.length) throw new Error("至少需要提供一个可更新字段");
+      markDocumentUpdated(document, now);
+      return writeResult({
+        operation: "update_node",
+        summary: `更新节点：${located.node.text || DEFAULT_NODE_TEXT}`,
+        documentIds: [document.id],
+        nodeIds: [located.node.id],
+        changes: [
+          {
+            type: "update_node",
+            documentId: document.id,
+            nodeId: located.node.id,
+            path: located.path,
+            fields: fieldChanges,
+          },
+        ],
+        confirmationArgs: {
+          documentId: document.id,
+          nodeId: located.node.id,
+          ...Object.fromEntries(
+            fieldChanges.map((change) => [change.field, change.after]),
+          ),
+        },
+      });
+    },
+  });
+
+export const setNodeCheckedForMcp = async (store, args = {}) =>
+  store.mutate({
+    operation: "set_node_checked",
+    expectedRevision: args.expectedRevision,
+    dryRun: args.dryRun,
+    reason: args.reason,
+    writeTimestamp: args.writeTimestamp,
+    apply: (workspace, { now }) => {
+      const document = workspaceDocumentById(workspace, args.documentId);
+      const located = locateNodeMutable(document.nodes, args.nodeId);
+      if (!located) throw new Error(`找不到节点：${args.nodeId}`);
+      const before = located.node.checked === true;
+      const checked = args.checked === true;
+      located.node.checked = checked;
+      located.node.isTodo = true;
+      markDocumentUpdated(document, now);
+      return writeResult({
+        operation: "set_node_checked",
+        summary: `${checked ? "完成" : "取消完成"}节点：${located.node.text || DEFAULT_NODE_TEXT}`,
+        documentIds: [document.id],
+        nodeIds: [located.node.id],
+        changes: [
+          {
+            type: "set_node_checked",
+            documentId: document.id,
+            nodeId: located.node.id,
+            path: located.path,
+            field: "checked",
+            before,
+            after: checked,
+          },
+        ],
+        confirmationArgs: {
+          documentId: document.id,
+          nodeId: located.node.id,
+          checked,
+        },
+      });
+    },
+  });
+
+export const moveNodeForMcp = async (store, args = {}) =>
+  store.mutate({
+    operation: "move_node",
+    expectedRevision: args.expectedRevision,
+    dryRun: args.dryRun,
+    reason: args.reason,
+    writeTimestamp: args.writeTimestamp,
+    apply: (workspace, { now }) => {
+      const document = workspaceDocumentById(workspace, args.documentId);
+      const source = locateNodeMutable(document.nodes, args.nodeId);
+      if (!source) throw new Error(`找不到节点：${args.nodeId}`);
+      if (args.targetParentNodeId === args.nodeId) {
+        throw new Error("不能把节点移动到自身下面");
+      }
+      const targetBeforeMove = args.targetParentNodeId
+        ? locateNodeMutable(document.nodes, args.targetParentNodeId)
+        : null;
+      if (args.targetParentNodeId && !targetBeforeMove) {
+        throw new Error(`找不到目标父节点：${args.targetParentNodeId}`);
+      }
+      if (
+        targetBeforeMove &&
+        targetBeforeMove.path.length > source.path.length &&
+        source.path.every((part, index) => targetBeforeMove.path[index] === part)
+      ) {
+        throw new Error("不能把节点移动到自己的子节点下面");
+      }
+
+      const sourceSiblings = siblingsAtPathMutable(document.nodes, source.path);
+      const [node] = sourceSiblings.splice(source.path[source.path.length - 1], 1);
+      let targetContainer = document.nodes;
+      let parentId = null;
+      if (args.targetParentNodeId) {
+        const target = locateNodeMutable(document.nodes, args.targetParentNodeId);
+        if (!target) throw new Error(`找不到目标父节点：${args.targetParentNodeId}`);
+        target.node.collapsed = false;
+        targetContainer = target.node.children;
+        parentId = target.node.id;
+      }
+      const index = args.position === "first" ? 0 : targetContainer.length;
+      targetContainer.splice(index, 0, node);
+      const moved = locateNodeMutable(document.nodes, node.id);
+      markDocumentUpdated(document, now);
+      return writeResult({
+        operation: "move_node",
+        summary: `移动节点：${node.text || DEFAULT_NODE_TEXT}`,
+        documentIds: [document.id],
+        nodeIds: [node.id],
+        changes: [
+          {
+            type: "move_node",
+            documentId: document.id,
+            nodeId: node.id,
+            beforePath: source.path,
+            afterPath: moved?.path ?? [],
+            targetParentNodeId: parentId,
+            index,
+          },
+        ],
+        confirmationArgs: {
+          documentId: document.id,
+          nodeId: node.id,
+          ...(parentId ? { targetParentNodeId: parentId } : {}),
+          position: args.position === "first" ? "first" : "last",
+        },
+      });
+    },
+  });
+
+export const deleteNodeForMcp = async (store, args = {}) =>
+  store.mutate({
+    operation: "delete_node",
+    expectedRevision: args.expectedRevision,
+    dryRun: args.dryRun,
+    reason: args.reason,
+    writeTimestamp: args.writeTimestamp,
+    apply: (workspace, { now }) => {
+      const document = workspaceDocumentById(workspace, args.documentId);
+      const located = locateNodeMutable(document.nodes, args.nodeId);
+      if (!located) throw new Error(`找不到节点：${args.nodeId}`);
+      const deletedIds = createdNodeIds([located.node]);
+      const deletedText = located.node.text || DEFAULT_NODE_TEXT;
+      const siblings = siblingsAtPathMutable(document.nodes, located.path);
+      siblings.splice(located.path[located.path.length - 1], 1);
+      if (document.nodes.length === 0) {
+        document.nodes.push(createWritableNode({ text: DEFAULT_NODE_TEXT }, collectUsedIds(workspace)));
+      }
+      markDocumentUpdated(document, now);
+      return writeResult({
+        operation: "delete_node",
+        summary: `删除节点：${deletedText}`,
+        documentIds: [document.id],
+        nodeIds: deletedIds,
+        changes: [
+          {
+            type: "delete_node",
+            documentId: document.id,
+            nodeId: args.nodeId,
+            path: located.path,
+            deletedNodeCount: deletedIds.length,
+          },
+        ],
+        confirmationArgs: {
+          documentId: document.id,
+          nodeId: args.nodeId,
+        },
+      });
+    },
+  });
 
 const boundedLimit = (value, fallback, hardMax = HARD_LIMIT) =>
   optionalNumber(value, fallback, 1, hardMax);

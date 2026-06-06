@@ -9,14 +9,22 @@ import * as z from "zod/v4";
 import {
   SERVER_DISPLAY_NAME,
   SERVER_NAME,
+  appendChildrenForMcp,
   createWorkspaceStore,
+  createDocumentForMcp,
+  createNodeForMcp,
+  deleteNodeForMcp,
   exportDocumentForMcp,
   getDocument,
   getNode,
   getWorkspaceSummary,
   listDocuments,
+  moveNodeForMcp,
   searchOutline,
+  setNodeCheckedForMcp,
   textToolResult,
+  updateDocumentTitleForMcp,
+  updateNodeForMcp,
 } from "./localoutline-core.mjs";
 
 const jsonContent = (uri, data) => ({
@@ -67,9 +75,34 @@ const readPackageVersion = async () => {
   return JSON.parse(raw).version;
 };
 
+const writeCommonInputSchema = {
+  expectedRevision: z.string().min(1).describe("调用方读取到的 workspace revision"),
+  dryRun: z.boolean().optional().default(true).describe("默认 true；false 时才真实落盘"),
+  reason: z.string().max(300).optional().default("").describe("写入原因，用于快照和审计摘要"),
+  writeTimestamp: z
+    .string()
+    .optional()
+    .describe("UTC ISO 写入时间；dry-run confirmationArgs 会自动生成，普通调用无需手写"),
+};
+
+const positionSchema = z.enum(["first", "last"]).optional().default("last");
+
+const writableNodeSchema = z.lazy(() =>
+  z.object({
+    id: z.string().min(1).optional(),
+    text: z.string().optional(),
+    note: z.string().optional(),
+    checked: z.boolean().optional(),
+    collapsed: z.boolean().optional(),
+    color: z.enum(["plain", "blue", "green", "amber", "rose"]).optional(),
+    isTodo: z.boolean().optional(),
+    children: z.array(writableNodeSchema).optional().default([]),
+  }),
+);
+
 export const createLocalOutlineMcpServer = async ({
   store,
-  version = "1.2.0",
+  version = "1.3.0",
 } = {}) => {
   const workspaceStore = store ?? (await createWorkspaceStore());
   const server = new McpServer(
@@ -197,6 +230,171 @@ export const createLocalOutlineMcpServer = async ({
       },
     },
     async (args) => textToolResult(exportDocumentForMcp(await snapshot(), args)),
+  );
+
+  server.registerTool(
+    "create_document",
+    {
+      title: "Create Document",
+      description: "创建 LocalOutline 文档。默认 dry-run 只返回预览；真实写入需要 write 模式和 dryRun=false。",
+      inputSchema: {
+        ...writeCommonInputSchema,
+        documentId: z.string().min(1).optional(),
+        title: z.string().optional(),
+        initialNodes: z.array(writableNodeSchema).optional().default([]),
+      },
+      annotations: {
+        readOnlyHint: false,
+        openWorldHint: false,
+      },
+    },
+    async (args) => textToolResult(await createDocumentForMcp(workspaceStore, args)),
+  );
+
+  server.registerTool(
+    "update_document_title",
+    {
+      title: "Update Document Title",
+      description: "更新 LocalOutline 文档标题，结构化写入前会校验 revision。",
+      inputSchema: {
+        ...writeCommonInputSchema,
+        documentId: z.string().min(1),
+        title: z.string().min(1),
+      },
+      annotations: {
+        readOnlyHint: false,
+        openWorldHint: false,
+      },
+    },
+    async (args) => textToolResult(await updateDocumentTitleForMcp(workspaceStore, args)),
+  );
+
+  server.registerTool(
+    "create_node",
+    {
+      title: "Create Node",
+      description: "在文档根部或指定父节点下创建节点。",
+      inputSchema: {
+        ...writeCommonInputSchema,
+        documentId: z.string().min(1),
+        parentNodeId: z.string().min(1).optional(),
+        position: positionSchema,
+        id: z.string().min(1).optional(),
+        text: z.string().optional(),
+        note: z.string().optional(),
+        checked: z.boolean().optional(),
+        collapsed: z.boolean().optional(),
+        color: z.enum(["plain", "blue", "green", "amber", "rose"]).optional(),
+        isTodo: z.boolean().optional(),
+        children: z.array(writableNodeSchema).optional().default([]),
+      },
+      annotations: {
+        readOnlyHint: false,
+        openWorldHint: false,
+      },
+    },
+    async (args) => textToolResult(await createNodeForMcp(workspaceStore, args)),
+  );
+
+  server.registerTool(
+    "update_node",
+    {
+      title: "Update Node",
+      description: "更新节点正文、备注、颜色、折叠状态和待办字段。",
+      inputSchema: {
+        ...writeCommonInputSchema,
+        documentId: z.string().min(1),
+        nodeId: z.string().min(1),
+        text: z.string().optional(),
+        note: z.string().optional(),
+        color: z.enum(["plain", "blue", "green", "amber", "rose"]).optional(),
+        collapsed: z.boolean().optional(),
+        checked: z.boolean().optional(),
+        isTodo: z.boolean().optional(),
+      },
+      annotations: {
+        readOnlyHint: false,
+        openWorldHint: false,
+      },
+    },
+    async (args) => textToolResult(await updateNodeForMcp(workspaceStore, args)),
+  );
+
+  server.registerTool(
+    "set_node_checked",
+    {
+      title: "Set Node Checked",
+      description: "设置节点待办完成状态，并将节点标记为待办。",
+      inputSchema: {
+        ...writeCommonInputSchema,
+        documentId: z.string().min(1),
+        nodeId: z.string().min(1),
+        checked: z.boolean(),
+      },
+      annotations: {
+        readOnlyHint: false,
+        openWorldHint: false,
+      },
+    },
+    async (args) => textToolResult(await setNodeCheckedForMcp(workspaceStore, args)),
+  );
+
+  server.registerTool(
+    "append_children",
+    {
+      title: "Append Children",
+      description: "向文档根部或指定父节点批量追加子节点。",
+      inputSchema: {
+        ...writeCommonInputSchema,
+        documentId: z.string().min(1),
+        parentNodeId: z.string().min(1).optional(),
+        children: z.array(writableNodeSchema).min(1),
+      },
+      annotations: {
+        readOnlyHint: false,
+        openWorldHint: false,
+      },
+    },
+    async (args) => textToolResult(await appendChildrenForMcp(workspaceStore, args)),
+  );
+
+  server.registerTool(
+    "move_node",
+    {
+      title: "Move Node",
+      description: "在同一文档内移动节点到根部或新的父节点下。",
+      inputSchema: {
+        ...writeCommonInputSchema,
+        documentId: z.string().min(1),
+        nodeId: z.string().min(1),
+        targetParentNodeId: z.string().min(1).optional(),
+        position: positionSchema,
+      },
+      annotations: {
+        readOnlyHint: false,
+        openWorldHint: false,
+      },
+    },
+    async (args) => textToolResult(await moveNodeForMcp(workspaceStore, args)),
+  );
+
+  server.registerTool(
+    "delete_node",
+    {
+      title: "Delete Node",
+      description: "删除节点；真实写入前会创建快照。",
+      inputSchema: {
+        ...writeCommonInputSchema,
+        documentId: z.string().min(1),
+        nodeId: z.string().min(1),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        openWorldHint: false,
+      },
+    },
+    async (args) => textToolResult(await deleteNodeForMcp(workspaceStore, args)),
   );
 
   server.registerResource(
@@ -450,7 +648,7 @@ Environment:
                                  then falls back to the Swift native .backups path when absent.
   LOCAL_OUTLINE_MCP_CONFIG       Optional JSON config path.
   LOCAL_OUTLINE_MCP_DEBUG        Set true to show absolute workspace paths in tool results.
-  LOCAL_OUTLINE_MCP_MODE         Currently readonly.
+  LOCAL_OUTLINE_MCP_MODE         readonly (default) or write. Real writes require write mode.
 
 Options:
   --help                         Show this help.

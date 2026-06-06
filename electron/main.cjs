@@ -2,6 +2,10 @@ const { app, BrowserWindow, ipcMain, shell, session } = require("electron");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const os = require("node:os");
+const {
+  withWorkspaceWriteLock,
+  writeFileAtomically,
+} = require("./workspace-lock.cjs");
 
 const isDev = process.env.VITE_DEV_SERVER_URL || !app.isPackaged;
 const maxStampedBackups = 20;
@@ -141,8 +145,10 @@ ipcMain.handle("save-icloud-backup", async (_event, payload) => {
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     const stampedPath = path.join(directory, `localoutline-workspace-${stamp}.json`);
     const content = JSON.stringify(payload, null, 2);
-    await fs.writeFile(latestPath, content, "utf8");
-    await fs.writeFile(stampedPath, content, "utf8");
+    await withWorkspaceWriteLock(latestPath, async () => {
+      await writeFileAtomically(stampedPath, content);
+      await writeFileAtomically(latestPath, content);
+    });
     pruneStampedBackups(directory).catch((error) => {
       console.warn("Failed to prune old iCloud backups:", error);
     });

@@ -64,12 +64,20 @@ const main = async () => {
     assert.deepEqual(
       tools.tools.map((tool) => tool.name).sort(),
       [
+        "append_children",
+        "create_document",
+        "create_node",
+        "delete_node",
         "export_document",
         "get_document",
         "get_node",
         "get_workspace_summary",
         "list_documents",
+        "move_node",
         "search_outline",
+        "set_node_checked",
+        "update_document_title",
+        "update_node",
       ],
     );
     const getNodeTool = tools.tools.find((tool) => tool.name === "get_node");
@@ -80,6 +88,21 @@ const main = async () => {
     );
     assert.equal(summary.documentCount, 1);
     assert.equal(summary.workspacePath, filePath);
+
+    const preview = parseToolJson(
+      await client.callTool({
+        name: "create_node",
+        arguments: {
+          expectedRevision: summary.revision,
+          dryRun: true,
+          documentId: "doc_mcp",
+          parentNodeId: "node_tools",
+          text: "dry-run 子节点",
+        },
+      }),
+    );
+    assert.equal(preview.applied, false);
+    assert.equal(preview.dryRun, true);
 
     const search = parseToolJson(
       await client.callTool({
