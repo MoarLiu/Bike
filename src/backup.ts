@@ -1,9 +1,12 @@
 import type { BackupResult, Workspace } from "./types";
 import { exportWorkspace } from "./exporters";
 
-export const saveICloudBackup = async (workspace: Workspace): Promise<BackupResult> => {
+export const saveICloudBackup = async (
+  workspace: Workspace,
+  expectedRevision?: string,
+): Promise<BackupResult> => {
   if (window.localOutline) {
-    return window.localOutline.saveICloudBackup(workspace);
+    return window.localOutline.saveICloudBackup({ workspace, expectedRevision });
   }
 
   const picker = (window as unknown as {

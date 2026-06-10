@@ -49,7 +49,7 @@ const unlinkLockIfRawMatches = async (lockPath, raw) => {
 const releaseWorkspaceWriteLock = async (lockPath, ownerToken) => {
   try {
     const lock = await readWorkspaceLock(lockPath);
-    if (lock.ownerToken === ownerToken) await fs.unlink(lockPath);
+    if (lock.ownerToken === ownerToken) await unlinkLockIfRawMatches(lockPath, lock.raw);
   } catch (error) {
     if (error.code !== "ENOENT") throw error;
   }
@@ -120,12 +120,36 @@ const writeFileAtomically = async (filePath, content) => {
     directory,
     `.${basename}.${process.pid}.${Date.now()}.${crypto.randomBytes(4).toString("hex")}.tmp`,
   );
-  await fs.writeFile(tempPath, content, "utf8");
+  await writeFileDurably(tempPath, content);
   try {
     await fs.rename(tempPath, filePath);
+    await fsyncDirectory(directory);
   } catch (error) {
     await fs.unlink(tempPath).catch(() => {});
     throw error;
+  }
+};
+
+const writeFileDurably = async (filePath, content) => {
+  const handle = await fs.open(filePath, "w");
+  try {
+    await handle.writeFile(content, "utf8");
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+};
+
+const fsyncDirectory = async (directory) => {
+  try {
+    const handle = await fs.open(directory, "r");
+    try {
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+  } catch {
+    // Directory fsync is not available on every platform/filesystem.
   }
 };
 

@@ -24,6 +24,9 @@ struct OutlineNodeTextEditor: NSViewRepresentable {
     var strikethrough: Bool
     var isActive: Bool
     var forceRefreshToken: Int
+    var focusRequestToken: Int
+    var shouldHandleFocusRequest: Bool
+    var onFocusHandled: () -> Void
     var onSubmit: () -> Void
     var onIndent: () -> Void
     var onOutdent: () -> Void
@@ -75,10 +78,13 @@ struct OutlineNodeTextEditor: NSViewRepresentable {
         nsView.placeholderString = placeholder
         nsView.needsDisplay = true
         
-        if isActive && nsView.window?.firstResponder !== nsView {
+        if isActive && shouldHandleFocusRequest && context.coordinator.shouldFocus(for: focusRequestToken) {
             DispatchQueue.main.async {
-                nsView.window?.makeFirstResponder(nsView)
-                nsView.setSelectedRange(NSRange(location: nsView.string.count, length: 0))
+                if nsView.window?.firstResponder !== nsView {
+                    nsView.window?.makeFirstResponder(nsView)
+                }
+                nsView.setSelectedRange(NSRange(location: (nsView.string as NSString).length, length: 0))
+                context.coordinator.parent.onFocusHandled()
             }
         }
     }
@@ -127,11 +133,13 @@ struct OutlineNodeTextEditor: NSViewRepresentable {
         var isEditing = false
         var isApplyingExternalText = false
         private var lastAppliedRefreshToken: Int
+        private var lastHandledFocusToken: Int
 
         init(parent: OutlineNodeTextEditor, text: Binding<String>) {
             self.parent = parent
             _text = text
             lastAppliedRefreshToken = parent.forceRefreshToken
+            lastHandledFocusToken = 0
         }
 
         func update(_ parent: OutlineNodeTextEditor) {
@@ -141,6 +149,12 @@ struct OutlineNodeTextEditor: NSViewRepresentable {
         func shouldForceRefresh(for token: Int) -> Bool {
             guard token != lastAppliedRefreshToken else { return false }
             lastAppliedRefreshToken = token
+            return true
+        }
+
+        func shouldFocus(for token: Int) -> Bool {
+            guard token != lastHandledFocusToken else { return false }
+            lastHandledFocusToken = token
             return true
         }
 
@@ -237,12 +251,20 @@ struct OutlineNodeTextEditor: NSViewRepresentable {
         func textDidChange(_ notification: Notification) {
             guard let view = notification.object as? NSTextView else { return }
             guard !isApplyingExternalText else { return }
+            guard !view.hasMarkedText() else {
+                view.invalidateIntrinsicContentSize()
+                view.needsDisplay = true
+                return
+            }
             text = view.string
             view.invalidateIntrinsicContentSize()
             view.needsDisplay = true
         }
 
         func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+            if textView.hasMarkedText() {
+                return false
+            }
             if commandSelector == #selector(NSResponder.insertNewline(_:)) {
                 if let event = NSApp.currentEvent, event.modifierFlags.contains(.shift) {
                     textView.insertNewlineIgnoringFieldEditor(nil)
@@ -267,7 +289,10 @@ struct OutlineNodeTextEditor: NSViewRepresentable {
             if commandSelector == #selector(NSResponder.moveUp(_:)) {
                 guard let layoutManager = textView.layoutManager else { return false }
                 let selectedRange = textView.selectedRange()
-                let glyphIndex = layoutManager.glyphIndexForCharacter(at: selectedRange.location)
+                let stringLength = (textView.string as NSString).length
+                guard layoutManager.numberOfGlyphs > 0, stringLength > 0 else { return false }
+                let characterIndex = min(max(0, selectedRange.location), stringLength - 1)
+                let glyphIndex = min(layoutManager.glyphIndexForCharacter(at: characterIndex), layoutManager.numberOfGlyphs - 1)
                 let lineRect = layoutManager.lineFragmentRect(forGlyphAt: glyphIndex, effectiveRange: nil)
                 let firstLineRect = layoutManager.lineFragmentRect(forGlyphAt: 0, effectiveRange: nil)
                 if lineRect.origin.y == firstLineRect.origin.y {
@@ -279,9 +304,12 @@ struct OutlineNodeTextEditor: NSViewRepresentable {
             if commandSelector == #selector(NSResponder.moveDown(_:)) {
                 guard let layoutManager = textView.layoutManager else { return false }
                 let selectedRange = textView.selectedRange()
-                let glyphIndex = layoutManager.glyphIndexForCharacter(at: selectedRange.location)
-                let lineRect = layoutManager.lineFragmentRect(forGlyphAt: glyphIndex, effectiveRange: nil)
                 let totalGlyphs = layoutManager.numberOfGlyphs
+                let stringLength = (textView.string as NSString).length
+                guard totalGlyphs > 0, stringLength > 0 else { return false }
+                let characterIndex = min(max(0, selectedRange.location), stringLength - 1)
+                let glyphIndex = min(layoutManager.glyphIndexForCharacter(at: characterIndex), totalGlyphs - 1)
+                let lineRect = layoutManager.lineFragmentRect(forGlyphAt: glyphIndex, effectiveRange: nil)
                 let lastGlyphIndex = totalGlyphs > 0 ? totalGlyphs - 1 : 0
                 let lastLineRect = layoutManager.lineFragmentRect(forGlyphAt: lastGlyphIndex, effectiveRange: nil)
                 if lineRect.origin.y == lastLineRect.origin.y {

@@ -15,13 +15,20 @@ enum SelfTestRunner {
     static func run() throws {
         try workspaceNormalizationRepairsEmptyWorkspace()
         try treeOperationsInsertIndentOutdent()
+        try treeOperationsRemoveDoesNotTreatDefaultTextAsGlobalPlaceholder()
         try markdownRoundTripPreservesTitleAndTasks()
+        try codeBlockRoundTripsAcrossCodecs()
         try jsonWorkspaceCompatibility()
         try tagAndLinkExtraction()
         try documentUndoWorksAcrossOutlineMindMapAndMarkdown()
         try appStoreDoesNotSaveStarterWorkspaceAfterLoadFailure()
+        try appStoreDeleteConfirmationTargetsRequestedDocument()
         try repositoryPersistsDocumentsAsMarkdownFiles()
+        try repositoryRenamesWithoutOverwritingOccupiedMarkdownFilename()
+        try repositoryPreservesNodeMetadataAcrossMarkdownReload()
+        try markdownPreviousMatcherPreservesMetadataAfterExternalReorder()
         try repositoryAdoptsExternalMarkdownFilename()
+        try repositoryUsesExternalMarkdownModificationDate()
         try repositorySkipsUnchangedMarkdownWrites()
         try repositoryMigratesLegacyICloudBackupToMarkdownFiles()
         try repositorySavesSnapshotsAndRestores()
@@ -30,6 +37,13 @@ enum SelfTestRunner {
 
     private static func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
         if !condition() { throw SelfTestError.failed(message) }
+    }
+
+    private static func expectDate(_ iso: String, _ message: String) throws -> Date {
+        guard let date = ISO8601DateFormatter.localOutline.date(from: iso) else {
+            throw SelfTestError.failed(message)
+        }
+        return date
     }
 
     private static func workspaceNormalizationRepairsEmptyWorkspace() throws {
@@ -51,6 +65,17 @@ enum SelfTestRunner {
         try expect(nodes.map(\.id) == ["a", "b"], "outdent should restore sibling order")
     }
 
+    private static func treeOperationsRemoveDoesNotTreatDefaultTextAsGlobalPlaceholder() throws {
+        let retainedChild = OutlineNodeDTO(id: "child", text: Defaults.nodeText)
+        let retainedParent = OutlineNodeDTO(id: "parent", text: "Parent", children: [retainedChild])
+        let removed = OutlineNodeDTO(id: "removed", text: "Remove")
+        let next = TreeOperations.removeNode([retainedParent, removed], targetId: "removed")
+        try expect(next.first?.children.first?.id == "child", "remove should preserve unrelated single child with default text")
+
+        let emptiedParent = TreeOperations.removeNode([retainedParent], targetId: "child")
+        try expect(emptiedParent.first?.children.isEmpty == true, "removing an only child should leave parent children empty, not insert a placeholder child")
+    }
+
     private static func markdownRoundTripPreservesTitleAndTasks() throws {
         let markdown = """
         # Plan
@@ -64,6 +89,51 @@ enum SelfTestRunner {
         try expect(document.nodes.first?.checked == true, "task checked state should parse")
         try expect(document.nodes.first?.note == "Note", "quote should attach as note")
         try expect(MarkdownCodec.documentMarkdown(document).contains("# Plan"), "markdown export should keep title")
+    }
+
+    private static func codeBlockRoundTripsAcrossCodecs() throws {
+        let child = OutlineNodeDTO(
+            id: "nested-code-node",
+            text: "Nested",
+            codeBlock: "console.log('nested')",
+            codeLanguage: "js"
+        )
+        let node = OutlineNodeDTO(
+            id: "code-node",
+            text: "Example",
+            codeBlock: "let value = 1\nprint(value)",
+            codeLanguage: "swift",
+            children: [child]
+        )
+        let document = OutlineDocumentDTO(id: "code-doc", title: "Code", nodes: [node])
+        let workspace = WorkspaceV1DTO(activeDocumentId: document.id, documents: [document])
+
+        let jsonData = try ImportExportCodec.exportWorkspace(workspace)
+        let jsonDecoded = try ImportExportCodec.jsonDecoder.decode(WorkspaceV1DTO.self, from: jsonData)
+        try expect(jsonDecoded.documents[0].nodes[0].codeBlock == node.codeBlock, "code block should survive JSON workspace round trip")
+        try expect(jsonDecoded.documents[0].nodes[0].codeLanguage == "swift", "code language should survive JSON workspace round trip")
+
+        let markdown = MarkdownCodec.documentMarkdown(document)
+        try expect(markdown.contains("```swift"), "markdown export should include code fence language")
+        let parsedMarkdown = MarkdownCodec.parseDocument(
+            markdown,
+            previousDocument: document,
+            documentId: document.id,
+            now: document.updatedAt
+        )
+        try expect(parsedMarkdown.nodes[0].codeBlock == node.codeBlock, "code block should survive markdown parse")
+        try expect(parsedMarkdown.nodes[0].codeLanguage == "swift", "code language should survive markdown parse")
+        try expect(parsedMarkdown.nodes[0].children[0].codeBlock == child.codeBlock, "nested code block should survive markdown parse")
+        try expect(parsedMarkdown.nodes[0].children[0].codeLanguage == "js", "nested code language should survive markdown parse")
+
+        let opml = try ImportExportCodec.exportDocument(document, format: .opml)
+        guard case .document(let importedOPML) = try ImportExportCodec.importFile(data: opml.data, filename: opml.filename) else {
+            throw SelfTestError.failed("OPML import should return a document")
+        }
+        try expect(importedOPML.nodes[0].codeBlock == node.codeBlock, "code block should survive OPML round trip")
+        try expect(importedOPML.nodes[0].codeLanguage == "swift", "code language should survive OPML round trip")
+        try expect(importedOPML.nodes[0].children[0].codeBlock == child.codeBlock, "nested code block should survive OPML round trip")
+        try expect(importedOPML.nodes[0].children[0].codeLanguage == "js", "nested code language should survive OPML round trip")
     }
 
     private static func jsonWorkspaceCompatibility() throws {
@@ -90,6 +160,24 @@ enum SelfTestRunner {
         store.mode = .outline
         store.activeNodeId = node.id
         let initialWorkspace = store.workspace
+
+        store.updateNode(node.id, coalescingKey: "nodeNote:\(node.id)") { $0.note = "a" }
+        store.updateNode(node.id, coalescingKey: "nodeNote:\(node.id)") { $0.note = "ab" }
+        try expect(store.activeNode?.note == "ab", "note edits should apply")
+        store.undoLastDocumentChange()
+        try expect(store.activeNode?.note.isEmpty == true, "one undo should restore coalesced note edits")
+
+        let collapseStore = AppStore(repository: repository)
+        var markdownDocument = document
+        markdownDocument.markdownSource = "# Undo\n\n- Undo me"
+        markdownDocument.markdownUpdatedAt = markdownDocument.updatedAt
+        collapseStore.workspace = WorkspaceV1DTO(activeDocumentId: markdownDocument.id, documents: [markdownDocument])
+        collapseStore.loadState = .loaded
+        collapseStore.activeNodeId = node.id
+        let markdownUpdatedAt = markdownDocument.updatedAt
+        collapseStore.updateNode(node.id, preservesMarkdown: true) { $0.collapsed = true }
+        try expect(collapseStore.activeDocument?.markdownSource != nil, "collapse should preserve markdown source")
+        try expect(collapseStore.activeDocument?.updatedAt == markdownUpdatedAt, "collapse should not bump document updatedAt")
 
         store.toggleStrike(node.id)
         try expect(store.activeNode?.strike == true, "strike toggle should mark node")
@@ -161,6 +249,24 @@ enum SelfTestRunner {
     }
 
     @MainActor
+    private static func appStoreDeleteConfirmationTargetsRequestedDocument() throws {
+        let repository = try WorkspaceRepository(inMemory: true)
+        let first = OutlineDocumentDTO(id: "doc-a", title: "A", nodes: [OutlineNodeDTO(text: "A")])
+        let second = OutlineDocumentDTO(id: "doc-b", title: "B", nodes: [OutlineNodeDTO(text: "B")])
+        let store = AppStore(repository: repository)
+        store.workspace = WorkspaceV1DTO(activeDocumentId: first.id, documents: [first, second])
+        store.loadState = .loaded
+        store.activeNodeId = first.nodes[0].id
+
+        store.requestDeleteDocument(second.id)
+        try expect(store.workspace.activeDocumentId == first.id, "requesting context-menu delete should not switch active document")
+        try expect(store.pendingDeleteDocumentId == second.id, "delete confirmation should target requested document")
+        store.confirmDeletePendingDocument()
+        try expect(store.workspace.documents.map(\.id) == [first.id], "confirming delete should remove requested document")
+        try expect(store.workspace.activeDocumentId == first.id, "deleting inactive document should keep active document")
+    }
+
+    @MainActor
     private static func repositoryPersistsDocumentsAsMarkdownFiles() throws {
         let base = FileManager.default.temporaryDirectory
             .appendingPathComponent("LocalOutlineMarkdownSelfTest-\(UUID().uuidString)", isDirectory: true)
@@ -190,6 +296,74 @@ enum SelfTestRunner {
     }
 
     @MainActor
+    private static func repositoryRenamesWithoutOverwritingOccupiedMarkdownFilename() throws {
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("LocalOutlineRenameCollisionSelfTest-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: base) }
+
+        let repository = try WorkspaceRepository(inMemory: true, baseURL: base)
+        let first = OutlineDocumentDTO(id: "doc-alpha", title: "Alpha", nodes: [OutlineNodeDTO(text: "First body")])
+        let second = OutlineDocumentDTO(id: "doc-x", title: "x", nodes: [OutlineNodeDTO(text: "Second body")])
+        var workspace = WorkspaceV1DTO(activeDocumentId: first.id, documents: [first, second])
+        try repository.saveWorkspace(workspace)
+
+        workspace.documents[0].title = "x"
+        try repository.saveWorkspace(workspace)
+
+        let occupiedContent = try String(contentsOf: base.appendingPathComponent("x.md"), encoding: .utf8)
+        let renamedContent = try String(contentsOf: base.appendingPathComponent("x 2.md"), encoding: .utf8)
+        try expect(occupiedContent.contains("Second body"), "existing markdown owner should keep its content")
+        try expect(renamedContent.contains("First body"), "renamed document should be written to a unique markdown filename")
+        try expect(!FileManager.default.fileExists(atPath: base.appendingPathComponent("Alpha.md").path), "old markdown filename should be removed after collision-safe rename")
+    }
+
+    @MainActor
+    private static func repositoryPreservesNodeMetadataAcrossMarkdownReload() throws {
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("LocalOutlineNodeMetadataSelfTest-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: base) }
+
+        let repository = try WorkspaceRepository(inMemory: true, baseURL: base)
+        let child = OutlineNodeDTO(id: "child", text: "Child", color: "rose", bold: true, strike: true, highlight: true, icon: "★")
+        let root = OutlineNodeDTO(id: "root", text: "Root", collapsed: true, color: "blue", italic: true, underline: true, children: [child])
+        let document = OutlineDocumentDTO(id: "doc", title: "Metadata", nodes: [root])
+        try repository.saveWorkspace(WorkspaceV1DTO(activeDocumentId: document.id, documents: [document]))
+
+        let reloaded = try WorkspaceRepository(inMemory: true, baseURL: base).loadWorkspace()
+        let reloadedRoot = reloaded.documents.first?.nodes.first
+        let reloadedChild = reloadedRoot?.children.first
+        try expect(reloadedRoot?.id == "root", "root id should survive markdown reload")
+        try expect(reloadedRoot?.collapsed == true, "collapsed state should survive markdown reload")
+        try expect(reloadedRoot?.color == "blue", "node color should survive markdown reload")
+        try expect(reloadedRoot?.italic == true && reloadedRoot?.underline == true, "inline style flags should survive markdown reload")
+        try expect(reloadedChild?.id == "child", "child id should survive markdown reload")
+        try expect(reloadedChild?.color == "rose" && reloadedChild?.bold == true && reloadedChild?.strike == true && reloadedChild?.highlight == true, "child style metadata should survive markdown reload")
+        try expect(reloadedChild?.icon == "★", "node icon should survive markdown reload")
+    }
+
+    private static func markdownPreviousMatcherPreservesMetadataAfterExternalReorder() throws {
+        let first = OutlineNodeDTO(id: "first", text: "Alpha", color: "blue", bold: true)
+        let second = OutlineNodeDTO(id: "second", text: "Beta", color: "rose", italic: true)
+        let previous = OutlineDocumentDTO(id: "doc", title: "Metadata", nodes: [first, second])
+
+        let parsed = MarkdownCodec.parseDocument(
+            """
+            # Metadata
+
+            - Beta
+            - Alpha
+            """,
+            previousDocument: previous,
+            documentId: previous.id,
+            now: previous.updatedAt
+        )
+
+        try expect(parsed.nodes.map(\.id) == ["second", "first"], "reordered markdown should preserve ids by text, not stale path")
+        try expect(parsed.nodes.map(\.color) == ["rose", "blue"], "reordered markdown should keep colors with matching text")
+        try expect(parsed.nodes[0].italic == true && parsed.nodes[1].bold == true, "reordered markdown should keep style metadata with matching text")
+    }
+
+    @MainActor
     private static func repositoryAdoptsExternalMarkdownFilename() throws {
         let base = FileManager.default.temporaryDirectory
             .appendingPathComponent("LocalOutlineExternalMarkdownSelfTest-\(UUID().uuidString)", isDirectory: true)
@@ -209,6 +383,32 @@ enum SelfTestRunner {
         try expect(!FileManager.default.fileExists(atPath: base.appendingPathComponent("Q1 Plan.md").path), "save should not duplicate external markdown under title filename")
         let reloaded = try repository.loadWorkspace()
         try expect(reloaded.documents.count == 1, "adopted external markdown should not duplicate on reload")
+    }
+
+    @MainActor
+    private static func repositoryUsesExternalMarkdownModificationDate() throws {
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("LocalOutlineExternalModificationSelfTest-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: base) }
+
+        let repository = try WorkspaceRepository(inMemory: true, baseURL: base)
+        let document = OutlineDocumentDTO(
+            id: "doc",
+            title: "External",
+            updatedAt: "2024-01-01T00:00:00.000Z",
+            nodes: [OutlineNodeDTO(text: "Before")]
+        )
+        try repository.saveWorkspace(WorkspaceV1DTO(activeDocumentId: document.id, documents: [document]))
+
+        let markdownURL = base.appendingPathComponent("External.md")
+        try "# External\n\n- After external edit\n".write(to: markdownURL, atomically: true, encoding: .utf8)
+        let externalDate = Date(timeIntervalSince1970: 2_000_000_000)
+        try FileManager.default.setAttributes([.modificationDate: externalDate], ofItemAtPath: markdownURL.path)
+
+        let loaded = try WorkspaceRepository(inMemory: true, baseURL: base).loadWorkspace()
+        let loadedDate = try expectDate(loaded.documents[0].updatedAt, "external markdown updatedAt should parse")
+        try expect(abs(loadedDate.timeIntervalSince(externalDate)) < 1, "external markdown mtime should update document updatedAt")
+        try expect(loaded.documents[0].nodes[0].text == "After external edit", "external markdown content should load")
     }
 
     @MainActor
@@ -275,10 +475,11 @@ enum SelfTestRunner {
 
         let snapshots = try repository.listSnapshots()
         try expect(!snapshots.isEmpty, "snapshot list should not be empty")
+        try expect(snapshots.contains { $0.reason == "manual" }, "snapshot reason should exclude timestamp suffix")
         let restored = try repository.restoreSnapshot(snapshots[0], currentWorkspace: workspace)
         try expect(restored.documents[0].title == "Snapshot source", "snapshot restore should recover saved title")
         let restoredSnapshots = try repository.listSnapshots()
-        try expect(restoredSnapshots.contains { $0.reason.hasPrefix("before-restore") }, "restore should create before-restore snapshot")
+        try expect(restoredSnapshots.contains { $0.reason == "before-restore" }, "restore should create before-restore snapshot")
     }
 
     private static func iCloudBackupWritesLatestAndStampedFiles() throws {

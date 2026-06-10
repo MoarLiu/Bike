@@ -11,8 +11,8 @@ enum SampleData {
                     title: "本地化大纲产品蓝图",
                     nodes: [
                         node("核心原则 #localfirst", [
-                            node("所有文档先保存在本机 SwiftData"),
-                            node("iCloud Drive 只作为备份和跨设备迁移文件夹"),
+                            node("所有文档优先保存为 iCloud Drive 中的 Markdown 文件"),
+                            node("节点样式和折叠状态写入本地 sidecar 元数据"),
                             node("导出格式保持开放：Markdown、OPML、FreeMind、JSON")
                         ]),
                         node("编辑逻辑", [

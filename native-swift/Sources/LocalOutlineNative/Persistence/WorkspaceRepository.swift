@@ -1,16 +1,7 @@
 import Foundation
 
-#if !LOCAL_OUTLINE_CLI_BUILD
-import SwiftData
-#endif
-
 @MainActor
 final class WorkspaceRepository {
-    #if !LOCAL_OUTLINE_CLI_BUILD
-    let container: ModelContainer
-    private let context: ModelContext
-    #endif
-
     private let snapshotsURL: URL
     private let backupsURL: URL
     private let markdownDirectoryURL: URL
@@ -19,18 +10,6 @@ final class WorkspaceRepository {
     private let legacyICloudBackupURL: URL
 
     init(inMemory: Bool = false, baseURL: URL? = nil) throws {
-        #if !LOCAL_OUTLINE_CLI_BUILD
-        let schema = Schema([
-            DocumentRecord.self,
-            NodeRecord.self,
-            AppSettingRecord.self,
-            SnapshotRecord.self
-        ])
-        let configuration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: inMemory)
-        container = try ModelContainer(for: schema, configurations: [configuration])
-        context = ModelContext(container)
-        #endif
-
         let legacyBase = (
             inMemory
                 ? URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("LocalOutlineNative-\(UUID().uuidString)", isDirectory: true)
@@ -62,31 +41,6 @@ final class WorkspaceRepository {
             return normalized
         }
 
-        #if !LOCAL_OUTLINE_CLI_BUILD
-        let documents = try context.fetch(FetchDescriptor<DocumentRecord>(sortBy: [SortDescriptor(\DocumentRecord.sortKey)]))
-            .filter { $0.deletedAt == nil }
-        if !documents.isEmpty {
-            let nodes = try context.fetch(FetchDescriptor<NodeRecord>(sortBy: [SortDescriptor(\NodeRecord.sortKey)]))
-            let docs = documents.map { record -> OutlineDocumentDTO in
-                let rootNodes = buildNodes(records: nodes.filter { $0.documentId == record.id }, parentId: nil)
-                return OutlineDocumentDTO(
-                    id: record.id,
-                    title: record.title,
-                    createdAt: record.createdAt,
-                    updatedAt: record.updatedAt,
-                    markdownSource: record.markdownSource,
-                    markdownUpdatedAt: record.markdownUpdatedAt,
-                    nodes: rootNodes.isEmpty ? [OutlineNodeDTO(text: Defaults.nodeText)] : rootNodes
-                )
-            }
-            let active = try setting("activeDocumentId") ?? docs.first?.id ?? ""
-            let normalized = TreeOperations.normalizeWorkspace(WorkspaceV1DTO(activeDocumentId: active, documents: docs))
-            try saveWorkspace(normalized)
-            try archiveLegacyRootBackups()
-            return normalized
-        }
-        #endif
-
         if FileManager.default.fileExists(atPath: legacyICloudBackupURL.path) {
             let data = try Data(contentsOf: legacyICloudBackupURL)
             let workspace = try ImportExportCodec.jsonDecoder.decode(WorkspaceV1DTO.self, from: data)
@@ -107,17 +61,6 @@ final class WorkspaceRepository {
             try createSnapshot(reason: snapshotReason, workspace: normalized)
         }
 
-        #if !LOCAL_OUTLINE_CLI_BUILD
-        try deleteAll(DocumentRecord.self)
-        try deleteAll(NodeRecord.self)
-        for (docIndex, document) in normalized.documents.enumerated() {
-            context.insert(DocumentRecord(document: document, sortKey: Double(docIndex)))
-            insertNodes(document.nodes, documentId: document.id, parentId: nil)
-        }
-        try setSetting("activeDocumentId", value: normalized.activeDocumentId)
-        try context.save()
-        #endif
-
         try saveMarkdownWorkspace(normalized)
     }
 
@@ -130,13 +73,6 @@ final class WorkspaceRepository {
         let stamp = Date.isoNow.replacingOccurrences(of: "[:.]", with: "-", options: .regularExpression)
         let url = snapshotsURL.appendingPathComponent("\(reason)-\(stamp).json")
         try data.write(to: url, options: .atomic)
-
-        #if !LOCAL_OUTLINE_CLI_BUILD
-        if let json = String(data: data, encoding: .utf8) {
-            context.insert(SnapshotRecord(reason: reason, workspaceJSON: json))
-            try context.save()
-        }
-        #endif
     }
 
     func listSnapshots() throws -> [SnapshotInfo] {
@@ -199,7 +135,7 @@ final class WorkspaceRepository {
             let item = metadata.documents.first { $0.filename == fileId }
             let values = try url.resourceValues(forKeys: [.contentModificationDateKey, .creationDateKey])
             let fileModifiedAt = values.contentModificationDate.map { ISO8601DateFormatter.localOutline.string(from: $0) }
-            let modifiedAt = item?.updatedAt ?? fileModifiedAt ?? Date.isoNow
+            let modifiedAt = [item?.updatedAt, fileModifiedAt].compactMap { $0 }.max() ?? Date.isoNow
             let createdAt = item?.createdAt ?? values.creationDate.map { ISO8601DateFormatter.localOutline.string(from: $0) } ?? modifiedAt
             let document = MarkdownCodec.parseDocument(
                 content,
@@ -210,7 +146,7 @@ final class WorkspaceRepository {
                         title: $0.title,
                         createdAt: createdAt,
                         updatedAt: $0.updatedAt,
-                        nodes: [OutlineNodeDTO(text: Defaults.nodeText)]
+                        nodes: ($0.nodes?.isEmpty == false ? $0.nodes : nil) ?? [OutlineNodeDTO(text: Defaults.nodeText)]
                     )
                 },
                 documentId: item?.id,
@@ -226,7 +162,8 @@ final class WorkspaceRepository {
                 title: normalizedDocument.title,
                 createdAt: normalizedDocument.createdAt,
                 updatedAt: normalizedDocument.updatedAt,
-                sortKey: index
+                sortKey: index,
+                nodes: normalizedDocument.nodes
             ))
         }
 
@@ -242,12 +179,25 @@ final class WorkspaceRepository {
         try FileManager.default.createDirectory(at: markdownDirectoryURL, withIntermediateDirectories: true)
         let previous = try loadMetadata()
         var usedFilenames = Set<String>()
+        var reservedFilenames = Set(
+            previous.documents
+                .filter { prior in workspace.documents.contains { $0.id == prior.id } }
+                .map { $0.filename.lowercased() }
+        )
         var metadataDocuments: [PersistedDocumentMetadata] = []
         var supersededURLs: [URL] = []
 
         for (index, document) in workspace.documents.enumerated() {
             let prior = previous.documents.first { $0.id == document.id }
-            let filename = markdownFilename(for: document, prior: prior, usedFilenames: &usedFilenames)
+            if let prior {
+                reservedFilenames.remove(prior.filename.lowercased())
+            }
+            let filename = markdownFilename(
+                for: document,
+                prior: prior,
+                usedFilenames: &usedFilenames,
+                reservedFilenames: reservedFilenames
+            )
             let targetURL = markdownDirectoryURL.appendingPathComponent(filename)
             if let prior, prior.filename != filename {
                 let oldURL = markdownDirectoryURL.appendingPathComponent(prior.filename)
@@ -272,7 +222,8 @@ final class WorkspaceRepository {
                 title: document.title,
                 createdAt: document.createdAt,
                 updatedAt: document.updatedAt,
-                sortKey: index
+                sortKey: index,
+                nodes: document.nodes
             ))
         }
 
@@ -299,7 +250,8 @@ final class WorkspaceRepository {
     private func markdownFilename(
         for document: OutlineDocumentDTO,
         prior: PersistedDocumentMetadata?,
-        usedFilenames: inout Set<String>
+        usedFilenames: inout Set<String>,
+        reservedFilenames: Set<String>
     ) -> String {
         let base = TreeOperations.sanitizeFilenameBase(document.title)
         let currentBase = prior?.filename.replacingOccurrences(of: #"\.(md|markdown)$"#, with: "", options: [.regularExpression, .caseInsensitive])
@@ -307,7 +259,7 @@ final class WorkspaceRepository {
         let preferredBase = titleChanged ? base : currentBase ?? base
         var candidate = "\(preferredBase).md"
         var suffix = 2
-        while usedFilenames.contains(candidate.lowercased()) {
+        while usedFilenames.contains(candidate.lowercased()) || reservedFilenames.contains(candidate.lowercased()) {
             candidate = "\(preferredBase) \(suffix).md"
             suffix += 1
         }
@@ -364,48 +316,13 @@ final class WorkspaceRepository {
 
     private func snapshotReason(from url: URL) -> String {
         let name = url.deletingPathExtension().lastPathComponent
-        guard let lastDash = name.lastIndex(of: "-") else { return name }
-        return String(name[..<lastDash])
-    }
-
-    #if !LOCAL_OUTLINE_CLI_BUILD
-    private func insertNodes(_ nodes: [OutlineNodeDTO], documentId: String, parentId: String?) {
-        let now = Date.isoNow
-        for (index, node) in nodes.enumerated() {
-            context.insert(NodeRecord(node: node, documentId: documentId, parentId: parentId, sortKey: Double(index), now: now))
-            insertNodes(node.children, documentId: documentId, parentId: node.id)
+        let timestampSuffix = #"-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}(?:-\d{3})?Z$"#
+        if let range = name.range(of: timestampSuffix, options: .regularExpression) {
+            return String(name[..<range.lowerBound])
         }
+        return name
     }
 
-    private func buildNodes(records: [NodeRecord], parentId: String?) -> [OutlineNodeDTO] {
-        records
-            .filter { $0.parentId == parentId }
-            .sorted { $0.sortKey < $1.sortKey }
-            .map { record in
-                let children = buildNodes(records: records, parentId: record.id)
-                return record.dto(children: children)
-            }
-    }
-
-    private func deleteAll<T: PersistentModel>(_ type: T.Type) throws {
-        let descriptor = FetchDescriptor<T>()
-        for record in try context.fetch(descriptor) {
-            context.delete(record)
-        }
-    }
-
-    private func setting(_ key: String) throws -> String? {
-        try context.fetch(FetchDescriptor<AppSettingRecord>()).first { $0.key == key }?.value
-    }
-
-    private func setSetting(_ key: String, value: String) throws {
-        if let record = try context.fetch(FetchDescriptor<AppSettingRecord>()).first(where: { $0.key == key }) {
-            record.value = value
-        } else {
-            context.insert(AppSettingRecord(key: key, value: value))
-        }
-    }
-    #endif
 }
 
 struct SnapshotInfo: Identifiable, Equatable {
@@ -427,4 +344,5 @@ private struct PersistedDocumentMetadata: Codable, Equatable {
     var createdAt: String
     var updatedAt: String
     var sortKey: Int
+    var nodes: [OutlineNodeDTO]? = nil
 }

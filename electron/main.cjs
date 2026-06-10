@@ -1,7 +1,9 @@
 const { app, BrowserWindow, ipcMain, shell, session } = require("electron");
+const crypto = require("node:crypto");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const os = require("node:os");
+const { fileURLToPath, pathToFileURL } = require("node:url");
 const {
   withWorkspaceWriteLock,
   writeFileAtomically,
@@ -9,6 +11,7 @@ const {
 
 const isDev = process.env.VITE_DEV_SERVER_URL || !app.isPackaged;
 const maxStampedBackups = 20;
+let coreModulePromise;
 const contentSecurityPolicy = [
   "default-src 'self'",
   "script-src 'self'",
@@ -21,14 +24,40 @@ const contentSecurityPolicy = [
   "frame-ancestors 'none'",
 ].join("; ");
 
-const iCloudDirectory = () =>
-  path.join(
+const iCloudDirectory = async () => {
+  if (process.platform === "win32") {
+    const iCloudRoot = process.env.ICLOUDDRIVE || path.join(os.homedir(), "iCloudDrive");
+    try {
+      const stats = await fs.stat(iCloudRoot);
+      if (!stats.isDirectory()) throw new Error("not a directory");
+    } catch {
+      throw new Error("未找到 iCloud for Windows 的 iCloudDrive 目录，请先安装并登录 iCloud for Windows，或使用“导出工作区”手动保存。");
+    }
+    return path.join(iCloudRoot, "LocalOutline");
+  }
+
+  if (process.platform !== "darwin") {
+    throw new Error("当前平台不支持自动 iCloud 备份，请使用“导出工作区”手动保存。");
+  }
+
+  return path.join(
     os.homedir(),
     "Library",
     "Mobile Documents",
     "com~apple~CloudDocs",
     "LocalOutline",
   );
+};
+
+const migrateWorkspacePayload = async (payload) => {
+  coreModulePromise ??= import(pathToFileURL(path.join(__dirname, "..", "mcp", "localoutline-core.mjs")).href);
+  const { migrateWorkspace } = await coreModulePromise;
+  return migrateWorkspace(payload);
+};
+
+const isRecord = (value) => typeof value === "object" && value !== null;
+
+const hashContent = (value) => crypto.createHash("sha256").update(value).digest("hex");
 
 const createWindow = () => {
   const window = new BrowserWindow({
@@ -87,7 +116,8 @@ const isAllowedAppUrl = (value) => {
   try {
     const url = new URL(value);
     if (isDev) return url.origin === "http://127.0.0.1:5173";
-    return url.protocol === "file:";
+    if (url.protocol !== "file:") return false;
+    return path.normalize(fileURLToPath(url)) === path.normalize(path.join(__dirname, "..", "dist", "index.html"));
   } catch {
     return false;
   }
@@ -139,20 +169,40 @@ app.on("activate", () => {
 
 ipcMain.handle("save-icloud-backup", async (_event, payload) => {
   try {
-    const directory = iCloudDirectory();
+    const request = isRecord(payload) && "workspace" in payload
+      ? payload
+      : { workspace: payload };
+    const expectedRevision = typeof request.expectedRevision === "string" && request.expectedRevision.trim()
+      ? request.expectedRevision
+      : undefined;
+    const workspace = await migrateWorkspacePayload(request.workspace);
+    const directory = await iCloudDirectory();
     await fs.mkdir(directory, { recursive: true });
     const latestPath = path.join(directory, "localoutline-workspace.json");
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     const stampedPath = path.join(directory, `localoutline-workspace-${stamp}.json`);
-    const content = JSON.stringify(payload, null, 2);
+    const content = JSON.stringify(workspace, null, 2);
+    const nextRevision = hashContent(content);
     await withWorkspaceWriteLock(latestPath, async () => {
+      const existingRaw = await fs.readFile(latestPath, "utf8").catch((error) => {
+        if (error?.code === "ENOENT") return null;
+        throw error;
+      });
+      const existingRevision = existingRaw ? hashContent(existingRaw) : undefined;
+      if (
+        existingRevision &&
+        existingRevision !== nextRevision &&
+        existingRevision !== expectedRevision
+      ) {
+        throw new Error("iCloud 文件有外部修改，已取消覆盖。请先“载入备份”确认最新内容后再备份。");
+      }
       await writeFileAtomically(stampedPath, content);
       await writeFileAtomically(latestPath, content);
     });
     pruneStampedBackups(directory).catch((error) => {
       console.warn("Failed to prune old iCloud backups:", error);
     });
-    return { ok: true, path: latestPath };
+    return { ok: true, path: latestPath, revision: nextRevision };
   } catch (error) {
     return {
       ok: false,
@@ -163,9 +213,9 @@ ipcMain.handle("save-icloud-backup", async (_event, payload) => {
 
 ipcMain.handle("load-icloud-backup", async () => {
   try {
-    const latestPath = path.join(iCloudDirectory(), "localoutline-workspace.json");
+    const latestPath = path.join(await iCloudDirectory(), "localoutline-workspace.json");
     const raw = await fs.readFile(latestPath, "utf8");
-    return { ok: true, payload: JSON.parse(raw), path: latestPath };
+    return { ok: true, payload: JSON.parse(raw), path: latestPath, revision: hashContent(raw) };
   } catch (error) {
     return {
       ok: false,

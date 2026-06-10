@@ -19,7 +19,15 @@ type PreviousNodeEntry = {
 type NodeOverrides = Partial<
   Pick<
     OutlineNode,
-    "note" | "checked" | "headingLevel" | "imageName" | "imageAlt" | "table" | "isTodo"
+    | "note"
+    | "checked"
+    | "headingLevel"
+    | "imageName"
+    | "imageAlt"
+    | "table"
+    | "codeBlock"
+    | "codeLanguage"
+    | "isTodo"
   >
 >;
 
@@ -53,10 +61,10 @@ const normalizeMatchText = (value: string) =>
 
 const pathKey = (path: number[]) => path.join(".");
 
-const appendNote = (node: OutlineNode, value: string) => {
+const appendNote = (node: OutlineNode, value: string, separator = "\n") => {
   const note = value.trim();
   if (!note) return;
-  node.note = node.note ? `${node.note}\n${note}` : note;
+  node.note = node.note ? `${node.note}${separator}${note}` : note;
 };
 
 const cloneTable = (table: string[][] | undefined) =>
@@ -107,13 +115,17 @@ const createPreviousMatcher = (previousDocument?: OutlineDocument) => {
   visit(previousDocument?.nodes ?? []);
 
   return (path: number[], text: string) => {
+    const key = normalizeMatchText(text);
     const pathEntry = byPath.get(pathKey(path));
-    if (pathEntry && !pathEntry.used) {
+    if (
+      pathEntry &&
+      !pathEntry.used &&
+      normalizeMatchText(pathEntry.node.text) === key
+    ) {
       pathEntry.used = true;
       return pathEntry.node;
     }
 
-    const key = normalizeMatchText(text);
     const textEntry = byText.get(key)?.find((entry) => !entry.used);
     if (textEntry) {
       textEntry.used = true;
@@ -150,6 +162,14 @@ const makeNodeFactory = (previousDocument?: OutlineDocument) => {
       imageName: overrides.imageName,
       imageAlt: overrides.imageAlt,
       table: overrides.table ? cloneTable(overrides.table) : undefined,
+      codeBlock:
+        typeof overrides.codeBlock === "string"
+          ? overrides.codeBlock.replace(/\r\n?/g, "\n")
+          : undefined,
+      codeLanguage:
+        typeof overrides.codeLanguage === "string" && overrides.codeLanguage.trim()
+          ? overrides.codeLanguage.trim()
+          : undefined,
       isTodo: overrides.isTodo ?? false,
       children: [],
     };
@@ -170,6 +190,31 @@ const markdownNoteForExport = (value: string, indent = "") =>
     .split("\n")
     .map((line) => `${indent}> ${line}`)
     .join("\n");
+
+const markdownCodeFenceForExport = (code: string) => {
+  let longestRun = 0;
+  let currentRun = 0;
+  Array.from(code).forEach((character) => {
+    if (character === "`") {
+      currentRun += 1;
+      longestRun = Math.max(longestRun, currentRun);
+    } else {
+      currentRun = 0;
+    }
+  });
+  return "`".repeat(Math.max(3, longestRun + 1));
+};
+
+const markdownCodeForExport = (value: string, language = "", indent = "") => {
+  const code = value.replace(/\r\n?/g, "\n");
+  const fence = markdownCodeFenceForExport(code);
+  const info = language.trim().replace(/[`~\s].*$/, "");
+  return [
+    `${indent}${fence}${info}`,
+    ...code.split("\n").map((line) => `${indent}${line}`),
+    `${indent}${fence}`,
+  ].join("\n");
+};
 
 const markdownTableCellForExport = (value: string) =>
   markdownInlineForExport(value).replace(/\|/g, "\\|");
@@ -206,6 +251,9 @@ const nodeToMarkdown = (
       lines.push(`![${markdownInlineForExport(node.imageAlt || node.imageName)}](${node.imageName})`);
     }
     if (node.table) lines.push(...tableToMarkdown(node.table));
+    if (typeof node.codeBlock === "string") {
+      lines.push(markdownCodeForExport(node.codeBlock, node.codeLanguage));
+    }
     nodeChildren(node).forEach((child) => {
       lines.push(...nodeToMarkdown(child, 0, false));
     });
@@ -222,6 +270,9 @@ const nodeToMarkdown = (
     lines.push(`${childIndent}![${markdownInlineForExport(node.imageAlt || node.imageName)}](${node.imageName})`);
   }
   if (node.table) lines.push(...tableToMarkdown(node.table, childIndent));
+  if (typeof node.codeBlock === "string") {
+    lines.push(markdownCodeForExport(node.codeBlock, node.codeLanguage, childIndent));
+  }
 
   nodeChildren(node).forEach((child) => {
     lines.push(...nodeToMarkdown(child, listDepth + 1, true));
@@ -477,7 +528,7 @@ const parseMarkdown = (
       }
       const note = quoteLines.join("\n").trim();
       if (lastNode) {
-        appendNote(lastNode, note);
+        appendNote(lastNode, note, "\n\n");
       } else {
         attachOrCreateBlock(`引用：${note.split("\n")[0] || DEFAULT_NODE_TEXT}`, note);
       }
@@ -485,19 +536,27 @@ const parseMarkdown = (
       continue;
     }
 
-    const fence = line.match(/^\s{0,3}(```+|~~~+)\s*(.*)$/);
+    const fence = line.match(/^([ \t]*)(```+|~~~+)\s*(.*)$/);
     if (fence) {
-      const marker = fence[1];
-      const language = fence[2].trim();
+      const fenceIndent = fence[1];
+      const marker = fence[2];
+      const language = fence[3].trim();
       const codeLines: string[] = [];
       index += 1;
       while (index < lines.length && !lines[index].trimStart().startsWith(marker)) {
-        codeLines.push(lines[index]);
+        const codeLine = lines[index];
+        codeLines.push(codeLine.startsWith(fenceIndent) ? codeLine.slice(fenceIndent.length) : codeLine);
         index += 1;
       }
       if (index < lines.length) index += 1;
       const label = language ? `代码块：${language}` : "代码块";
-      attachOrCreateBlock(label, codeLines.join("\n"), {}, Boolean(listStack.length));
+      const codeBlock = codeLines.join("\n");
+      if (listStack.length && lastNode) {
+        lastNode.codeBlock = codeBlock;
+        lastNode.codeLanguage = language || undefined;
+      } else {
+        attachOrCreateBlock(label, "", { codeBlock, codeLanguage: language || undefined });
+      }
       continue;
     }
 

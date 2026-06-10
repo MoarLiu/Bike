@@ -3,6 +3,7 @@ import { createReadStream } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
 import { createServer } from "node:http";
 import path from "node:path";
+import { pipeline } from "node:stream";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -18,6 +19,7 @@ const configPath = process.env.LOCAL_OUTLINE_CONFIG
   : defaultConfigPath;
 const cookieName = "local_outline_session";
 const loginAttempts = new Map();
+let sessionRevokedBefore = 0;
 const maxLoginFailures = 8;
 const maxLoginAttemptEntries = 5000;
 const loginWindowMs = 15 * 60 * 1000;
@@ -196,7 +198,11 @@ const parseCookies = (request) =>
       .map((part) => {
         const index = part.indexOf("=");
         if (index === -1) return [part, ""];
-        return [part.slice(0, index), decodeURIComponent(part.slice(index + 1))];
+        try {
+          return [part.slice(0, index), decodeURIComponent(part.slice(index + 1))];
+        } catch {
+          return [part.slice(0, index), ""];
+        }
       }),
   );
 
@@ -217,6 +223,7 @@ const createSessionToken = (config) => {
   const payload = Buffer.from(
     JSON.stringify({
       sub: config.auth.username,
+      iat: Date.now(),
       exp: Date.now() + config.auth.sessionMaxAgeHours * 3600 * 1000,
     }),
   ).toString("base64url");
@@ -238,7 +245,11 @@ const verifySessionToken = (token, config) => {
 
   try {
     const parsed = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
-    return parsed.sub === config.auth.username && Number(parsed.exp) > Date.now();
+    return (
+      parsed.sub === config.auth.username &&
+      Number(parsed.exp) > Date.now() &&
+      Number(parsed.iat) > sessionRevokedBefore
+    );
   } catch {
     return false;
   }
@@ -321,11 +332,22 @@ const clearLoginFailures = (keys) => {
   keys.forEach(({ key }) => loginAttempts.delete(key));
 };
 
-const isLoginLimited = (keys) =>
-  keys.some(({ key, scope }) => {
+const loginLimitState = (keys) => {
+  const now = Date.now();
+  let userLimited = false;
+  for (const { key, scope } of keys) {
     const attempt = loginAttempt(key);
-    return Date.now() < attempt.nextAllowedAt || (scope === "ip" && attempt.failures >= maxLoginFailures);
-  });
+    const delayed = now < attempt.nextAllowedAt;
+    const exhausted = attempt.failures >= maxLoginFailures;
+    if (scope === "ip" && (delayed || exhausted)) {
+      return { blocked: true, userLimited: false };
+    }
+    if (scope === "user" && (delayed || exhausted)) {
+      userLimited = true;
+    }
+  }
+  return { blocked: false, userLimited };
+};
 
 const readRequestBody = (request) =>
   new Promise((resolve, reject) => {
@@ -388,7 +410,15 @@ const serveStatic = async (request, response) => {
     "Cache-Control":
       extension === ".html" ? "no-store" : "private, max-age=31536000, immutable",
   });
-  createReadStream(target).pipe(response);
+  if (request.method === "HEAD") {
+    response.end();
+    return;
+  }
+  pipeline(createReadStream(target), response, (error) => {
+    if (error && !response.destroyed) {
+      response.destroy(error);
+    }
+  });
 };
 
 const handleRequest = async (request, response, config) => {
@@ -409,17 +439,18 @@ const handleRequest = async (request, response, config) => {
     const username = String(params.get("username") || "");
     const password = String(params.get("password") || "");
     const attemptKeys = loginAttemptKeys(request, username, config);
-    if (isLoginLimited(attemptKeys)) {
+    const limit = loginLimitState(attemptKeys);
+    if (limit.blocked) {
       send(response, 429, loginPage("登录尝试过多，请稍后再试"), {
         "Content-Type": "text/html; charset=utf-8",
         "Retry-After": "30",
       });
       return;
     }
-    if (
+    const credentialsValid =
       username === config.auth.username &&
-      await verifyPassword(password, config.auth.passwordHash)
-    ) {
+      await verifyPassword(password, config.auth.passwordHash);
+    if (credentialsValid) {
       clearLoginFailures(attemptKeys);
       response.writeHead(302, {
         ...securityHeaders,
@@ -432,6 +463,13 @@ const handleRequest = async (request, response, config) => {
       response.end();
       return;
     }
+    if (limit.userLimited) {
+      send(response, 429, loginPage("登录尝试过多，请稍后再试"), {
+        "Content-Type": "text/html; charset=utf-8",
+        "Retry-After": "30",
+      });
+      return;
+    }
     registerLoginFailure(attemptKeys);
     send(response, 401, loginPage("账号或密码不正确"), {
       "Content-Type": "text/html; charset=utf-8",
@@ -439,10 +477,16 @@ const handleRequest = async (request, response, config) => {
     return;
   }
 
-  if (
-    (request.method === "POST" || request.method === "GET") &&
-    url.pathname === "/auth/logout"
-  ) {
+  if (url.pathname === "/auth/logout" && request.method !== "POST") {
+    send(response, 405, "Method Not Allowed", {
+      "Content-Type": "text/plain; charset=utf-8",
+      Allow: "POST",
+    });
+    return;
+  }
+
+  if (request.method === "POST" && url.pathname === "/auth/logout") {
+    if (authed) sessionRevokedBefore = Date.now();
     response.writeHead(302, {
       ...securityHeaders,
       Location: "/login",

@@ -50,6 +50,39 @@ test("electron workspace lock release does not delete another owner lock", async
   await fs.unlink(lockPath);
 });
 
+test("electron workspace lock release requires exact lock content", async () => {
+  const workspacePath = await makeWorkspacePath();
+  const lockPath = workspaceLockPath(workspacePath);
+  const release = await acquireWorkspaceWriteLock(workspacePath);
+  const originalReadFile = fs.readFile;
+  const originalLock = JSON.parse(await originalReadFile(lockPath, "utf8"));
+  const replacementLock = `${JSON.stringify(
+    {
+      ...originalLock,
+      pid: process.pid + 1,
+      createdAt: "2026-06-05T08:00:00.000Z",
+    },
+    null,
+    2,
+  )}\n`;
+
+  let lockReads = 0;
+  fs.readFile = async (...args) => {
+    const result = await originalReadFile(...args);
+    if (args[0] === lockPath && lockReads++ === 0) {
+      await fs.writeFile(lockPath, replacementLock, "utf8");
+    }
+    return result;
+  };
+  try {
+    await release();
+  } finally {
+    fs.readFile = originalReadFile;
+  }
+  assert.equal(await originalReadFile(lockPath, "utf8"), replacementLock);
+  await fs.unlink(lockPath);
+});
+
 test("electron workspace lock times out while another writer owns it", async () => {
   const workspacePath = await makeWorkspacePath();
   const release = await acquireWorkspaceWriteLock(workspacePath);

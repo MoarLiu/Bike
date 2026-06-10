@@ -8,7 +8,7 @@ import {
   documentToMarkdown,
   parseMarkdownDocument,
 } from "./markdown";
-import pdfFontUrl from "./assets/ArialUnicode.ttf?url";
+import pdfFontUrl from "./assets/NotoSansSC-ChineseSimplified.ttf?url";
 
 const escapeXml = (value: string) =>
   value
@@ -99,6 +99,8 @@ const opmlNode = (node: OutlineNode, depth = 2): string => {
     _imageName: node.imageName,
     _imageAlt: node.imageAlt,
     _table: node.table ? JSON.stringify(node.table) : undefined,
+    _codeLanguage: node.codeLanguage,
+    _codeBlock: node.codeBlock,
   })}`;
   const children = nodeChildren(node);
   if (!children.length) return `${pad}<outline ${attrs}/>`;
@@ -462,6 +464,8 @@ const parseOutlineElement = (element: Element): OutlineNode => ({
   imageName: element.getAttribute("_imageName") || undefined,
   imageAlt: element.getAttribute("_imageAlt") || undefined,
   table: parseOpmlTable(element.getAttribute("_table")),
+  codeLanguage: element.getAttribute("_codeLanguage") || undefined,
+  codeBlock: element.getAttribute("_codeBlock") || undefined,
   children: Array.from(element.children)
     .filter((child) => child.tagName.toLowerCase() === "outline")
     .map(parseOutlineElement),

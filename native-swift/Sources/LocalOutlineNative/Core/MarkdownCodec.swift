@@ -215,17 +215,29 @@ enum MarkdownCodec {
                 continue
             }
 
-            if line.trimmingCharacters(in: .whitespaces).hasPrefix("```") || line.trimmingCharacters(in: .whitespaces).hasPrefix("~~~") {
-                let marker = String(line.trimmingCharacters(in: .whitespaces).prefix(3))
+            if let fence = line.firstMatch(#"^([ \t]*)(```+|~~~+)\s*(.*?)\s*$"#) {
+                let fenceIndent = fence[1]
+                let marker = fence[2]
+                let language = fence[3].trimmingCharacters(in: .whitespacesAndNewlines)
                 var code: [String] = []
                 index += 1
                 while index < lines.count, !lines[index].trimmingCharacters(in: .whitespaces).hasPrefix(marker) {
-                    code.append(lines[index])
+                    let codeLine = lines[index]
+                    code.append(codeLine.hasPrefix(fenceIndent) ? String(codeLine.dropFirst(fenceIndent.count)) : codeLine)
                     index += 1
                 }
                 if index < lines.count { index += 1 }
-                _ = appendNode("代码块", parentPath: listStack.last?.path ?? headingStack.last?.path) { node in
-                    node.note = code.joined(separator: "\n")
+                let codeBlock = code.joined(separator: "\n")
+                if let lastPath {
+                    mutateNode(at: lastPath) { node in
+                        node.codeBlock = codeBlock
+                        node.codeLanguage = language.isEmpty ? nil : language
+                    }
+                } else {
+                    _ = appendNode(language.isEmpty ? "代码块" : "代码块：\(language)", parentPath: listStack.last?.path ?? headingStack.last?.path) { node in
+                        node.codeBlock = codeBlock
+                        node.codeLanguage = language.isEmpty ? nil : language
+                    }
                 }
                 continue
             }
@@ -265,12 +277,38 @@ enum MarkdownCodec {
         if !node.note.isEmpty {
             node.note.components(separatedBy: "\n").forEach { lines.append("\(indent)> \($0)") }
         }
+        if let codeBlock = node.codeBlock {
+            lines.append(contentsOf: codeToMarkdown(codeBlock, language: node.codeLanguage, indent: indent))
+        }
         if let imageName = node.imageName {
             lines.append("\(indent)![\(escapeInline(node.imageAlt ?? imageName))](\(imageName))")
         }
         if let table = node.table, !table.isEmpty {
             lines.append(contentsOf: tableToMarkdown(table, indent: indent))
         }
+    }
+
+    private static func codeToMarkdown(_ code: String, language: String?, indent: String) -> [String] {
+        let fence = codeFence(for: code)
+        let normalizedLanguage = language?
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let opening = normalizedLanguage.isEmpty ? "\(indent)\(fence)" : "\(indent)\(fence)\(normalizedLanguage)"
+        return [opening] + normalizeSource(code).components(separatedBy: "\n").map { "\(indent)\($0)" } + ["\(indent)\(fence)"]
+    }
+
+    private static func codeFence(for code: String) -> String {
+        var longestRun = 0
+        var currentRun = 0
+        for character in code {
+            if character == "`" {
+                currentRun += 1
+                longestRun = max(longestRun, currentRun)
+            } else {
+                currentRun = 0
+            }
+        }
+        return String(repeating: "`", count: max(3, longestRun + 1))
     }
 
     private static func tableToMarkdown(_ table: [[String]], indent: String) -> [String] {
@@ -289,8 +327,12 @@ enum MarkdownCodec {
     }
 
     private static func escapeInline(_ value: String) -> String {
-        let collapsed = value.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression).trimmingCharacters(in: .whitespacesAndNewlines)
-        let text = collapsed.isEmpty ? Defaults.nodeText : collapsed
+        let normalized = value
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+            .replacingOccurrences(of: "\n", with: " ")
+        let trimmed = normalized.trimmingCharacters(in: .whitespacesAndNewlines)
+        let text = trimmed.isEmpty ? Defaults.nodeText : trimmed
         return text.replacingOccurrences(of: #"([\\`*_\[\]{}()#+\-.!>])"#, with: #"\\$1"#, options: .regularExpression)
     }
 
@@ -363,13 +405,17 @@ enum MarkdownCodec {
 
 private final class PreviousMatcher {
     private var byPath: [String: OutlineNodeDTO] = [:]
+    private var byText: [String: [OutlineNodeDTO]] = [:]
     private var used = Set<String>()
 
     init(previousDocument: OutlineDocumentDTO?) {
         func visit(_ nodes: [OutlineNodeDTO], path: [Int] = []) {
             for (index, node) in nodes.enumerated() {
-                let key = (path + [index]).map(String.init).joined(separator: ".")
-                byPath[key] = node
+                byPath[Self.pathKey(path + [index])] = node
+                let textKey = Self.normalizeMatchText(node.text)
+                if !textKey.isEmpty {
+                    byText[textKey, default: []].append(node)
+                }
                 visit(node.children, path: path + [index])
             }
         }
@@ -377,22 +423,50 @@ private final class PreviousMatcher {
     }
 
     func makeNode(text: String, path: [Int]) -> OutlineNodeDTO {
-        let key = path.map(String.init).joined(separator: ".")
-        var base = byPath[key] ?? OutlineNodeDTO(text: text.isEmpty ? Defaults.nodeText : text)
+        let normalizedText = text.isEmpty ? Defaults.nodeText : text
+        var base = previousNode(text: normalizedText, path: path) ?? OutlineNodeDTO(text: normalizedText)
         if used.contains(base.id) {
             base.id = "node_\(UUID().uuidString)"
         }
         used.insert(base.id)
-        base.text = text.isEmpty ? Defaults.nodeText : text
+        base.text = normalizedText
         base.note = ""
         base.checked = false
         base.headingLevel = 0
         base.imageName = nil
         base.imageAlt = nil
         base.table = nil
+        base.codeBlock = nil
+        base.codeLanguage = nil
         base.isTodo = false
         base.children = []
         return base
+    }
+
+    private func previousNode(text: String, path: [Int]) -> OutlineNodeDTO? {
+        let textKey = Self.normalizeMatchText(text)
+        if let pathNode = byPath[Self.pathKey(path)],
+           !used.contains(pathNode.id),
+           Self.normalizeMatchText(pathNode.text) == textKey {
+            return pathNode
+        }
+
+        if let textNode = byText[textKey]?.first(where: { !used.contains($0.id) }) {
+            return textNode
+        }
+
+        return nil
+    }
+
+    private static func pathKey(_ path: [Int]) -> String {
+        path.map(String.init).joined(separator: ".")
+    }
+
+    private static func normalizeMatchText(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
     }
 }
 

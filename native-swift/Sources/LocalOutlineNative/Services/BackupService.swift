@@ -29,8 +29,8 @@ enum ICloudBackupService {
             let latest = directory.appendingPathComponent(latestBackupFilename)
             let stamp = Date.isoNow.replacingOccurrences(of: "[:.]", with: "-", options: .regularExpression)
             let stamped = directory.appendingPathComponent("\(stampedBackupPrefix)\(stamp).json")
-            try data.write(to: latest, options: .atomic)
-            try data.write(to: stamped, options: .atomic)
+            try coordinatedWrite(data, to: latest)
+            try coordinatedWrite(data, to: stamped)
             return BackupResult(ok: true, path: latest.path)
         } catch {
             return BackupResult(ok: false, error: error.localizedDescription)
@@ -40,7 +40,7 @@ enum ICloudBackupService {
     static func load(directory: URL = directoryURL()) -> Result<(WorkspaceV1DTO, String), Error> {
         Result {
             let latest = directory.appendingPathComponent(latestBackupFilename)
-            let data = try Data(contentsOf: latest)
+            let data = try coordinatedReadData(from: latest)
             let workspace = try ImportExportCodec.jsonDecoder.decode(WorkspaceV1DTO.self, from: data)
             return (TreeOperations.normalizeWorkspace(workspace), latest.path)
         }
@@ -48,10 +48,9 @@ enum ICloudBackupService {
 
     static func listBackups(directory: URL = directoryURL()) throws -> [BackupFile] {
         guard FileManager.default.fileExists(atPath: directory.path) else { return [] }
-        let urls = try FileManager.default.contentsOfDirectory(
+        let urls = try coordinatedDirectoryContents(
             at: directory,
-            includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey],
-            options: [.skipsHiddenFiles]
+            includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey]
         )
         return try urls
             .filter { url in
@@ -68,6 +67,54 @@ enum ICloudBackupService {
 
     static func openDirectoryInFinder() {
         LocalOutlineStorage.openDocumentsDirectoryInFinder()
+    }
+
+    private static func coordinatedWrite(_ data: Data, to url: URL) throws {
+        let coordinator = NSFileCoordinator(filePresenter: nil)
+        var coordinationError: NSError?
+        var writeError: Error?
+        coordinator.coordinate(writingItemAt: url, options: .forReplacing, error: &coordinationError) { targetURL in
+            do {
+                try data.write(to: targetURL, options: .atomic)
+            } catch {
+                writeError = error
+            }
+        }
+        if let writeError { throw writeError }
+        if let coordinationError { throw coordinationError }
+    }
+
+    private static func coordinatedReadData(from url: URL) throws -> Data {
+        let coordinator = NSFileCoordinator(filePresenter: nil)
+        var coordinationError: NSError?
+        var readResult: Result<Data, Error>?
+        coordinator.coordinate(readingItemAt: url, options: [], error: &coordinationError) { targetURL in
+            readResult = Result { try Data(contentsOf: targetURL) }
+        }
+        if let readResult { return try readResult.get() }
+        if let coordinationError { throw coordinationError }
+        return Data()
+    }
+
+    private static func coordinatedDirectoryContents(
+        at url: URL,
+        includingPropertiesForKeys keys: [URLResourceKey]
+    ) throws -> [URL] {
+        let coordinator = NSFileCoordinator(filePresenter: nil)
+        var coordinationError: NSError?
+        var listResult: Result<[URL], Error>?
+        coordinator.coordinate(readingItemAt: url, options: [], error: &coordinationError) { targetURL in
+            listResult = Result {
+                try FileManager.default.contentsOfDirectory(
+                    at: targetURL,
+                    includingPropertiesForKeys: keys,
+                    options: [.skipsHiddenFiles]
+                )
+            }
+        }
+        if let listResult { return try listResult.get() }
+        if let coordinationError { throw coordinationError }
+        return []
     }
 }
 

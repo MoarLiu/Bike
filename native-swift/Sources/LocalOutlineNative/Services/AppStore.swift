@@ -26,10 +26,13 @@ final class AppStore: ObservableObject {
     @Published var selectedTag: String?
     @Published var notice: String?
     @Published var showDeleteConfirmation = false
+    @Published var pendingDeleteDocumentId: String?
     @Published var useDarkMode = false {
         didSet { applyAppearance() }
     }
     @Published var undoApplyRevision = 0
+    @Published var focusRequestToken = 0
+    @Published var focusRequestNodeId: String?
 
     let repository: WorkspaceRepository
     private var saveTask: Task<Void, Never>?
@@ -45,7 +48,12 @@ final class AppStore: ObservableObject {
         do {
             try self.init(repository: WorkspaceRepository())
         } catch {
-            fatalError("Failed to initialize SwiftData: \(error)")
+            do {
+                try self.init(repository: WorkspaceRepository(inMemory: true))
+                loadState = .failed("初始化本地存储失败：\(error.localizedDescription)")
+            } catch {
+                preconditionFailure("Failed to initialize fallback workspace repository: \(error)")
+            }
         }
     }
 
@@ -206,17 +214,49 @@ final class AppStore: ObservableObject {
     }
 
     func deleteActiveDocument() {
+        deleteDocument(workspace.activeDocumentId)
+    }
+
+    func requestDeleteDocument(_ id: String? = nil) {
         guard canEditWorkspace() else { return }
-        guard workspace.documents.count > 1, let activeDocument else {
+        guard workspace.documents.count > 1 else {
             show("至少保留一个文档")
             return
         }
+        pendingDeleteDocumentId = id ?? workspace.activeDocumentId
+        showDeleteConfirmation = true
+    }
+
+    func confirmDeletePendingDocument() {
+        let targetId = pendingDeleteDocumentId ?? workspace.activeDocumentId
+        pendingDeleteDocumentId = nil
+        deleteDocument(targetId)
+    }
+
+    func cancelDeleteDocument() {
+        pendingDeleteDocumentId = nil
+    }
+
+    private func deleteDocument(_ id: String) {
+        guard canEditWorkspace() else { return }
+        guard workspace.documents.count > 1 else {
+            show("至少保留一个文档")
+            return
+        }
+        guard let removedIndex = workspace.documents.firstIndex(where: { $0.id == id }) else {
+            show("文档不存在")
+            return
+        }
+        let document = workspace.documents[removedIndex]
         recordUndoSnapshot()
-        workspace.documents.removeAll { $0.id == activeDocument.id }
-        workspace.activeDocumentId = workspace.documents[0].id
-        activeNodeId = TreeOperations.firstNodeId(workspace.documents[0].nodes)
-        focusNodeId = nil
-        show("已删除文档：\(activeDocument.title)")
+        workspace.documents.remove(at: removedIndex)
+        if workspace.activeDocumentId == id {
+            let nextIndex = min(removedIndex, workspace.documents.count - 1)
+            workspace.activeDocumentId = workspace.documents[nextIndex].id
+            activeNodeId = TreeOperations.firstNodeId(workspace.documents[nextIndex].nodes)
+            focusNodeId = nil
+        }
+        show("已删除文档：\(document.title)")
         scheduleSave()
     }
 
@@ -242,21 +282,36 @@ final class AppStore: ObservableObject {
         activeNodeId = activeNodeId.flatMap { TreeOperations.findNode(in: document.nodes, id: $0)?.id } ?? TreeOperations.firstNodeId(document.nodes)
     }
 
-    func setActiveNodes(_ nodes: [OutlineNodeDTO]) {
+    func setActiveNodes(
+        _ nodes: [OutlineNodeDTO],
+        coalescingKey: String? = nil,
+        preservesMarkdown: Bool = false
+    ) {
         guard canEditWorkspace() else { return }
         guard var document = activeDocument, document.nodes != nodes else { return }
-        recordUndoSnapshot()
+        recordUndoSnapshot(coalescingKey: coalescingKey)
         document.nodes = nodes
-        document.updatedAt = Date.isoNow
-        document.markdownSource = nil
-        document.markdownUpdatedAt = nil
+        if !preservesMarkdown {
+            document.updatedAt = Date.isoNow
+            document.markdownSource = nil
+            document.markdownUpdatedAt = nil
+        }
         replaceActiveDocument(document)
     }
 
-    func updateNode(_ id: String, _ transform: (inout OutlineNodeDTO) -> Void) {
+    func updateNode(
+        _ id: String,
+        coalescingKey: String? = nil,
+        preservesMarkdown: Bool = false,
+        _ transform: (inout OutlineNodeDTO) -> Void
+    ) {
         guard canEditWorkspace() else { return }
         guard let document = activeDocument else { return }
-        setActiveNodes(TreeOperations.updateNode(document.nodes, id: id, transform: transform))
+        setActiveNodes(
+            TreeOperations.updateNode(document.nodes, id: id, transform: transform),
+            coalescingKey: coalescingKey,
+            preservesMarkdown: preservesMarkdown
+        )
     }
 
     func updateNodeText(_ id: String, text: String) {
@@ -280,7 +335,7 @@ final class AppStore: ObservableObject {
         guard let document = activeDocument else { return }
         let node = OutlineNodeDTO(text: "")
         setActiveNodes(TreeOperations.insertSiblingAfter(document.nodes, targetId: id, newNode: node))
-        activeNodeId = node.id
+        selectNode(node.id, focusEditor: true)
     }
 
     func insertChild(_ id: String) {
@@ -288,7 +343,7 @@ final class AppStore: ObservableObject {
         guard let document = activeDocument else { return }
         let node = OutlineNodeDTO(text: "")
         setActiveNodes(TreeOperations.addChild(document.nodes, targetId: id, child: node))
-        activeNodeId = node.id
+        selectNode(node.id, focusEditor: true)
     }
 
     func insertMindMapRootChild() {
@@ -301,7 +356,7 @@ final class AppStore: ObservableObject {
         guard let document = activeDocument else { return }
         let node = OutlineNodeDTO(text: "")
         setActiveNodes(document.nodes + [node])
-        activeNodeId = node.id
+        selectNode(node.id, focusEditor: true)
         show("已新增子节点")
     }
 
@@ -338,7 +393,7 @@ final class AppStore: ObservableObject {
         let nodes = visibleNodes
         let flatRows = TreeOperations.flatten(nodes, respectCollapsed: true)
         if let index = flatRows.firstIndex(where: { $0.node.id == activeNodeId }), index > 0 {
-            self.activeNodeId = flatRows[index - 1].node.id
+            selectNode(flatRows[index - 1].node.id, focusEditor: true)
         }
     }
 
@@ -347,7 +402,7 @@ final class AppStore: ObservableObject {
         let nodes = visibleNodes
         let flatRows = TreeOperations.flatten(nodes, respectCollapsed: true)
         if let index = flatRows.firstIndex(where: { $0.node.id == activeNodeId }), index < flatRows.count - 1 {
-            self.activeNodeId = flatRows[index + 1].node.id
+            selectNode(flatRows[index + 1].node.id, focusEditor: true)
         }
     }
 
@@ -366,9 +421,25 @@ final class AppStore: ObservableObject {
             show("主题不存在")
             return
         }
-        activeNodeId = id
+        selectNode(id, focusEditor: true)
         focusNodeId = id
         show("正在聚焦：\(TreeOperations.nodeText(node))")
+    }
+
+    func selectNode(_ id: String, focusEditor: Bool = false) {
+        activeNodeId = id
+        if focusEditor {
+            requestEditorFocus(for: id)
+        }
+    }
+
+    func requestEditorFocus(for id: String) {
+        focusRequestNodeId = id
+        focusRequestToken += 1
+    }
+
+    func clearEditorFocusRequest() {
+        focusRequestNodeId = nil
     }
 
     func clearFocus() {

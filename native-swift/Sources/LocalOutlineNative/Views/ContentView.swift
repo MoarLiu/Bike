@@ -27,10 +27,10 @@ struct ContentView: View {
         }
         .animation(.easeOut(duration: 0.18), value: store.notice)
         .alert("确认删除", isPresented: $store.showDeleteConfirmation) {
-            Button("取消", role: .cancel) {}
-            Button("删除", role: .destructive) { store.deleteActiveDocument() }
+            Button("取消", role: .cancel) { store.cancelDeleteDocument() }
+            Button("删除", role: .destructive) { store.confirmDeletePendingDocument() }
         } message: {
-            Text("此操作会删除当前文档。")
+            Text("此操作会删除所选文档。")
         }
     }
 }

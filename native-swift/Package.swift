@@ -19,9 +19,6 @@ let package = Package(
                 "Resources/Info.plist",
                 "Resources/LocalOutlineNative.entitlements",
                 "Resources/AppIcon.icns"
-            ],
-            swiftSettings: [
-                .define("LOCAL_OUTLINE_CLI_BUILD")
             ]
         )
     ]

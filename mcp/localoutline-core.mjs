@@ -42,10 +42,10 @@ const normalizeTable = (value) => {
 };
 
 const uid = () =>
-  `node_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 9)}`;
+  `node_${crypto.randomUUID()}`;
 
 const documentUid = () =>
-  `doc_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 9)}`;
+  `doc_${crypto.randomUUID()}`;
 
 const uniqueId = (value, usedIds) => {
   const candidate = textOr(value, "").trim();
@@ -97,6 +97,14 @@ const normalizeNodeShallow = (rawNode, usedIds, fallbackText = DEFAULT_NODE_TEXT
     imageAlt:
       typeof rawNode.imageAlt === "string" ? rawNode.imageAlt : undefined,
     table: normalizeTable(rawNode.table),
+    codeBlock:
+      typeof rawNode.codeBlock === "string"
+        ? rawNode.codeBlock.replace(/\r\n?/g, "\n")
+        : undefined,
+    codeLanguage:
+      typeof rawNode.codeLanguage === "string" && rawNode.codeLanguage.trim()
+        ? rawNode.codeLanguage.trim().slice(0, 80)
+        : undefined,
     isTodo: rawNode.isTodo === true,
     children: [],
   };
@@ -170,9 +178,13 @@ export const migrateWorkspace = (rawWorkspace) => {
   }
 
   const usedIds = new Set();
-  const documents = rawWorkspace.documents.map((document) =>
-    migrateDocument(document, usedIds),
-  );
+  const documents = rawWorkspace.documents.flatMap((document) => {
+    try {
+      return [migrateDocument(document, usedIds)];
+    } catch {
+      return [];
+    }
+  });
   if (!documents.length) throw new Error("工作区至少需要一个文档");
 
   const requestedActiveId = textOr(rawWorkspace.activeDocumentId, "");
@@ -699,10 +711,11 @@ export class WorkspaceStore {
       directory,
       `.${basename}.${process.pid}.${Date.now()}.${crypto.randomBytes(4).toString("hex")}.tmp`,
     );
-    await fs.writeFile(tempPath, raw, "utf8");
+    await writeFileDurably(tempPath, raw);
     try {
       if (expectedRevision) await this.assertCurrentRevision(expectedRevision);
       await fs.rename(tempPath, this.config.workspacePath);
+      await fsyncDirectory(directory);
     } catch (error) {
       await fs.unlink(tempPath).catch(() => {});
       throw error;
@@ -716,6 +729,29 @@ export const createWorkspaceStore = async (options = {}) =>
 const hashContent = (value) => crypto.createHash("sha256").update(value).digest("hex");
 
 const cloneWorkspace = (workspace) => JSON.parse(JSON.stringify(workspace));
+
+const writeFileDurably = async (filePath, content) => {
+  const handle = await fs.open(filePath, "w");
+  try {
+    await handle.writeFile(content, "utf8");
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+};
+
+const fsyncDirectory = async (directory) => {
+  try {
+    const handle = await fs.open(directory, "r");
+    try {
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+  } catch {
+    // Directory fsync is not supported on every platform/filesystem.
+  }
+};
 
 const workspaceLockPath = (workspacePath) =>
   path.join(path.dirname(workspacePath), `.${path.basename(workspacePath)}.lock`);
@@ -756,7 +792,7 @@ const unlinkLockIfRawMatches = async (lockPath, raw) => {
 const releaseWorkspaceWriteLock = async (lockPath, ownerToken) => {
   try {
     const lock = await readWorkspaceLock(lockPath);
-    if (lock.ownerToken === ownerToken) await fs.unlink(lockPath);
+    if (lock.ownerToken === ownerToken) await unlinkLockIfRawMatches(lockPath, lock.raw);
   } catch (error) {
     if (error?.code !== "ENOENT") throw error;
   }
@@ -890,6 +926,8 @@ const nodeConfirmationFields = (node) => ({
   checked: node.checked === true,
   collapsed: node.collapsed === true,
   color: normalizeColor(node.color),
+  codeBlock: typeof node.codeBlock === "string" ? node.codeBlock : undefined,
+  codeLanguage: typeof node.codeLanguage === "string" ? node.codeLanguage : undefined,
   isTodo: node.isTodo === true,
   children: [],
 });
@@ -920,6 +958,14 @@ const createWritableNodeShallow = (rawNode = {}, usedIds) => {
     checked: raw.checked === true,
     collapsed: raw.collapsed === true,
     color: normalizeColor(textOr(raw.color, "plain")),
+    codeBlock:
+      typeof raw.codeBlock === "string"
+        ? raw.codeBlock.replace(/\r\n?/g, "\n")
+        : undefined,
+    codeLanguage:
+      typeof raw.codeLanguage === "string" && raw.codeLanguage.trim()
+        ? raw.codeLanguage.trim().slice(0, 80)
+        : undefined,
     isTodo: raw.isTodo === true || raw.checked === true,
     children: [],
   };
@@ -1047,6 +1093,12 @@ const updateNodeFields = (node, args) => {
   setField("collapsed", args.collapsed, (value) => value === true);
   setField("checked", args.checked, (value) => value === true);
   setField("isTodo", args.isTodo, (value) => value === true);
+  setField("codeBlock", args.codeBlock, (value) =>
+    typeof value === "string" ? value.replace(/\r\n?/g, "\n") : undefined,
+  );
+  setField("codeLanguage", args.codeLanguage, (value) =>
+    typeof value === "string" && value.trim() ? value.trim().slice(0, 80) : undefined,
+  );
   if (changes.some((change) => change.field === "checked") && node.checked) {
     node.isTodo = true;
   }
@@ -1650,6 +1702,8 @@ const fieldsForNode = (entry) => ({
   imageName: entry.node.imageName,
   imageAlt: entry.node.imageAlt,
   table: entry.node.table,
+  codeBlock: entry.node.codeBlock,
+  codeLanguage: entry.node.codeLanguage,
   isTodo: entry.node.isTodo === true,
   path: entry.path,
   breadcrumb: entry.breadcrumb,
@@ -1758,6 +1812,31 @@ const markdownNoteForExport = (value, indent = "") =>
     .map((line) => `${indent}> ${line}`)
     .join("\n");
 
+const markdownCodeFenceForExport = (code) => {
+  let longestRun = 0;
+  let currentRun = 0;
+  for (const character of code) {
+    if (character === "`") {
+      currentRun += 1;
+      longestRun = Math.max(longestRun, currentRun);
+    } else {
+      currentRun = 0;
+    }
+  }
+  return "`".repeat(Math.max(3, longestRun + 1));
+};
+
+const markdownCodeForExport = (value, language = "", indent = "") => {
+  const code = textOr(value, "").replace(/\r\n?/g, "\n");
+  const fence = markdownCodeFenceForExport(code);
+  const info = textOr(language, "").trim().replace(/[`~\s].*$/, "");
+  return [
+    `${indent}${fence}${info}`,
+    ...code.split("\n").map((line) => `${indent}${line}`),
+    `${indent}${fence}`,
+  ].join("\n");
+};
+
 const markdownTableCellForExport = (value) =>
   markdownInlineForExport(value).replace(/\|/g, "\\|");
 
@@ -1790,6 +1869,9 @@ const appendNodeMarkdown = (lines, node, listDepth, insideList) => {
       );
     }
     if (node.table) lines.push(...tableToMarkdown(node.table));
+    if (typeof node.codeBlock === "string") {
+      lines.push(markdownCodeForExport(node.codeBlock, node.codeLanguage));
+    }
     return { childListDepth: 0, childInsideList: false };
   }
 
@@ -1805,6 +1887,9 @@ const appendNodeMarkdown = (lines, node, listDepth, insideList) => {
     );
   }
   if (node.table) lines.push(...tableToMarkdown(node.table, childIndent));
+  if (typeof node.codeBlock === "string") {
+    lines.push(markdownCodeForExport(node.codeBlock, node.codeLanguage, childIndent));
+  }
 
   return { childListDepth: listDepth + 1, childInsideList: true };
 };

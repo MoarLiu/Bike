@@ -122,6 +122,8 @@ struct OutlineNodeDTO: Codable, Equatable, Identifiable, Hashable {
     var imageName: String?
     var imageAlt: String?
     var table: [[String]]?
+    var codeBlock: String?
+    var codeLanguage: String?
     var isTodo: Bool?
     var children: [OutlineNodeDTO]
 
@@ -142,6 +144,8 @@ struct OutlineNodeDTO: Codable, Equatable, Identifiable, Hashable {
         imageName: String? = nil,
         imageAlt: String? = nil,
         table: [[String]]? = nil,
+        codeBlock: String? = nil,
+        codeLanguage: String? = nil,
         isTodo: Bool? = nil,
         children: [OutlineNodeDTO] = []
     ) {
@@ -161,13 +165,15 @@ struct OutlineNodeDTO: Codable, Equatable, Identifiable, Hashable {
         self.imageName = imageName
         self.imageAlt = imageAlt
         self.table = table
+        self.codeBlock = Self.normalizeCodeBlock(codeBlock)
+        self.codeLanguage = Self.normalizeCodeLanguage(codeLanguage)
         self.isTodo = isTodo
         self.children = children
     }
 
     enum CodingKeys: String, CodingKey {
         case id, text, note, checked, collapsed, color, headingLevel
-        case bold, italic, underline, strike, highlight, icon, imageName, imageAlt, table, isTodo, children
+        case bold, italic, underline, strike, highlight, icon, imageName, imageAlt, table, codeBlock, codeLanguage, isTodo, children
     }
 
     init(from decoder: Decoder) throws {
@@ -189,8 +195,23 @@ struct OutlineNodeDTO: Codable, Equatable, Identifiable, Hashable {
         imageName = try container.decodeIfPresent(String.self, forKey: .imageName)
         imageAlt = try container.decodeIfPresent(String.self, forKey: .imageAlt)
         table = try container.decodeIfPresent([[String]].self, forKey: .table)
+        codeBlock = Self.normalizeCodeBlock(try container.decodeIfPresent(String.self, forKey: .codeBlock))
+        codeLanguage = Self.normalizeCodeLanguage(try container.decodeIfPresent(String.self, forKey: .codeLanguage))
         isTodo = try container.decodeIfPresent(Bool.self, forKey: .isTodo)
         children = try container.decodeIfPresent([OutlineNodeDTO].self, forKey: .children) ?? []
+    }
+
+    private static func normalizeCodeBlock(_ value: String?) -> String? {
+        value?
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+    }
+
+    private static func normalizeCodeLanguage(_ value: String?) -> String? {
+        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else {
+            return nil
+        }
+        return String(trimmed.prefix(80))
     }
 }
 
@@ -214,9 +235,9 @@ extension Date {
 }
 
 extension ISO8601DateFormatter {
-    static var localOutline: ISO8601DateFormatter {
+    nonisolated(unsafe) static let localOutline: ISO8601DateFormatter = {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return formatter
-    }
+    }()
 }

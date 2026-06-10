@@ -5,12 +5,14 @@ interface Window {
     saveICloudBackup: (payload: unknown) => Promise<{
       ok: boolean;
       path?: string;
+      revision?: string;
       error?: string;
     }>;
     loadICloudBackup: () => Promise<{
       ok: boolean;
       payload?: unknown;
       path?: string;
+      revision?: string;
       error?: string;
     }>;
   };

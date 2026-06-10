@@ -1,7 +1,7 @@
 import type { FlatNode, OutlineNode } from "./types";
 
 export const uid = () =>
-  `node_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 9)}`;
+  `node_${crypto.randomUUID()}`;
 
 export const createNode = (text = ""): OutlineNode => ({
   id: uid(),
@@ -69,25 +69,39 @@ const siblingsAtPath = (
   return parent.children;
 };
 
+const shallowEqualNode = (before: OutlineNode, after: OutlineNode) => {
+  const keys = new Set([...Object.keys(before), ...Object.keys(after)]);
+  for (const key of keys) {
+    const field = key as keyof OutlineNode;
+    if (!Object.is(before[field], after[field])) return false;
+  }
+  return true;
+};
+
 export const updateNode = (
   nodes: OutlineNode[],
   id: string,
   updater: (node: OutlineNode) => void,
 ): OutlineNode[] => {
-  return nodes.map((node) => {
+  let changed = false;
+  const next = nodes.map((node) => {
     if (node.id === id) {
       const updated = { ...node };
       updater(updated);
+      if (shallowEqualNode(node, updated)) return node;
+      changed = true;
       return updated;
     }
     if (node.children && node.children.length > 0) {
       const nextChildren = updateNode(node.children, id, updater);
       if (nextChildren !== node.children) {
+        changed = true;
         return { ...node, children: nextChildren };
       }
     }
     return node;
   });
+  return changed ? next : nodes;
 };
 
 export const insertSiblingAfter = (
@@ -104,6 +118,28 @@ export const insertSiblingAfter = (
   return nodes.map((node) => {
     if (node.children && node.children.length > 0) {
       const nextChildren = insertSiblingAfter(node.children, targetId, newNode);
+      if (nextChildren !== node.children) {
+        return { ...node, children: nextChildren };
+      }
+    }
+    return node;
+  });
+};
+
+export const insertSiblingBefore = (
+  nodes: OutlineNode[],
+  targetId: string,
+  newNode: OutlineNode,
+): OutlineNode[] => {
+  const index = nodes.findIndex((n) => n.id === targetId);
+  if (index !== -1) {
+    const next = [...nodes];
+    next.splice(index, 0, newNode);
+    return next;
+  }
+  return nodes.map((node) => {
+    if (node.children && node.children.length > 0) {
+      const nextChildren = insertSiblingBefore(node.children, targetId, newNode);
       if (nextChildren !== node.children) {
         return { ...node, children: nextChildren };
       }
@@ -303,6 +339,8 @@ export const mergeNodes = (
     node.imageName = node.imageName ?? sourceNode.imageName;
     node.imageAlt = node.imageAlt ?? sourceNode.imageAlt;
     node.table = node.table ?? sourceNode.table?.map((row) => [...row]);
+    node.codeBlock = node.codeBlock ?? sourceNode.codeBlock;
+    node.codeLanguage = node.codeLanguage ?? sourceNode.codeLanguage;
     node.children = [...(node.children || []), ...(sourceNode.children || [])];
   });
 };

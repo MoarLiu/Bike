@@ -235,6 +235,10 @@ private struct MindMapNode: View {
 
     private func startEditing() {
         guard item.id != MindMapLayout.rootId else { return }
+        if let currentEditingId = editingNodeId, currentEditingId != item.id {
+            store.updateNodeText(currentEditingId, text: editingDraftText)
+            store.finishCoalescedUndo()
+        }
         store.activeNodeId = item.id
         editingNodeId = item.id
     }
@@ -253,12 +257,13 @@ private struct MindMapNode: View {
             return
         }
         let shouldCloseEditor = editingNodeId == item.id
+        let draft = editingDraftText
         DispatchQueue.main.async {
             if shouldIgnoreFocusLoss {
                 shouldIgnoreFocusLoss = false
                 return
             }
-            saveEdit()
+            saveEdit(draft)
             if shouldCloseEditor, editingNodeId == item.id {
                 shouldIgnoreFocusLoss = true
                 editingNodeId = nil
@@ -266,8 +271,8 @@ private struct MindMapNode: View {
         }
     }
 
-    private func saveEdit() {
-        store.updateNodeText(item.id, text: editingDraftText)
+    private func saveEdit(_ draft: String? = nil) {
+        store.updateNodeText(item.id, text: draft ?? editingDraftText)
         store.finishCoalescedUndo()
     }
 

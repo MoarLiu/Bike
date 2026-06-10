@@ -66,20 +66,39 @@ enum ImportExportCodec {
         guard let consumer = CGDataConsumer(data: data as CFMutableData) else { return Data() }
         var box = pageBounds
         guard let context = CGContext(consumer: consumer, mediaBox: &box, nil) else { return Data() }
-        context.beginPDFPage(nil)
-        NSGraphicsContext.saveGraphicsState()
-        NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: false)
-        let text = printableText(document)
-        let attributed = NSAttributedString(
-            string: text,
-            attributes: [
-                .font: NSFont.systemFont(ofSize: 12),
-                .foregroundColor: NSColor.labelColor
-            ]
-        )
-        attributed.draw(in: CGRect(x: 52, y: 54, width: pageBounds.width - 104, height: pageBounds.height - 108))
-        NSGraphicsContext.restoreGraphicsState()
-        context.endPDFPage()
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 12),
+            .foregroundColor: NSColor.labelColor
+        ]
+        let left: CGFloat = 52
+        let top: CGFloat = pageBounds.height - 58
+        let bottom: CGFloat = 54
+        let lineHeight: CGFloat = 16
+        let maxWidth = pageBounds.width - 104
+        var y = top
+
+        func beginPage() {
+            context.beginPDFPage(nil)
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: false)
+            y = top
+        }
+
+        func endPage() {
+            NSGraphicsContext.restoreGraphicsState()
+            context.endPDFPage()
+        }
+
+        beginPage()
+        for line in wrappedPrintableLines(printableText(document), attributes: attributes, maxWidth: maxWidth) {
+            if y < bottom {
+                endPage()
+                beginPage()
+            }
+            (line as NSString).draw(at: CGPoint(x: left, y: y), withAttributes: attributes)
+            y -= lineHeight
+        }
+        endPage()
         context.closePDF()
         return data as Data
     }
@@ -134,7 +153,9 @@ enum ImportExportCodec {
             node.icon.map { #"_icon="\#(xml($0))""# },
             node.imageName.map { #"_imageName="\#(xml($0))""# },
             node.imageAlt.map { #"_imageAlt="\#(xml($0))""# },
-            node.table.flatMap { try? String(data: jsonEncoder.encode($0), encoding: .utf8) }.map { #"_table="\#(xml($0))""# }
+            node.table.flatMap { try? String(data: jsonEncoder.encode($0), encoding: .utf8) }.map { #"_table="\#(xml($0))""# },
+            node.codeLanguage.map { #"_codeLanguage="\#(xml($0))""# },
+            node.codeBlock.map { #"_codeBlock="\#(xml($0))""# }
         ].compactMap { $0 }.joined(separator: " ")
         guard !node.children.isEmpty else { return "\(pad)<outline \(attrs)/>" }
         return ["\(pad)<outline \(attrs)>", node.children.map { opmlNode($0, depth: depth + 1) }.joined(separator: "\n"), "\(pad)</outline>"].joined(separator: "\n")
@@ -163,9 +184,10 @@ enum ImportExportCodec {
 
     private static func htmlNode(_ node: OutlineNodeDTO) -> String {
         let note = node.note.isEmpty ? "" : "<p>\(xml(node.note))</p>"
+        let code = node.codeBlock.map { "<pre><code>\(xml($0))</code></pre>" } ?? ""
         let checked = node.checked ? #" data-checked="true""# : ""
         let children = node.children.isEmpty ? "" : "<ul>\(node.children.map(htmlNode).joined())</ul>"
-        return "<li\(checked)><span>\(xml(node.text.isEmpty ? Defaults.nodeText : node.text))</span>\(note)\(children)</li>"
+        return "<li\(checked)><span>\(xml(node.text.isEmpty ? Defaults.nodeText : node.text))</span>\(note)\(code)\(children)</li>"
     }
 
     private static func printableText(_ document: OutlineDocumentDTO) -> String {
@@ -173,9 +195,37 @@ enum ImportExportCodec {
             let indent = String(repeating: "  ", count: depth)
             let mark = node.checked ? "☑" : "•"
             let note = node.note.isEmpty ? [] : ["\(indent)  备注：\(node.note)"]
-            return ["\(indent)\(mark) \(node.icon.map { "\($0) " } ?? "")\(node.text.isEmpty ? Defaults.nodeText : node.text)"] + note + node.children.flatMap { lines($0, depth: depth + 1) }
+            let code = node.codeBlock.map { block in
+                ["\(indent)  代码："] + block.components(separatedBy: "\n").map { "\(indent)    \($0)" }
+            } ?? []
+            return ["\(indent)\(mark) \(node.icon.map { "\($0) " } ?? "")\(node.text.isEmpty ? Defaults.nodeText : node.text)"] + note + code + node.children.flatMap { lines($0, depth: depth + 1) }
         }
         return ([document.title, ""] + document.nodes.flatMap { lines($0, depth: 0) }).joined(separator: "\n")
+    }
+
+    private static func wrappedPrintableLines(
+        _ text: String,
+        attributes: [NSAttributedString.Key: Any],
+        maxWidth: CGFloat
+    ) -> [String] {
+        text.components(separatedBy: "\n").flatMap { line -> [String] in
+            guard !line.isEmpty else { return [""] }
+            var result: [String] = []
+            var current = ""
+            for character in line {
+                let next = current + String(character)
+                if !current.isEmpty, (next as NSString).size(withAttributes: attributes).width > maxWidth {
+                    result.append(current)
+                    current = String(character)
+                } else {
+                    current = next
+                }
+            }
+            if !current.isEmpty {
+                result.append(current)
+            }
+            return result
+        }
     }
 
     private static func parseOPML(_ text: String, filename: String) throws -> OutlineDocumentDTO {
@@ -197,6 +247,9 @@ enum ImportExportCodec {
     private static func xml(_ value: String) -> String {
         value
             .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "\r\n", with: "&#10;")
+            .replacingOccurrences(of: "\n", with: "&#10;")
+            .replacingOccurrences(of: "\r", with: "&#10;")
             .replacingOccurrences(of: "<", with: "&lt;")
             .replacingOccurrences(of: ">", with: "&gt;")
             .replacingOccurrences(of: "\"", with: "&quot;")
@@ -305,6 +358,8 @@ private final class OutlineXMLDelegate: NSObject, XMLParserDelegate {
             imageName: attrs["_imageName"],
             imageAlt: attrs["_imageAlt"],
             table: table,
+            codeBlock: attrs["_codeBlock"],
+            codeLanguage: attrs["_codeLanguage"],
             isTodo: attrs["_isTodo"] == "true"
         )
     }

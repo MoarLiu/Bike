@@ -166,6 +166,27 @@ test("uses Swift native backup path when Electron backup is absent on macOS", as
   assert.equal(config.workspacePath, swiftBackupPath);
 });
 
+test("migrateWorkspace skips malformed documents while preserving valid ones", () => {
+  const workspace = migrateWorkspace({
+    version: 1,
+    activeDocumentId: "doc_valid",
+    documents: [
+      null,
+      {
+        id: "doc_valid",
+        title: "Valid",
+        createdAt: "2026-06-04T08:00:00.000Z",
+        updatedAt: "2026-06-04T09:00:00.000Z",
+        nodes: [{ id: "node_valid", text: "Keep me", children: [] }],
+      },
+    ],
+  });
+
+  assert.equal(workspace.documents.length, 1);
+  assert.equal(workspace.activeDocumentId, "doc_valid");
+  assert.equal(workspace.documents[0].nodes[0].text, "Keep me");
+});
+
 test("searches title, node text, and notes with breadcrumbs", async () => {
   const store = await makeStore();
   const snapshot = await store.load();
@@ -227,6 +248,33 @@ test("returns compact documents, markdown, nodes, and exports", async () => {
   });
   assert.equal(exported.mime, "text/markdown");
   assert.equal(exported.filename, "MCP 服务需求.md");
+});
+
+test("exports node code blocks with language metadata", () => {
+  const workspace = migrateWorkspace({
+    version: 1,
+    activeDocumentId: "doc_code",
+    documents: [
+      {
+        id: "doc_code",
+        title: "Code",
+        createdAt: "2026-06-04T08:00:00.000Z",
+        updatedAt: "2026-06-04T09:00:00.000Z",
+        nodes: [
+          {
+            id: "node_code",
+            text: "Example",
+            note: "",
+            codeBlock: "console.log('ok')\n```\n~~~",
+            codeLanguage: "js",
+            children: [],
+          },
+        ],
+      },
+    ],
+  });
+
+  assert.match(documentToMarkdown(workspace.documents[0]), /````js\n  console\.log\('ok'\)\n  ```\n  ~~~\n  ````/);
 });
 
 test("indexes deeply nested outlines without recursive stack overflow", () => {
@@ -634,6 +682,42 @@ test("does not release a workspace lock owned by another writer", async () => {
   await fs.writeFile(lockPath, replacementLock, "utf8");
   await release();
   assert.equal(await fs.readFile(lockPath, "utf8"), replacementLock);
+  await fs.unlink(lockPath);
+});
+
+test("workspace lock release requires exact lock content", async () => {
+  const store = await makeStore({ mode: "write" });
+  const lockPath = path.join(
+    path.dirname(store.config.workspacePath),
+    `.${path.basename(store.config.workspacePath)}.lock`,
+  );
+  const release = await store.acquireWorkspaceWriteLock();
+  const originalReadFile = fs.readFile;
+  const originalLock = JSON.parse(await originalReadFile(lockPath, "utf8"));
+  const replacementLock = `${JSON.stringify(
+    {
+      ...originalLock,
+      pid: process.pid + 1,
+      createdAt: "2026-06-05T08:00:00.000Z",
+    },
+    null,
+    2,
+  )}\n`;
+
+  let lockReads = 0;
+  fs.readFile = async (...args) => {
+    const result = await originalReadFile(...args);
+    if (args[0] === lockPath && lockReads++ === 0) {
+      await fs.writeFile(lockPath, replacementLock, "utf8");
+    }
+    return result;
+  };
+  try {
+    await release();
+  } finally {
+    fs.readFile = originalReadFile;
+  }
+  assert.equal(await originalReadFile(lockPath, "utf8"), replacementLock);
   await fs.unlink(lockPath);
 });
 

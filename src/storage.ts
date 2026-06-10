@@ -4,6 +4,7 @@ import { migrateWorkspace } from "./migrations";
 const DB_NAME = "local-outline-db";
 const STORE_NAME = "workspace-store";
 const WORKSPACE_KEY = "workspace";
+const WORKSPACE_META_KEY = "workspace-meta";
 const FALLBACK_KEY = "local-outline-workspace";
 const FALLBACK_META_KEY = "local-outline-workspace-meta";
 
@@ -36,6 +37,12 @@ const fallbackSavedAt = () => {
   } catch {
     return 0;
   }
+};
+
+const savedAtFromMeta = (value: unknown) => {
+  if (!value || typeof value !== "object") return 0;
+  const savedAt = (value as { savedAt?: unknown }).savedAt;
+  return typeof savedAt === "string" ? timestamp(savedAt) : 0;
 };
 
 const readFallbackWorkspace = (): WorkspaceLoadResult => {
@@ -80,7 +87,8 @@ export const loadWorkspace = async (): Promise<WorkspaceLoadResult> => {
       const tx = db.transaction(STORE_NAME, "readonly");
       const store = tx.objectStore(STORE_NAME);
       const request = store.get(WORKSPACE_KEY);
-      request.onsuccess = () => {
+      const metaRequest = store.get(WORKSPACE_META_KEY);
+      tx.oncomplete = () => {
         if (!request.result) {
           resolve(readFallbackWorkspace());
           return;
@@ -88,9 +96,10 @@ export const loadWorkspace = async (): Promise<WorkspaceLoadResult> => {
         try {
           const workspace = migrateWorkspace(request.result);
           const fallback = readFallbackWorkspace();
+          const indexedDbSavedAt = savedAtFromMeta(metaRequest.result) || workspaceUpdatedAt(workspace);
           if (
             fallback.status === "loaded" &&
-            fallbackSavedAt() > workspaceUpdatedAt(workspace)
+            fallbackSavedAt() > indexedDbSavedAt
           ) {
             resolve(fallback);
             return;
@@ -104,21 +113,26 @@ export const loadWorkspace = async (): Promise<WorkspaceLoadResult> => {
           resolve({ status: "error", source: "indexeddb", error: toError(error) });
         }
       };
-      request.onerror = () => reject(request.error);
+      tx.onerror = () => reject(tx.error ?? request.error ?? metaRequest.error);
     });
   } catch (error) {
     const fallback = readFallbackWorkspace();
     if (fallback.status !== "empty") return fallback;
     return { status: "error", source: "indexeddb", error: toError(error) };
+  } finally {
+    db.close();
   }
 };
 
 export const saveWorkspace = async (workspace: Workspace): Promise<WorkspaceSaveResult> => {
+  let db: IDBDatabase | null = null;
   try {
-    const db = await openDb();
+    const activeDb = await openDb();
+    db = activeDb;
     await new Promise<void>((resolve, reject) => {
-      const tx = db.transaction(STORE_NAME, "readwrite");
+      const tx = activeDb.transaction(STORE_NAME, "readwrite");
       tx.objectStore(STORE_NAME).put(workspace, WORKSPACE_KEY);
+      tx.objectStore(STORE_NAME).put({ savedAt: new Date().toISOString() }, WORKSPACE_META_KEY);
       tx.oncomplete = () => resolve();
       tx.onerror = () => reject(tx.error);
     });
@@ -128,17 +142,30 @@ export const saveWorkspace = async (workspace: Workspace): Promise<WorkspaceSave
     } catch {}
     return { ok: true, target: "indexeddb" };
   } catch (indexedDbError) {
-    try {
-      localStorage.setItem(FALLBACK_KEY, JSON.stringify(workspace));
-      localStorage.setItem(FALLBACK_META_KEY, JSON.stringify({ savedAt: new Date().toISOString() }));
-      return { ok: true, target: "localstorage" };
-    } catch (localStorageError) {
-      return {
-        ok: false,
-        error: new Error(
-          `IndexedDB 保存失败：${toError(indexedDbError).message}；localStorage 备份也失败：${toError(localStorageError).message}`,
-        ),
-      };
-    }
+    const fallback = saveWorkspaceFallback(workspace);
+    if (fallback.ok) return fallback;
+    const localStorageError = fallback.error;
+    return {
+      ok: false,
+      error: new Error(
+        `IndexedDB 保存失败：${toError(indexedDbError).message}；localStorage 备份也失败：${toError(localStorageError).message}`,
+      ),
+    };
+  } finally {
+    db?.close();
+  }
+};
+
+export const saveWorkspaceFallback = (workspace: Workspace): WorkspaceSaveResult => {
+  try {
+    const savedAt = new Date(Math.max(Date.now(), workspaceUpdatedAt(workspace) + 1)).toISOString();
+    localStorage.setItem(FALLBACK_KEY, JSON.stringify(workspace));
+    localStorage.setItem(FALLBACK_META_KEY, JSON.stringify({ savedAt }));
+    return { ok: true, target: "localstorage" };
+  } catch (error) {
+    return {
+      ok: false,
+      error: toError(error),
+    };
   }
 };

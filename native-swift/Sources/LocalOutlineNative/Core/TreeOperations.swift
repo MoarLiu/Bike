@@ -35,6 +35,14 @@ enum TreeOperations {
         if let heading = next.headingLevel, ![0, 1, 2, 3].contains(heading) {
             next.headingLevel = 0
         }
+        next.codeBlock = next.codeBlock?
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        if let language = next.codeLanguage?.trimmingCharacters(in: .whitespacesAndNewlines), !language.isEmpty {
+            next.codeLanguage = String(language.prefix(80))
+        } else {
+            next.codeLanguage = nil
+        }
         next.children = next.children.map { normalizeNode($0, usedIds: &usedIds) }
         return next
     }
@@ -131,19 +139,27 @@ enum TreeOperations {
     }
 
     static func removeNode(_ nodes: [OutlineNodeDTO], targetId: String) -> [OutlineNodeDTO] {
-        var removedHere = nodes.filter { $0.id != targetId }
-        if removedHere.count != nodes.count {
-            return removedHere.isEmpty ? [createNode(Defaults.nodeText)] : removedHere
-        }
-        removedHere = nodes.map { node in
+        let result = removeNodeRecursive(nodes, targetId: targetId)
+        guard result.removed else { return nodes }
+        return result.nodes.isEmpty ? [createNode(Defaults.nodeText)] : result.nodes
+    }
+
+    private static func removeNodeRecursive(_ nodes: [OutlineNodeDTO], targetId: String) -> (nodes: [OutlineNodeDTO], removed: Bool) {
+        var removed = false
+        let next = nodes.compactMap { node -> OutlineNodeDTO? in
+            if node.id == targetId {
+                removed = true
+                return nil
+            }
             var copy = node
-            copy.children = removeNode(copy.children, targetId: targetId)
-            if copy.children.count == 1, copy.children[0].text == Defaults.nodeText, !node.children.isEmpty {
-                copy.children = []
+            let childResult = removeNodeRecursive(copy.children, targetId: targetId)
+            if childResult.removed {
+                removed = true
+                copy.children = childResult.nodes
             }
             return copy
         }
-        return removedHere
+        return (next, removed)
     }
 
     static func indentNode(_ nodes: [OutlineNodeDTO], targetId: String) -> [OutlineNodeDTO] {
@@ -191,15 +207,6 @@ enum TreeOperations {
             var copy = node
             copy.children = moveNode(copy.children, targetId: targetId, direction: direction)
             return copy
-        }
-    }
-
-    static func mergeNode(_ nodes: [OutlineNodeDTO], sourceId: String, targetId: String) -> [OutlineNodeDTO] {
-        guard let source = findNode(in: nodes, id: sourceId) else { return nodes }
-        let withoutSource = removeNode(nodes, targetId: sourceId)
-        return updateNode(withoutSource, id: targetId) { node in
-            node.text += source.text
-            node.children.append(contentsOf: source.children)
         }
     }
 

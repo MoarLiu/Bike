@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowDown,
   ArrowUp,
@@ -70,7 +70,7 @@ import {
 import { documentToMarkdown, parseMarkdownDocument } from "./markdown";
 import { firstDocument, migrateWorkspace } from "./migrations";
 import { createStarterWorkspace } from "./sample";
-import { loadWorkspace, saveWorkspace, type WorkspaceSaveResult } from "./storage";
+import { loadWorkspace, saveWorkspace, saveWorkspaceFallback, type WorkspaceSaveResult } from "./storage";
 import type { OutlineDocument, OutlineNode, ViewMode, Workspace } from "./types";
 import {
   addChild,
@@ -85,6 +85,7 @@ import {
   indentNode,
   insertParent,
   insertSiblingAfter,
+  insertSiblingBefore,
   mergeNodes,
   moveNode,
   nodeText,
@@ -107,16 +108,29 @@ type MarkdownDraft = {
   value: string;
   dirty: boolean;
 };
+type InspectorNoteDraft = {
+  nodeId: string;
+  value: string;
+  baseNote: string;
+  dirty: boolean;
+};
 type NodeClipboard = {
   mode: "copy" | "cut";
+  sourceDocumentId: string;
   sourceId: string;
   node: OutlineNode;
 };
+type OutlineDropZone = "before" | "after" | "child";
 
 const now = () => new Date().toISOString();
+const ICLOUD_REVISION_KEY = "local-outline-icloud-revision";
 
 const classNames = (...names: Array<string | false | undefined>) =>
   names.filter(Boolean).join(" ");
+
+const isEditableEventTarget = (target: EventTarget | null) =>
+  target instanceof HTMLElement &&
+  Boolean(target.closest("input, textarea, [contenteditable]"));
 
 const clampNumber = (value: number, min: number, max: number) =>
   Math.min(max, Math.max(min, value));
@@ -140,7 +154,22 @@ const replaceMarkdownTitle = (source: string, title: string) => {
   const normalized = source.replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n");
   const safeTitle = title.trim() || "未命名文档";
   const lines = normalized.split("\n");
-  const titleIndex = lines.findIndex((line) => /^\s{0,3}#(?!#)\s+/.test(line));
+  let inFence = false;
+  let fenceMarker = "";
+  const titleIndex = lines.findIndex((line) => {
+    const fence = line.match(/^\s{0,3}(```+|~~~+)/);
+    if (fence) {
+      if (!inFence) {
+        inFence = true;
+        fenceMarker = fence[1];
+      } else if (line.trimStart().startsWith(fenceMarker)) {
+        inFence = false;
+        fenceMarker = "";
+      }
+      return false;
+    }
+    return !inFence && /^\s{0,3}#(?!#)\s+/.test(line);
+  });
   if (titleIndex >= 0) {
     lines[titleIndex] = `# ${safeTitle}`;
     return lines.join("\n");
@@ -171,13 +200,16 @@ const nodeContainsId = (node: OutlineNode, id: string): boolean =>
 const firstNodeIdInWorkspace = (workspace: Workspace) =>
   firstNodeId(firstDocument(workspace).nodes);
 
-const formatTime = (iso: string) =>
-  new Intl.DateTimeFormat("zh-CN", {
+const formatTime = (iso: string) => {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "时间未知";
+  return new Intl.DateTimeFormat("zh-CN", {
     month: "2-digit",
     day: "2-digit",
     hour: "2-digit",
     minute: "2-digit",
-  }).format(new Date(iso));
+  }).format(date);
+};
 
 const formatRecentTime = (iso: string) => {
   const timestamp = new Date(iso).getTime();
@@ -200,6 +232,16 @@ const colorOptions = [
   { value: "rose", label: "红" },
 ];
 
+const useEventCallback = <Args extends unknown[], Return>(
+  callback: (...args: Args) => Return,
+) => {
+  const callbackRef = useRef(callback);
+  useEffect(() => {
+    callbackRef.current = callback;
+  }, [callback]);
+  return useCallback((...args: Args) => callbackRef.current(...args), []);
+};
+
 const nodeMenuColors = [
   { value: "plain", label: "默认", swatch: "#5f6065" },
   { value: "blue", label: "蓝", swatch: "#3b73ad" },
@@ -207,6 +249,78 @@ const nodeMenuColors = [
   { value: "amber", label: "黄", swatch: "#a96f21" },
   { value: "rose", label: "红", swatch: "#b55562" },
 ];
+
+const InspectorNoteField = React.memo(function InspectorNoteField({
+  nodeId,
+  note,
+  onPatch,
+  onDraftChange,
+  onCommit,
+}: {
+  nodeId: string;
+  note: string;
+  onPatch: (id: string, patch: Partial<OutlineNode>) => void;
+  onDraftChange: (id: string, value: string, baseNote: string) => void;
+  onCommit: (id: string, value: string) => void;
+}) {
+  const [draft, setDraft] = useState(note);
+  const latestRef = useRef({ nodeId, note, draft, onPatch, onCommit });
+  const focusedRef = useRef(false);
+  const debounceTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    latestRef.current = { nodeId, note, draft, onPatch, onCommit };
+  }, [draft, nodeId, note, onPatch, onCommit]);
+
+  useEffect(() => {
+    if (!focusedRef.current) setDraft(note);
+  }, [nodeId, note]);
+
+  const clearDebounce = useCallback(() => {
+    if (debounceTimerRef.current) {
+      window.clearTimeout(debounceTimerRef.current);
+      debounceTimerRef.current = null;
+    }
+  }, []);
+
+  const commitDraft = useCallback(() => {
+    clearDebounce();
+    const latest = latestRef.current;
+    if (latest.draft !== latest.note) {
+      latest.onPatch(latest.nodeId, { note: latest.draft });
+      latest.onCommit(latest.nodeId, latest.draft);
+      latestRef.current = { ...latest, note: latest.draft };
+    } else {
+      latest.onCommit(latest.nodeId, latest.note);
+    }
+  }, [clearDebounce]);
+
+  useEffect(() => () => commitDraft(), [commitDraft]);
+
+  const handleChange = (event: React.ChangeEvent<HTMLTextAreaElement>) => {
+    const value = event.target.value;
+    setDraft(value);
+    latestRef.current = { nodeId, note, draft: value, onPatch, onCommit };
+    onDraftChange(nodeId, value, note);
+    clearDebounce();
+    debounceTimerRef.current = window.setTimeout(commitDraft, 500);
+  };
+
+  return (
+    <textarea
+      value={draft}
+      onChange={handleChange}
+      onFocus={() => {
+        focusedRef.current = true;
+      }}
+      onBlur={() => {
+        focusedRef.current = false;
+        commitDraft();
+      }}
+      placeholder="补充说明、行动项或引用..."
+    />
+  );
+});
 
 function App() {
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
@@ -231,6 +345,7 @@ function App() {
   const modeRef = useRef<AppViewMode>("outline");
   const activeNodeIdRef = useRef<string | null>(null);
   const markdownDraftRef = useRef<MarkdownDraft>({ documentId: null, value: "", dirty: false });
+  const inspectorNoteDraftRef = useRef<InspectorNoteDraft | null>(null);
   const markdownParseTimerRef = useRef<number | null>(null);
   const flushPendingEditsRef = useRef<() => Workspace | null>(() => null);
 
@@ -239,12 +354,12 @@ function App() {
   );
   const [pendingCaretFocus, setPendingCaretFocus] = useState<{ id: string; position: number } | null>(null);
 
-  const showNotice = (message: string) => {
+  const showNotice = useEventCallback((message: string) => {
     setNotice(message);
     setNoticeKey((k) => k + 1);
-  };
+  });
 
-  const showSaveResult = (result: WorkspaceSaveResult) => {
+  const showSaveResult = useEventCallback((result: WorkspaceSaveResult) => {
     if (!result.ok) {
       showNotice(`保存失败：${result.error.message}`);
       return;
@@ -252,15 +367,15 @@ function App() {
     if (result.target === "localstorage") {
       showNotice("IndexedDB 不可用，已临时保存到浏览器备用存储");
     }
-  };
+  });
 
-  const replaceWorkspace = (next: Workspace) => {
+  const replaceWorkspace = useEventCallback((next: Workspace) => {
     workspaceRef.current = next;
     setWorkspace(next);
     return next;
-  };
+  });
 
-  const initializeWorkspace = (isMounted = () => true) => {
+  const initializeWorkspace = useEventCallback((isMounted: () => boolean = () => true) => {
     setLoadError(null);
     setReady(false);
     return loadWorkspace().then((result) => {
@@ -281,7 +396,7 @@ function App() {
       setLoadError(message);
       showNotice(message);
     });
-  };
+  });
 
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
@@ -402,31 +517,54 @@ function App() {
     return filtered;
   }, [search, selectedTag, workspace, sidebarView, recentTicker]);
 
-  const commitWorkspace = (updater: (workspace: Workspace) => Workspace) => {
+  const commitWorkspace = useEventCallback((updater: (workspace: Workspace) => Workspace) => {
     const current = workspaceRef.current;
     if (!current) return null;
-    return replaceWorkspace(updater(current));
-  };
+    const next = updater(current);
+    return next === current ? current : replaceWorkspace(next);
+  });
 
   const patchActiveDocument = (
     updater: (document: MarkdownDocument) => MarkdownDocument,
     options: { preserveMarkdown?: boolean } = {},
   ) => {
-    commitWorkspace((current) => ({
-      ...current,
-      documents: current.documents.map((document) =>
-        document.id === current.activeDocumentId
-          ? options.preserveMarkdown
-            ? updater({ ...(document as MarkdownDocument), updatedAt: now() })
-            : clearDocumentMarkdown(updater({ ...(document as MarkdownDocument), updatedAt: now() }))
-          : document,
-      ),
-    }));
+    return commitWorkspace((current) => {
+      let changed = false;
+      const documents = current.documents.map((document) => {
+        if (document.id !== current.activeDocumentId) return document;
+        const before = document as MarkdownDocument;
+        const updated = updater(before);
+        if (updated === before) return document;
+        changed = true;
+        if (!options.preserveMarkdown && typeof before.markdownSource === "string") {
+          showNotice("已切换为结构化编辑，原始 Markdown 将由当前大纲重新生成");
+        }
+        const stamped = { ...updated, updatedAt: now() };
+        return options.preserveMarkdown ? stamped : clearDocumentMarkdown(stamped);
+      });
+      return changed ? { ...current, documents } : current;
+    });
   };
+  const patchActiveDocumentStable = useEventCallback(patchActiveDocument);
 
-  const setActiveNodes = (nodes: OutlineNode[]) => {
-    patchActiveDocument((document) => ({ ...document, nodes }));
+  const updateActiveNodes = (
+    updater: (nodes: OutlineNode[], document: MarkdownDocument) => OutlineNode[],
+  ) => {
+    let nextNodes: OutlineNode[] | null = null;
+    patchActiveDocumentStable((document) => {
+      const nodes = updater(document.nodes, document);
+      nextNodes = nodes;
+      return nodes === document.nodes ? document : { ...document, nodes };
+    });
+    return nextNodes;
   };
+  const updateActiveNodesStable = useEventCallback(updateActiveNodes);
+
+  const setActiveNodes = useEventCallback((nodes: OutlineNode[]) =>
+    patchActiveDocumentStable((document) =>
+      nodes === document.nodes ? document : { ...document, nodes },
+    ),
+  );
 
   const parseMarkdownIntoDocument = (
     document: MarkdownDocument,
@@ -449,7 +587,7 @@ function App() {
     };
   };
 
-  const flushMarkdownDraft = () => {
+  const flushMarkdownDraft = useEventCallback(() => {
     if (markdownParseTimerRef.current) {
       window.clearTimeout(markdownParseTimerRef.current);
       markdownParseTimerRef.current = null;
@@ -483,9 +621,9 @@ function App() {
       showNotice(error instanceof Error ? error.message : "Markdown 解析失败");
       return workspaceRef.current;
     }
-  };
+  });
 
-  const flushFocusedStructuredInput = () => {
+  const flushFocusedStructuredInput = useEventCallback(() => {
     const element = document.activeElement;
     if (!(element instanceof HTMLTextAreaElement)) return workspaceRef.current;
 
@@ -512,16 +650,85 @@ function App() {
           : document,
       ),
     }));
-  };
+  });
 
-  const flushPendingEdits = () => {
+  const handleInspectorNoteDraftChange = useEventCallback((
+    nodeId: string,
+    value: string,
+    baseNote: string,
+  ) => {
+    inspectorNoteDraftRef.current = {
+      nodeId,
+      value,
+      baseNote,
+      dirty: value !== baseNote,
+    };
+  });
+
+  const handleInspectorNoteCommit = useEventCallback((nodeId: string, value: string) => {
+    const draft = inspectorNoteDraftRef.current;
+    if (!draft || draft.nodeId !== nodeId) return;
+    inspectorNoteDraftRef.current = {
+      nodeId,
+      value,
+      baseNote: value,
+      dirty: false,
+    };
+  });
+
+  const flushInspectorNoteDraft = useEventCallback(() => {
+    const draft = inspectorNoteDraftRef.current;
+    if (!draft?.dirty) return workspaceRef.current;
+
+    const current = workspaceRef.current;
+    const active = current?.documents.find((item) => item.id === current.activeDocumentId);
+    const node = active ? findNode(active.nodes, draft.nodeId) : null;
+    if (!current || !active || !node) {
+      inspectorNoteDraftRef.current = null;
+      return current ?? null;
+    }
+    if (node.note === draft.value) {
+      inspectorNoteDraftRef.current = {
+        nodeId: draft.nodeId,
+        value: draft.value,
+        baseNote: draft.value,
+        dirty: false,
+      };
+      return current;
+    }
+
+    const nextWorkspace = commitWorkspace((workspace) => ({
+      ...workspace,
+      documents: workspace.documents.map((document) =>
+        document.id === workspace.activeDocumentId
+          ? clearDocumentMarkdown({
+              ...(document as MarkdownDocument),
+              updatedAt: now(),
+              nodes: updateNode(document.nodes, draft.nodeId, (target) => {
+                target.note = draft.value;
+              }),
+            })
+          : document,
+      ),
+    }));
+    inspectorNoteDraftRef.current = {
+      nodeId: draft.nodeId,
+      value: draft.value,
+      baseNote: draft.value,
+      dirty: false,
+    };
+    return nextWorkspace ?? workspaceRef.current;
+  });
+
+  const flushPendingEdits = useEventCallback(() => {
     flushMarkdownDraft();
+    flushInspectorNoteDraft();
     return flushFocusedStructuredInput() ?? workspaceRef.current;
-  };
+  });
 
   flushPendingEditsRef.current = flushPendingEdits;
 
-  const handleMarkdownDraftChange = (value: string) => {
+  const handleMarkdownDraftChange = useEventCallback((value: string) => {
     if (!activeDocument) return;
     setMarkdownDraft(value);
     markdownDraftRef.current = {
@@ -536,9 +743,9 @@ function App() {
     markdownParseTimerRef.current = window.setTimeout(() => {
       flushMarkdownDraft();
     }, 450);
-  };
+  });
 
-  const switchMode = (nextMode: AppViewMode) => {
+  const switchMode = useEventCallback((nextMode: AppViewMode) => {
     if (nextMode === "markdown") {
       flushFocusedStructuredInput();
     }
@@ -547,7 +754,7 @@ function App() {
     }
     modeRef.current = nextMode;
     setMode(nextMode);
-  };
+  });
 
   useEffect(() => {
     if (!activeDocument || mode !== "markdown") return;
@@ -585,15 +792,38 @@ function App() {
     return () => window.removeEventListener("keydown", handleSaveShortcut, { capture: true });
   }, []);
 
-  const selectDocument = (id: string) => {
+  useEffect(() => {
+    const flushAndPersistFallback = () => {
+      const nextWorkspace = flushPendingEditsRef.current() ?? workspaceRef.current;
+      if (nextWorkspace) saveWorkspaceFallback(nextWorkspace);
+    };
+
+    const preventFileDropNavigation = (event: DragEvent) => {
+      event.preventDefault();
+    };
+
+    window.addEventListener("beforeunload", flushAndPersistFallback, { capture: true });
+    window.addEventListener("pagehide", flushAndPersistFallback, { capture: true });
+    window.addEventListener("dragover", preventFileDropNavigation);
+    window.addEventListener("drop", preventFileDropNavigation);
+    return () => {
+      flushAndPersistFallback();
+      window.removeEventListener("beforeunload", flushAndPersistFallback, { capture: true });
+      window.removeEventListener("pagehide", flushAndPersistFallback, { capture: true });
+      window.removeEventListener("dragover", preventFileDropNavigation);
+      window.removeEventListener("drop", preventFileDropNavigation);
+    };
+  }, []);
+
+  const selectDocument = useEventCallback((id: string) => {
     const currentWorkspace = flushPendingEdits() ?? workspaceRef.current;
     const document = currentWorkspace?.documents.find((item) => item.id === id);
     setFocusNodeId(null);
     setActiveNodeId(firstNodeId(document?.nodes ?? []));
     commitWorkspace((current) => ({ ...current, activeDocumentId: id }));
-  };
+  });
 
-  const createDocument = () => {
+  const createDocument = useEventCallback(() => {
     flushPendingEdits();
     const id = crypto.randomUUID();
     const document: OutlineDocument = {
@@ -611,9 +841,9 @@ function App() {
       documents: [document, ...current.documents],
     }));
     showNotice("已创建新文档");
-  };
+  });
 
-  const duplicateDocument = () => {
+  const duplicateDocument = useEventCallback(() => {
     const currentWorkspace = flushPendingEdits() ?? workspaceRef.current;
     const sourceDocument = currentWorkspace?.documents.find(
       (document) => document.id === currentWorkspace.activeDocumentId,
@@ -636,9 +866,9 @@ function App() {
       documents: [document, ...current.documents],
     }));
     showNotice(`已创建副本：${document.title}`);
-  };
+  });
 
-  const deleteDocument = () => {
+  const deleteDocument = useEventCallback(() => {
     const currentWorkspace = flushPendingEdits() ?? workspaceRef.current;
     const currentDocument = currentWorkspace?.documents.find(
       (document) => document.id === currentWorkspace.activeDocumentId,
@@ -660,24 +890,22 @@ function App() {
       documents: nextDocuments,
     });
     showNotice(`已删除文档：${deletedTitle}`);
-  };
+  });
 
-  const handleNodeText = (id: string, text: string) => {
-    if (!activeDocument) return;
-    setActiveNodes(updateNode(activeDocument.nodes, id, (node) => {
+  const handleNodeText = useEventCallback((id: string, text: string) => {
+    updateActiveNodesStable((nodes) => updateNode(nodes, id, (node) => {
       node.text = text;
     }));
-  };
+  });
 
-  const handleNodePatch = (id: string, patch: Partial<OutlineNode>) => {
-    if (!activeDocument) return;
-    setActiveNodes(updateNode(activeDocument.nodes, id, (node) => {
+  const handleNodePatch = useEventCallback((id: string, patch: Partial<OutlineNode>) => {
+    updateActiveNodesStable((nodes) => updateNode(nodes, id, (node) => {
       Object.assign(node, patch);
       node.color = normalizeColor(node.color);
     }));
-  };
+  });
 
-  const copyNodeLink = async (nodeId: string) => {
+  const copyNodeLink = useEventCallback(async (nodeId: string) => {
     const node = activeDocument ? findNode(activeDocument.nodes, nodeId) : null;
     if (!activeDocument || !node) return;
     const link = `[[${activeDocument.title}#${node.text || "未命名主题"}]]`;
@@ -687,67 +915,96 @@ function App() {
     } catch {
       showNotice(link);
     }
-  };
+  });
 
-  const exportNodeMarkdown = (nodeId: string) => {
+  const exportNodeMarkdown = useEventCallback((nodeId: string) => {
     const node = activeDocument ? findNode(activeDocument.nodes, nodeId) : null;
     if (!node) return;
     const title = node.text || "未命名主题";
     const content = [`# ${title}`, "", renderNodeMarkdown(node)].join("\n");
     downloadText(`${title.replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_")}.md`, content, "text/markdown");
     showNotice(`已导出主题：${title}`);
-  };
+  });
 
-  const insertAfter = (id: string) => {
-    if (!activeDocument) return;
+  const insertAfter = useEventCallback((id: string) => {
     const node = createNode("");
-    setActiveNodes(insertSiblingAfter(activeDocument.nodes, id, node));
-    setActiveNodeId(node.id);
-  };
+    let didInsert = false;
+    flushFocusedStructuredInput();
+    updateActiveNodesStable((nodes) => {
+      if (!findNode(nodes, id)) return nodes;
+      didInsert = true;
+      return insertSiblingAfter(nodes, id, node);
+    });
+    if (didInsert) setActiveNodeId(node.id);
+  });
 
-  const insertChild = (id: string) => {
-    if (!activeDocument) return;
+  const insertChild = useEventCallback((id: string) => {
     const node = createNode("");
-    if (id === "__local_outline_mindmap_root__") {
-      setActiveNodes([...activeDocument.nodes, node]);
-    } else {
-      setActiveNodes(addChild(activeDocument.nodes, id, node));
-    }
-    setActiveNodeId(node.id);
-  };
+    let didInsert = false;
+    flushFocusedStructuredInput();
+    updateActiveNodesStable((nodes) => {
+      if (id === "__local_outline_mindmap_root__") {
+        didInsert = true;
+        return [...nodes, node];
+      }
+      if (!findNode(nodes, id)) return nodes;
+      didInsert = true;
+      return addChild(nodes, id, node);
+    });
+    if (didInsert) setActiveNodeId(node.id);
+  });
 
-  const removeActiveNode = (id: string) => {
-    if (!activeDocument) return;
-    const next = removeNode(activeDocument.nodes, id);
-    setActiveNodes(next);
-    setActiveNodeId(firstNodeId(next));
+  const removeActiveNode = useEventCallback((id: string) => {
+    let nextNodes: OutlineNode[] | null = null;
+    flushFocusedStructuredInput();
+    updateActiveNodesStable((nodes) => {
+      if (!findNode(nodes, id)) return nodes;
+      nextNodes = removeNode(nodes, id);
+      return nextNodes;
+    });
+    if (!nextNodes) return;
+    setActiveNodeId(firstNodeId(nextNodes));
     if (focusNodeId === id) setFocusNodeId(null);
     showNotice("已删除主题");
-  };
+  });
 
-  const duplicateNode = (id: string) => {
-    if (!activeDocument) return;
-    const node = findNode(activeDocument.nodes, id);
+  const duplicateNode = useEventCallback((id: string) => {
+    const currentWorkspace = flushFocusedStructuredInput() ?? workspaceRef.current;
+    const currentDocument = currentWorkspace?.documents.find(
+      (document) => document.id === currentWorkspace.activeDocumentId,
+    );
+    const node = currentDocument ? findNode(currentDocument.nodes, id) : null;
     if (!node) return;
     const [copy] = rekeyNodes([node]);
-    setActiveNodes(insertSiblingAfter(activeDocument.nodes, id, copy));
+    updateActiveNodesStable((nodes) => (findNode(nodes, id) ? insertSiblingAfter(nodes, id, copy) : nodes));
     setActiveNodeId(copy.id);
     showNotice("已创建主题副本");
-  };
+  });
 
-  const insertParentNode = (id: string) => {
-    if (!activeDocument) return;
+  const insertParentNode = useEventCallback((id: string) => {
     const parent = createNode("上级主题");
-    setActiveNodes(insertParent(activeDocument.nodes, id, parent));
+    let didInsert = false;
+    flushFocusedStructuredInput();
+    updateActiveNodesStable((nodes) => {
+      if (!findNode(nodes, id)) return nodes;
+      didInsert = true;
+      return insertParent(nodes, id, parent);
+    });
+    if (!didInsert) return;
     setActiveNodeId(parent.id);
     showNotice("已插入上级主题");
-  };
+  });
 
-  const copyNodeToClipboard = async (id: string) => {
-    const node = activeDocument ? findNode(activeDocument.nodes, id) : null;
-    if (!node) return;
+  const copyNodeToClipboard = useEventCallback(async (id: string) => {
+    const currentWorkspace = flushFocusedStructuredInput() ?? workspaceRef.current;
+    const document = currentWorkspace?.documents.find(
+      (item) => item.id === currentWorkspace.activeDocumentId,
+    );
+    const node = document ? findNode(document.nodes, id) : null;
+    if (!document || !node) return;
     setNodeClipboard({
       mode: "copy",
+      sourceDocumentId: document.id,
       sourceId: id,
       node: cloneNodes([node])[0],
     });
@@ -757,71 +1014,133 @@ function App() {
       // Browser clipboard permission is best-effort; the in-app clipboard still works.
     }
     showNotice("已复制主题，可在脑图中粘贴");
-  };
+  });
 
-  const cutNodeToClipboard = (id: string) => {
-    const node = activeDocument ? findNode(activeDocument.nodes, id) : null;
-    if (!node) return;
+  const cutNodeToClipboard = useEventCallback((id: string) => {
+    const currentWorkspace = flushFocusedStructuredInput() ?? workspaceRef.current;
+    const document = currentWorkspace?.documents.find(
+      (item) => item.id === currentWorkspace.activeDocumentId,
+    );
+    const node = document ? findNode(document.nodes, id) : null;
+    if (!document || !node) return;
     setNodeClipboard({
       mode: "cut",
+      sourceDocumentId: document.id,
       sourceId: id,
       node: cloneNodes([node])[0],
     });
     showNotice("已剪切主题，选择目标后粘贴");
-  };
+  });
 
-  const pasteNodeAsChild = (targetId: string) => {
-    if (!activeDocument || !nodeClipboard) return;
-    const sourceNode = findNode(activeDocument.nodes, nodeClipboard.sourceId);
-    if (
-      nodeClipboard.mode === "cut" &&
-      sourceNode &&
-      nodeContainsId(sourceNode, targetId)
-    ) {
+  const pasteNodeAsChild = useEventCallback((targetId: string) => {
+    if (!nodeClipboard) return;
+    const clipboard = nodeClipboard;
+    let pasted: OutlineNode | null = null;
+    let pastedId: string | null = null;
+    let didPaste = false;
+    let blocked = false;
+    let staleCut = false;
+    flushFocusedStructuredInput();
+    commitWorkspace((current) => {
+      const activeDocumentId = current.activeDocumentId;
+      const active = current.documents.find((document) => document.id === activeDocumentId) as MarkdownDocument | undefined;
+      if (!active) return current;
+      const sourceDocument = current.documents.find(
+        (document) => document.id === clipboard.sourceDocumentId,
+      ) as MarkdownDocument | undefined;
+      const sourceNode = sourceDocument ? findNode(sourceDocument.nodes, clipboard.sourceId) : null;
+      if (clipboard.mode === "cut" && !sourceNode) {
+        staleCut = true;
+        return current;
+      }
+      if (clipboard.mode === "cut" && sourceNode && activeDocumentId === clipboard.sourceDocumentId && nodeContainsId(sourceNode, targetId)) {
+        blocked = true;
+        return current;
+      }
+      if (targetId !== "__local_outline_mindmap_root__" && !findNode(active.nodes, targetId)) return current;
+
+      [pasted] =
+        clipboard.mode === "copy"
+          ? rekeyNodes([clipboard.node])
+          : cloneNodes([sourceNode ?? clipboard.node]);
+      pastedId = pasted.id;
+      const activeBaseNodes =
+        clipboard.mode === "cut" && sourceNode && activeDocumentId === clipboard.sourceDocumentId
+          ? removeNode(active.nodes, clipboard.sourceId)
+          : active.nodes;
+      const activeNodes = targetId === "__local_outline_mindmap_root__"
+        ? [...activeBaseNodes, pasted]
+        : addChild(activeBaseNodes, targetId, pasted);
+      didPaste = true;
+
+      return {
+        ...current,
+        documents: current.documents.map((document) => {
+          if (document.id === activeDocumentId) {
+            return clearDocumentMarkdown({
+              ...(document as MarkdownDocument),
+              updatedAt: now(),
+              nodes: activeNodes,
+            });
+          }
+          if (clipboard.mode === "cut" && sourceNode && document.id === clipboard.sourceDocumentId) {
+            return clearDocumentMarkdown({
+              ...(document as MarkdownDocument),
+              updatedAt: now(),
+              nodes: removeNode(document.nodes, clipboard.sourceId),
+            });
+          }
+          return document;
+        }),
+      };
+    });
+    if (blocked) {
       showNotice("不能把主题粘贴到自己或自己的子主题里");
       return;
     }
-
-    const [pasted] = rekeyNodes([nodeClipboard.node]);
-    const baseNodes =
-      nodeClipboard.mode === "cut" && sourceNode
-        ? removeNode(activeDocument.nodes, nodeClipboard.sourceId)
-        : activeDocument.nodes;
-    const next = targetId === "__local_outline_mindmap_root__"
-      ? [...baseNodes, pasted]
-      : addChild(baseNodes, targetId, pasted);
-    setActiveNodes(next);
-    setActiveNodeId(pasted.id);
+    if (staleCut) {
+      setNodeClipboard(null);
+      showNotice("剪切来源已不存在，已取消粘贴");
+      return;
+    }
+    if (!didPaste) return;
+    if (pastedId) setActiveNodeId(pastedId);
     if (nodeClipboard.mode === "cut") {
       setNodeClipboard(null);
     }
     showNotice("已粘贴为下级主题");
-  };
+  });
 
-  const toggleSiblingCollapse = (id: string) => {
-    if (!activeDocument) return;
-    const rows = flattenNodes(activeDocument.nodes);
-    const target = rows.find((row) => row.node.id === id);
-    if (!target) return;
-    const siblings = rows.filter(
-      (row) => row.parentId === target.parentId && row.node.children.length,
-    );
-    if (!siblings.length) return;
-    const shouldCollapse = siblings.some((row) => !row.node.collapsed);
-    const siblingIds = new Set(siblings.map((row) => row.node.id));
-    const next = cloneNodes(activeDocument.nodes);
-    const apply = (nodes: OutlineNode[]) => {
-      nodes.forEach((node) => {
-        if (siblingIds.has(node.id)) node.collapsed = shouldCollapse;
-        apply(node.children);
-      });
-    };
-    apply(next);
-    setActiveNodes(next);
-    showNotice(shouldCollapse ? "已折叠同级主题" : "已展开同级主题");
-  };
+  const toggleSiblingCollapse = useEventCallback((id: string) => {
+    let didToggle = false;
+    let collapsed = false;
+    flushFocusedStructuredInput();
+    updateActiveNodesStable((nodes) => {
+      const rows = flattenNodes(nodes);
+      const target = rows.find((row) => row.node.id === id);
+      if (!target) return nodes;
+      const siblings = rows.filter(
+        (row) => row.parentId === target.parentId && row.node.children.length,
+      );
+      if (!siblings.length) return nodes;
+      const shouldCollapse = siblings.some((row) => !row.node.collapsed);
+      const siblingIds = new Set(siblings.map((row) => row.node.id));
+      const next = cloneNodes(nodes);
+      const apply = (items: OutlineNode[]) => {
+        items.forEach((node) => {
+          if (siblingIds.has(node.id)) node.collapsed = shouldCollapse;
+          apply(node.children);
+        });
+      };
+      apply(next);
+      didToggle = true;
+      collapsed = shouldCollapse;
+      return next;
+    });
+    if (didToggle) showNotice(collapsed ? "已折叠同级主题" : "已展开同级主题");
+  });
 
-  const handleKeyDown = (
+  const handleKeyDown = useEventCallback((
     event: React.KeyboardEvent<HTMLTextAreaElement>,
     node: OutlineNode,
   ) => {
@@ -830,19 +1149,21 @@ function App() {
     const { selectionStart, selectionEnd } = input;
 
     if (event.key === "ArrowUp" || event.key === "ArrowDown") {
-      const text = input.value;
-      const cursorPos = selectionStart ?? 0;
-      if (event.key === "ArrowUp" && text.substring(0, cursorPos).includes("\n")) return;
-      if (event.key === "ArrowDown" && text.substring(cursorPos).includes("\n")) return;
+      if (selectionStart !== selectionEnd) return;
+      const beforeCaret = selectionStart ?? 0;
+      const arrowKey = event.key;
       const rows = flattenNodes(visibleNodes, { respectCollapsed: true });
       const index = rows.findIndex((row) => row.node.id === node.id);
-      const nextIndex = event.key === "ArrowUp" ? index - 1 : index + 1;
+      const nextIndex = arrowKey === "ArrowUp" ? index - 1 : index + 1;
       const nextNode = rows[nextIndex]?.node;
       if (nextNode) {
-        event.preventDefault();
-        setActiveNodeId(nextNode.id);
-        const pos = event.key === "ArrowUp" ? nextNode.text.length : 0;
-        setPendingCaretFocus({ id: nextNode.id, position: pos });
+        window.requestAnimationFrame(() => {
+          if (document.activeElement !== input) return;
+          if (input.selectionStart !== beforeCaret || input.selectionEnd !== beforeCaret) return;
+          setActiveNodeId(nextNode.id);
+          const pos = arrowKey === "ArrowUp" ? nextNode.text.length : 0;
+          setPendingCaretFocus({ id: nextNode.id, position: pos });
+        });
       }
     }
     if (event.key === "Enter") {
@@ -852,73 +1173,81 @@ function App() {
     }
     if (event.key === "Tab") {
       event.preventDefault();
-      if (!activeDocument) return;
-      const next = event.shiftKey
-        ? outdentNode(activeDocument.nodes, node.id)
-        : indentNode(activeDocument.nodes, node.id);
-      setActiveNodes(next);
+      flushFocusedStructuredInput();
+      updateActiveNodesStable((nodes) =>
+        event.shiftKey ? outdentNode(nodes, node.id) : indentNode(nodes, node.id),
+      );
       setActiveNodeId(node.id);
       const pos = selectionStart ?? 0;
       setPendingCaretFocus({ id: node.id, position: pos });
     }
     if ((event.metaKey || event.ctrlKey) && !event.shiftKey) {
-      if (event.key === "b") {
+      const shortcutKey = event.key.toLowerCase();
+      if (shortcutKey === "b") {
         event.preventDefault();
-        if (!activeDocument) return;
-        setActiveNodes(updateNode(activeDocument.nodes, node.id, (n) => { n.bold = !n.bold; }));
-      } else if (event.key === "i") {
+        flushFocusedStructuredInput();
+        updateActiveNodesStable((nodes) => updateNode(nodes, node.id, (n) => { n.bold = !n.bold; }));
+      } else if (shortcutKey === "i") {
         event.preventDefault();
-        if (!activeDocument) return;
-        setActiveNodes(updateNode(activeDocument.nodes, node.id, (n) => { n.italic = !n.italic; }));
-      } else if (event.key === "u") {
+        flushFocusedStructuredInput();
+        updateActiveNodesStable((nodes) => updateNode(nodes, node.id, (n) => { n.italic = !n.italic; }));
+      } else if (shortcutKey === "u") {
         event.preventDefault();
-        if (!activeDocument) return;
-        setActiveNodes(updateNode(activeDocument.nodes, node.id, (n) => { n.underline = !n.underline; }));
+        flushFocusedStructuredInput();
+        updateActiveNodesStable((nodes) => updateNode(nodes, node.id, (n) => { n.underline = !n.underline; }));
       }
     }
     if (event.key === "Backspace") {
-      if (selectionStart === 0 && selectionEnd === 0 && activeDocument) {
+      if (selectionStart === 0 && selectionEnd === 0) {
         const rows = flattenNodes(visibleNodes, { respectCollapsed: true });
         const index = rows.findIndex((row) => row.node.id === node.id);
         if (index > 0) {
           event.preventDefault();
           const targetNode = rows[index - 1].node;
           const originalTargetLength = targetNode.text.length;
-          const next = mergeNodes(activeDocument.nodes, node.id, targetNode.id);
-          setActiveNodes(next);
+          flushFocusedStructuredInput();
+          updateActiveNodesStable((nodes) => mergeNodes(nodes, node.id, targetNode.id));
           setActiveNodeId(targetNode.id);
           setPendingCaretFocus({ id: targetNode.id, position: originalTargetLength });
           if (focusNodeId === node.id) setFocusNodeId(null);
-        } else if (!node.text && countNodes(activeDocument.nodes) > 1) {
+        } else {
+          const currentWorkspace = workspaceRef.current;
+          const currentDocument = currentWorkspace?.documents.find(
+            (item) => item.id === currentWorkspace.activeDocumentId,
+          );
+          if (input.value || countNodes(currentDocument?.nodes ?? []) <= 1) return;
           event.preventDefault();
           removeActiveNode(node.id);
         }
       }
     }
-  };
+  });
 
-  const updateTitle = (title: string) => {
+  const updateTitle = useEventCallback((title: string) => {
     const nextTitle = title || "未命名文档";
     if (modeRef.current === "markdown" && activeDocument) {
       const currentSource = markdownDraftRef.current.documentId === activeDocument.id
         ? markdownDraftRef.current.value
         : getDocumentMarkdown(activeDocument);
       handleMarkdownDraftChange(replaceMarkdownTitle(currentSource, nextTitle));
-      patchActiveDocument((document) => ({ ...document, title: nextTitle }), { preserveMarkdown: true });
+      patchActiveDocumentStable(
+        (document) => (document.title === nextTitle ? document : { ...document, title: nextTitle }),
+        { preserveMarkdown: true },
+      );
       return;
     }
-    patchActiveDocument((document) => ({
-      ...document,
-      title: nextTitle,
-    }));
-  };
+    patchActiveDocumentStable((document) =>
+      document.title === nextTitle ? document : { ...document, title: nextTitle },
+    );
+  });
 
-  const moveSelected = (direction: -1 | 1) => {
-    if (!activeDocument || !activeNodeId) return;
-    setActiveNodes(moveNode(activeDocument.nodes, activeNodeId, direction));
-  };
+  const moveSelected = useEventCallback((direction: -1 | 1) => {
+    if (!activeNodeId) return;
+    flushFocusedStructuredInput();
+    updateActiveNodesStable((nodes) => moveNode(nodes, activeNodeId, direction));
+  });
 
-  const exportActive = (format: ExportFormat) => {
+  const exportActive = useEventCallback((format: ExportFormat) => {
     const currentWorkspace = flushPendingEdits() ?? workspaceRef.current;
     const document = currentWorkspace?.documents.find(
       (item) => item.id === currentWorkspace.activeDocumentId,
@@ -931,9 +1260,9 @@ function App() {
       result.mime,
     );
     showNotice(`已导出 ${result.filename}`);
-  };
+  });
 
-  const exportActivePdf = async () => {
+  const exportActivePdf = useEventCallback(async () => {
     const currentWorkspace = flushPendingEdits() ?? workspaceRef.current;
     const document = currentWorkspace?.documents.find(
       (item) => item.id === currentWorkspace.activeDocumentId,
@@ -946,35 +1275,44 @@ function App() {
     } catch (error) {
       showNotice(error instanceof Error ? error.message : "PDF 导出失败");
     }
-  };
+  });
 
-  const exportAll = () => {
+  const exportAll = useEventCallback(() => {
     const currentWorkspace = flushPendingEdits() ?? workspaceRef.current;
     if (!currentWorkspace) return;
     const result = exportWorkspace(currentWorkspace);
     downloadText(result.filename, result.content, result.mime);
     showNotice(`已导出 ${result.filename}`);
-  };
+  });
 
-  const backupToCloud = async () => {
+  const backupToCloud = useEventCallback(async () => {
     const currentWorkspace = flushPendingEdits() ?? workspaceRef.current;
     if (!currentWorkspace) return;
     try {
-      const result = await saveICloudBackup(currentWorkspace);
+      const expectedRevision = localStorage.getItem(ICLOUD_REVISION_KEY) ?? undefined;
+      const result = await saveICloudBackup(currentWorkspace, expectedRevision);
+      if (result.ok && result.revision) {
+        localStorage.setItem(ICLOUD_REVISION_KEY, result.revision);
+      }
       showNotice(result.ok ? `iCloud 备份已保存：${result.path}` : result.error ?? "备份失败");
     } catch (error) {
       showNotice(error instanceof Error ? error.message : String(error));
     }
-  };
+  });
 
-  const loadCloudBackup = async () => {
+  const loadCloudBackup = useEventCallback(async () => {
     flushPendingEdits();
     if (!window.localOutline) {
       showNotice("浏览器版请用“导入”选择 iCloud Drive 里的 localoutline-workspace.json");
       return;
     }
     const result = await window.localOutline.loadICloudBackup();
-    if (!result.ok || !result.payload || !("documents" in (result.payload as Workspace))) {
+    if (
+      !result.ok ||
+      !result.payload ||
+      typeof result.payload !== "object" ||
+      !("documents" in result.payload)
+    ) {
       showNotice(result.error ?? "没有找到可用的 iCloud 备份");
       return;
     }
@@ -983,13 +1321,14 @@ function App() {
       replaceWorkspace(next);
       setActiveNodeId(firstNodeIdInWorkspace(next));
       setFocusNodeId(null);
+      if (result.revision) localStorage.setItem(ICLOUD_REVISION_KEY, result.revision);
       showNotice(`已载入 iCloud 备份：${result.path}`);
     } catch (error) {
       showNotice(`载入备份失败：${error instanceof Error ? error.message : String(error)}`);
     }
-  };
+  });
 
-  const handleImport = async (event: React.ChangeEvent<HTMLInputElement>) => {
+  const handleImport = useEventCallback(async (event: React.ChangeEvent<HTMLInputElement>) => {
     flushPendingEdits();
     const file = event.target.files?.[0];
     event.target.value = "";
@@ -997,6 +1336,23 @@ function App() {
     try {
       const imported = importDocument(await file.text(), file.name);
       if ("documents" in imported) {
+        const currentWorkspace = workspaceRef.current;
+        const shouldReplace = window.confirm(
+          `导入工作区「${file.name}」会替换当前所有文档。继续前会先下载一份当前工作区备份。`,
+        );
+        if (!shouldReplace) {
+          showNotice("已取消导入工作区");
+          return;
+        }
+        if (currentWorkspace) {
+          const backup = exportWorkspace(currentWorkspace);
+          const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+          downloadText(
+            `localoutline-workspace-before-import-${stamp}.json`,
+            backup.content,
+            backup.mime,
+          );
+        }
         replaceWorkspace(imported);
         setActiveNodeId(firstNodeIdInWorkspace(imported));
         setFocusNodeId(null);
@@ -1014,15 +1370,15 @@ function App() {
     } catch (error) {
       showNotice(error instanceof Error ? error.message : "导入失败");
     }
-  };
+  });
 
-  const setNodeRef = (id: string, element: HTMLTextAreaElement | null) => {
+  const setNodeRef = useEventCallback((id: string, element: HTMLTextAreaElement | null) => {
     if (element) {
       inputRefs.current.set(id, element);
     } else {
       inputRefs.current.delete(id);
     }
-  };
+  });
 
   if (loadError) {
     return (
@@ -1342,7 +1698,9 @@ function App() {
             {mode === "mindmap" && (
               <MindMap
                 title={focusNode?.text || activeDocument.title}
-                nodes={visibleNodes}
+                nodes={focusNode ? focusNode.children : activeDocument.nodes}
+                rootTargetId={focusNode?.id ?? null}
+                viewportResetKey={focusNode?.id ?? activeDocument.id}
                 activeNodeId={activeNodeId}
                 onSelect={setActiveNodeId}
                 onTitle={updateTitle}
@@ -1388,12 +1746,13 @@ function App() {
                   <>
                     <label className="field">
                       <span>备注</span>
-                      <textarea
-                        value={activeNode.note}
-                        onChange={(event) =>
-                          handleNodePatch(activeNode.id, { note: event.target.value })
-                        }
-                        placeholder="补充说明、行动项或引用..."
+                      <InspectorNoteField
+                        key={activeNode.id}
+                        nodeId={activeNode.id}
+                        note={activeNode.note}
+                        onPatch={handleNodePatch}
+                        onDraftChange={handleInspectorNoteDraftChange}
+                        onCommit={handleInspectorNoteCommit}
                       />
                     </label>
                     <label className="field">
@@ -2051,8 +2410,10 @@ interface OutlineNodeRowProps {
   onOpenMenu: (nodeId: string, rect: DOMRect) => void;
   onDragStart: (event: React.DragEvent, id: string) => void;
   onDragOver: (event: React.DragEvent, id: string) => void;
+  onDragLeave: (event: React.DragEvent, id: string) => void;
   onDragEnd: (event: React.DragEvent) => void;
   onDrop: (event: React.DragEvent, id: string) => void;
+  dropZone: OutlineDropZone | null;
 }
 
 const OutlineNodeRow = React.memo(function OutlineNodeRow({
@@ -2070,8 +2431,10 @@ const OutlineNodeRow = React.memo(function OutlineNodeRow({
   onOpenMenu,
   onDragStart,
   onDragOver,
+  onDragLeave,
   onDragEnd,
   onDrop,
+  dropZone,
 }: OutlineNodeRowProps) {
   const [localText, setLocalText] = useState(node.text);
   const isFocusedRef = useRef(false);
@@ -2145,13 +2508,12 @@ const OutlineNodeRow = React.memo(function OutlineNodeRow({
         `node-${normalizeColor(node.color)}`,
         `heading-${node.headingLevel ?? 0}`,
         node.highlight && "is-highlighted",
+        dropZone ? `drop-${dropZone}` : false,
       )}
       style={{ "--depth": depth } as React.CSSProperties}
       onClick={() => onSelect(node.id)}
-      draggable="true"
-      onDragStart={(e) => onDragStart(e, node.id)}
       onDragOver={(e) => onDragOver(e, node.id)}
-      onDragEnd={onDragEnd}
+      onDragLeave={(e) => onDragLeave(e, node.id)}
       onDrop={(e) => onDrop(e, node.id)}
     >
       <button
@@ -2180,6 +2542,12 @@ const OutlineNodeRow = React.memo(function OutlineNodeRow({
           node.children.length > 0 && "has-children",
           node.collapsed && "is-collapsed"
         )}
+        draggable="true"
+        onDragStart={(event) => {
+          event.stopPropagation();
+          onDragStart(event, node.id);
+        }}
+        onDragEnd={onDragEnd}
         onClick={handleBulletClick}
         title="主题操作"
       >
@@ -2213,6 +2581,7 @@ const OutlineNodeRow = React.memo(function OutlineNodeRow({
           )}
           rows={1}
           onChange={handleChange}
+          onDragStart={(event) => event.stopPropagation()}
           onKeyDown={(event) => onKeyDown(event, node)}
           onFocus={handleFocus}
           onBlur={handleBlur}
@@ -2257,14 +2626,22 @@ const OutlineNodeRow = React.memo(function OutlineNodeRow({
 });
 
 function OutlineView(props: OutlineViewProps) {
-  const rows = flattenNodes(props.nodes, { respectCollapsed: true });
+  const rows = useMemo(
+    () => flattenNodes(props.nodes, { respectCollapsed: true }),
+    [props.nodes],
+  );
   const [menuState, setMenuState] = useState<{
     nodeId: string;
     x: number;
     y: number;
   } | null>(null);
 
-  const [draggedId, setDraggedId] = useState<string | null>(null);
+  const [dropState, setDropState] = useState<{
+    id: string;
+    zone: OutlineDropZone;
+  } | null>(null);
+  const draggedIdRef = useRef<string | null>(null);
+  const draggedNodeRef = useRef<OutlineNode | null>(null);
 
   useEffect(() => {
     if (!menuState) return;
@@ -2291,42 +2668,71 @@ function OutlineView(props: OutlineViewProps) {
     ? rows.find((row) => row.node.id === menuState.nodeId)?.node ?? null
     : null;
 
-  const closeMenu = () => setMenuState(null);
-  const patchFromMenu = (patch: Partial<OutlineNode>) => {
+  const closeMenu = useCallback(() => setMenuState(null), []);
+  const patchFromMenu = useCallback((patch: Partial<OutlineNode>) => {
     if (!menuState) return;
     props.onPatch(menuState.nodeId, patch);
     closeMenu();
-  };
+  }, [closeMenu, menuState, props.onPatch]);
 
-  const handleOpenMenu = (nodeId: string, rect: DOMRect) => {
+  const handleOpenMenu = useCallback((nodeId: string, rect: DOMRect) => {
     setMenuState({
       nodeId,
       x: rect.left + rect.width / 2,
       y: rect.bottom + 8,
     });
-  };
+  }, []);
 
-  const handleDragStart = (e: React.DragEvent, id: string) => {
-    setDraggedId(id);
+  const handleDragStart = useEventCallback((e: React.DragEvent, id: string) => {
+    draggedIdRef.current = id;
+    draggedNodeRef.current = findNode(props.nodes, id);
+    setDropState(null);
     e.dataTransfer.effectAllowed = "move";
     e.dataTransfer.setData("text/plain", id);
-  };
+  });
 
-  const handleDragOver = (e: React.DragEvent, id: string) => {
-    if (draggedId === id) return;
-    const sourceNode = findNode(props.nodes, draggedId || "");
-    if (sourceNode && findNode(sourceNode.children, id)) return;
+  const dropZoneForEvent = useCallback((e: React.DragEvent): OutlineDropZone => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const relativeY = e.clientY - rect.top;
+    if (relativeY < rect.height / 3) return "before";
+    if (relativeY > (rect.height * 2) / 3) return "after";
+    return "child";
+  }, []);
+
+  const handleDragOver = useEventCallback((e: React.DragEvent, id: string) => {
+    const currentDraggedId = draggedIdRef.current;
+    if (currentDraggedId === id) {
+      setDropState((current) => (current?.id === id ? null : current));
+      return;
+    }
+    const sourceNode = draggedNodeRef.current;
+    if (sourceNode && findNode(sourceNode.children, id)) {
+      setDropState((current) => (current?.id === id ? null : current));
+      return;
+    }
     e.preventDefault();
     e.dataTransfer.dropEffect = "move";
-  };
+    const zone = dropZoneForEvent(e);
+    setDropState((current) =>
+      current?.id === id && current.zone === zone ? current : { id, zone },
+    );
+  });
 
-  const handleDragEnd = () => {
-    setDraggedId(null);
-  };
+  const handleDragLeave = useCallback((e: React.DragEvent, id: string) => {
+    const nextTarget = e.relatedTarget;
+    if (nextTarget instanceof HTMLElement && e.currentTarget.contains(nextTarget)) return;
+    setDropState((current) => (current?.id === id ? null : current));
+  }, []);
 
-  const handleDrop = (e: React.DragEvent, targetId: string) => {
+  const handleDragEnd = useCallback(() => {
+    draggedIdRef.current = null;
+    draggedNodeRef.current = null;
+    setDropState(null);
+  }, []);
+
+  const handleDrop = useEventCallback((e: React.DragEvent, targetId: string) => {
     e.preventDefault();
-    const sourceId = e.dataTransfer.getData("text/plain") || draggedId;
+    const sourceId = e.dataTransfer.getData("text/plain") || draggedIdRef.current;
     if (!sourceId || sourceId === targetId) return;
 
     const sourceNode = findNode(props.nodes, sourceId);
@@ -2334,19 +2740,21 @@ function OutlineView(props: OutlineViewProps) {
 
     if (findNode(sourceNode.children, targetId)) return;
 
-    const rect = e.currentTarget.getBoundingClientRect();
-    const relativeY = e.clientY - rect.top;
-    const isLowerHalf = relativeY > rect.height / 2;
+    const dropZone = dropState?.id === targetId ? dropState.zone : dropZoneForEvent(e);
 
     let next = removeNode(props.nodes, sourceId);
-    if (isLowerHalf) {
-      next = addChild(next, targetId, sourceNode);
-    } else {
+    if (dropZone === "before") {
+      next = insertSiblingBefore(next, targetId, sourceNode);
+    } else if (dropZone === "after") {
       next = insertSiblingAfter(next, targetId, sourceNode);
+    } else {
+      next = addChild(next, targetId, sourceNode);
     }
     props.onUpdateNodes(next);
-    setDraggedId(null);
-  };
+    draggedIdRef.current = null;
+    draggedNodeRef.current = null;
+    setDropState(null);
+  });
 
   return (
     <div className="outline-list">
@@ -2367,8 +2775,10 @@ function OutlineView(props: OutlineViewProps) {
           onOpenMenu={handleOpenMenu}
           onDragStart={handleDragStart}
           onDragOver={handleDragOver}
+          onDragLeave={handleDragLeave}
           onDragEnd={handleDragEnd}
           onDrop={handleDrop}
+          dropZone={dropState?.id === node.id ? dropState.zone : null}
         />
       ))}
       {menuState && menuNode && (
@@ -2582,6 +2992,8 @@ function NodeMenu({
 interface MindMapProps {
   title: string;
   nodes: OutlineNode[];
+  rootTargetId: string | null;
+  viewportResetKey: string;
   activeNodeId: string | null;
   onSelect: (id: string) => void;
   onTitle: (title: string) => void;
@@ -2614,6 +3026,8 @@ interface MindMapItem {
 function MindMap({
   title,
   nodes,
+  rootTargetId,
+  viewportResetKey,
   activeNodeId,
   onSelect,
   onTitle,
@@ -2665,6 +3079,7 @@ function MindMap({
     [nodes, title],
   );
   const layout = useMemo(() => createMindMapLayout(mapNodes), [mapNodes]);
+  const renderedActiveNodeId = rootTargetId && activeNodeId === rootTargetId ? mapRootId : activeNodeId;
   const contextItem = contextMenu
     ? layout.items.find((item) => item.node.id === contextMenu.nodeId) ?? null
     : null;
@@ -2681,7 +3096,34 @@ function MindMap({
 
   useEffect(() => {
     setViewport(centeredViewport());
-  }, [layout.width, layout.height]);
+  }, [viewportResetKey]);
+
+  useEffect(() => {
+    const element = viewportRef.current;
+    if (!element) return;
+
+    const handleWheel = (event: WheelEvent) => {
+      event.preventDefault();
+      const rect = viewportRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      const factor = event.deltaY > 0 ? 0.9 : 1.1;
+      const anchorX = event.clientX - rect.left;
+      const anchorY = event.clientY - rect.top;
+      setViewport((current) => {
+        const scale = clampNumber(current.scale * factor, 0.35, 2.5);
+        const contentX = (anchorX - current.x) / current.scale;
+        const contentY = (anchorY - current.y) / current.scale;
+        return {
+          scale,
+          x: anchorX - contentX * scale,
+          y: anchorY - contentY * scale,
+        };
+      });
+    };
+
+    element.addEventListener("wheel", handleWheel, { passive: false });
+    return () => element.removeEventListener("wheel", handleWheel);
+  }, []);
 
   useEffect(() => {
     if (!contextMenu) return;
@@ -2722,87 +3164,68 @@ function MindMap({
 
   const handleKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
     if (editingNodeId) return;
-    if (!activeNodeId) return;
+    if (!renderedActiveNodeId) return;
 
-    const currentItem = layout.items.find((item) => item.node.id === activeNodeId);
+    const currentItem = layout.items.find((item) => item.node.id === renderedActiveNodeId);
     if (!currentItem) return;
 
     if (event.key === "ArrowUp") {
       event.preventDefault();
       const sameDepth = layout.items.filter(
-        (item) => item.depth === currentItem.depth && item.node.id !== activeNodeId
+        (item) => item.depth === currentItem.depth && item.node.id !== renderedActiveNodeId
       );
       const above = sameDepth
         .filter((item) => item.y < currentItem.y)
         .sort((a, b) => b.y - a.y)[0];
       if (above) {
-        onSelect(above.node.id);
+        selectMapNode(above.node.id);
       }
     } else if (event.key === "ArrowDown") {
       event.preventDefault();
       const sameDepth = layout.items.filter(
-        (item) => item.depth === currentItem.depth && item.node.id !== activeNodeId
+        (item) => item.depth === currentItem.depth && item.node.id !== renderedActiveNodeId
       );
       const below = sameDepth
         .filter((item) => item.y > currentItem.y)
         .sort((a, b) => a.y - b.y)[0];
       if (below) {
-        onSelect(below.node.id);
+        selectMapNode(below.node.id);
       }
     } else if (event.key === "ArrowLeft") {
       event.preventDefault();
       if (currentItem.parentId) {
-        onSelect(currentItem.parentId);
+        selectMapNode(currentItem.parentId);
       }
     } else if (event.key === "ArrowRight") {
       event.preventDefault();
       if (!currentItem.node.collapsed && currentItem.node.children.length > 0) {
-        onSelect(currentItem.node.children[0].id);
+        selectMapNode(currentItem.node.children[0].id);
       }
     } else if (event.key === "Enter") {
       event.preventDefault();
-      if (!isRootNode(activeNodeId)) {
-        onInsertAfter(activeNodeId);
+      if (!isRootNode(renderedActiveNodeId)) {
+        onInsertAfter(renderedActiveNodeId);
       } else {
-        onInsertChild(activeNodeId);
+        onInsertChild(rootTargetId ?? renderedActiveNodeId);
       }
     } else if (event.key === "Tab") {
       event.preventDefault();
       if (event.shiftKey) {
-        if (!isRootNode(activeNodeId)) {
-          onInsertParent(activeNodeId);
+        if (!isRootNode(renderedActiveNodeId)) {
+          onInsertParent(renderedActiveNodeId);
         }
       } else {
-        onInsertChild(activeNodeId);
+        onInsertChild(isRootNode(renderedActiveNodeId) ? rootTargetId ?? renderedActiveNodeId : renderedActiveNodeId);
       }
     } else if (event.key === "Spacebar" || event.key === " ") {
       event.preventDefault();
-      setEditingNodeId(activeNodeId);
+      setEditingNodeId(renderedActiveNodeId);
     } else if (event.key === "Delete" || event.key === "Backspace") {
       event.preventDefault();
-      if (!isRootNode(activeNodeId)) {
-        onRemove(activeNodeId);
+      if (!isRootNode(renderedActiveNodeId)) {
+        onRemove(renderedActiveNodeId);
       }
     }
-  };
-
-  const handleWheel = (event: React.WheelEvent<HTMLDivElement>) => {
-    event.preventDefault();
-    const rect = viewportRef.current?.getBoundingClientRect();
-    if (!rect) return;
-    const factor = event.deltaY > 0 ? 0.9 : 1.1;
-    const anchorX = event.clientX - rect.left;
-    const anchorY = event.clientY - rect.top;
-    setViewport((current) => {
-      const scale = clampNumber(current.scale * factor, 0.35, 2.5);
-      const contentX = (anchorX - current.x) / current.scale;
-      const contentY = (anchorY - current.y) / current.scale;
-      return {
-        scale,
-        x: anchorX - contentX * scale,
-        y: anchorY - contentY * scale,
-      };
-    });
   };
 
   const startPan = (event: React.PointerEvent<HTMLDivElement>) => {
@@ -2850,10 +3273,22 @@ function MindMap({
   };
 
   const isRootNode = (id: string) => id === mapRootId;
+  const rootActionTargetId = () => rootTargetId ?? mapRootId;
+  const selectMapNode = (id: string) => {
+    if (isRootNode(id)) {
+      if (rootTargetId) onSelect(rootTargetId);
+      return;
+    }
+    onSelect(id);
+  };
   const setMapNodeText = (id: string, text: string) => {
     const cleanText = text.replace(/\r?\n/g, " ");
     if (isRootNode(id)) {
-      onTitle(cleanText || "未命名文档");
+      if (rootTargetId) {
+        onText(rootTargetId, cleanText || "未命名主题");
+      } else {
+        onTitle(cleanText || "未命名文档");
+      }
       return;
     }
     onText(id, cleanText);
@@ -2872,7 +3307,6 @@ function MindMap({
       ref={viewportRef}
       tabIndex={0}
       className={classNames("mindmap-scroll", dragging && "dragging")}
-      onWheel={handleWheel}
       onPointerDown={startPan}
       onPointerMove={pan}
       onPointerUp={endPan}
@@ -2952,7 +3386,7 @@ function MindMap({
               <div
                 className={classNames(
                   "map-node",
-                  activeNodeId === item.node.id && "active",
+                  renderedActiveNodeId === item.node.id && "active",
                   editingNodeId === item.node.id && "editing",
                   `depth-${item.depth}`,
                   `node-${normalizeColor(item.node.color)}`,
@@ -2974,6 +3408,7 @@ function MindMap({
                       onClick={(event) => event.stopPropagation()}
                       onPointerDown={(event) => event.stopPropagation()}
                       onKeyDown={(event) => {
+                        if (event.nativeEvent.isComposing) return;
                         if (event.key === "Enter") {
                           event.preventDefault();
                           setEditingNodeId(null);
@@ -2990,7 +3425,7 @@ function MindMap({
                       title="新增下级主题"
                       onClick={(event) => {
                         event.stopPropagation();
-                        onInsertChild(item.node.id);
+                        onInsertChild(isRootNode(item.node.id) ? rootActionTargetId() : item.node.id);
                       }}
                       onPointerDown={(event) => event.stopPropagation()}
                     >
@@ -3021,7 +3456,7 @@ function MindMap({
             setContextMenu(null);
           }}
           onInsertChild={() => {
-            onInsertChild(contextItem.node.id);
+            onInsertChild(isRootNode(contextItem.node.id) ? rootActionTargetId() : contextItem.node.id);
             setContextMenu(null);
           }}
           onInsertParent={() => {
@@ -3041,7 +3476,7 @@ function MindMap({
             setContextMenu(null);
           }}
           onPaste={() => {
-            onPasteNode(contextItem.node.id);
+            onPasteNode(isRootNode(contextItem.node.id) ? rootActionTargetId() : contextItem.node.id);
             setContextMenu(null);
           }}
           canPaste={canPaste}
@@ -3297,7 +3732,8 @@ function PresentationView({ title, nodes, onSelect }: PresentationViewProps) {
   // Keyboard navigation
   useEffect(() => {
     const handleGlobalKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "ArrowRight" || e.key === "Space" || e.key === " ") {
+      if (isEditableEventTarget(e.target)) return;
+      if (e.key === "ArrowRight" || e.key === " ") {
         e.preventDefault();
         setCurrentSlide((prev) => (prev < slides.length - 1 ? prev + 1 : 0));
       } else if (e.key === "ArrowLeft") {

@@ -17,6 +17,8 @@ export interface OutlineNode {
   imageName?: string;
   imageAlt?: string;
   table?: string[][];
+  codeBlock?: string;
+  codeLanguage?: string;
   isTodo?: boolean;
   children: OutlineNode[];
 }
@@ -47,5 +49,6 @@ export interface FlatNode {
 export interface BackupResult {
   ok: boolean;
   path?: string;
+  revision?: string;
   error?: string;
 }

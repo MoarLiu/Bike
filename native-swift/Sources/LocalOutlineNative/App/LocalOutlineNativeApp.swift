@@ -1,7 +1,19 @@
+import AppKit
 import SwiftUI
+
+@MainActor
+final class LocalOutlineAppDelegate: NSObject, NSApplicationDelegate {
+    weak var store: AppStore?
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        store?.flushSaveNow()
+        return .terminateNow
+    }
+}
 
 @main
 struct LocalOutlineNativeApp: App {
+    @NSApplicationDelegateAdaptor(LocalOutlineAppDelegate.self) private var appDelegate
     @StateObject private var store = AppStore()
 
     init() {
@@ -23,7 +35,10 @@ struct LocalOutlineNativeApp: App {
                 .environmentObject(store)
                 .frame(minWidth: 980, minHeight: 640)
                 .preferredColorScheme(store.useDarkMode ? .dark : .light)
-                .onAppear { store.load() }
+                .onAppear {
+                    appDelegate.store = store
+                    store.load()
+                }
         }
         .commands {
             CommandGroup(replacing: .newItem) {

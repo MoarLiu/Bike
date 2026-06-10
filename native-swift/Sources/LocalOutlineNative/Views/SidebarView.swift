@@ -50,12 +50,7 @@ struct SidebarView: View {
                                 }
                                 Divider()
                                 Button("删除文档", role: .destructive) {
-                                    store.selectDocument(document.id)
-                                    if store.workspace.documents.count > 1 {
-                                        store.showDeleteConfirmation = true
-                                    } else {
-                                        store.show("至少保留一个文档")
-                                    }
+                                    store.requestDeleteDocument(document.id)
                                 }
                             }
                     }

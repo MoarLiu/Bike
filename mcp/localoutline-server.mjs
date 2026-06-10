@@ -86,29 +86,37 @@ const writeCommonInputSchema = {
 };
 
 const positionSchema = z.enum(["first", "last"]).optional().default("last");
+const titleSchema = z.string().max(300);
+const nodeTextSchema = z.string().max(10_000);
+const nodeNoteSchema = z.string().max(50_000);
+const nodeCodeSchema = z.string().max(50_000);
+const nodeCodeLanguageSchema = z.string().max(80);
 
 const writableNodeSchema = z.object({
   id: z.string().min(1).optional(),
-  text: z.string().optional(),
-  note: z.string().optional(),
+  text: nodeTextSchema.optional(),
+  note: nodeNoteSchema.optional(),
   checked: z.boolean().optional(),
   collapsed: z.boolean().optional(),
   color: z.enum(["plain", "blue", "green", "amber", "rose"]).optional(),
+  codeBlock: nodeCodeSchema.optional(),
+  codeLanguage: nodeCodeLanguageSchema.optional(),
   isTodo: z.boolean().optional(),
   children: z.array(z.any()).optional().default([]),
 });
 
 export const createLocalOutlineMcpServer = async ({
   store,
-  version = "1.3.0",
+  version,
 } = {}) => {
   const workspaceStore = store ?? (await createWorkspaceStore());
+  const resolvedVersion = version ?? (await readPackageVersion());
   const server = new McpServer(
     {
       name: SERVER_NAME,
       title: SERVER_DISPLAY_NAME,
-      version,
-      websiteUrl: "https://github.com/modelcontextprotocol",
+      version: resolvedVersion,
+      websiteUrl: "https://github.com/MoarLiu/LocalOutline",
     },
     {
       capabilities: {
@@ -238,7 +246,7 @@ export const createLocalOutlineMcpServer = async ({
       inputSchema: {
         ...writeCommonInputSchema,
         documentId: z.string().min(1).optional(),
-        title: z.string().optional(),
+        title: titleSchema.optional(),
         initialNodes: z.array(writableNodeSchema).optional().default([]),
       },
       annotations: {
@@ -257,7 +265,7 @@ export const createLocalOutlineMcpServer = async ({
       inputSchema: {
         ...writeCommonInputSchema,
         documentId: z.string().min(1),
-        title: z.string().min(1),
+        title: titleSchema.min(1),
       },
       annotations: {
         readOnlyHint: false,
@@ -278,11 +286,13 @@ export const createLocalOutlineMcpServer = async ({
         parentNodeId: z.string().min(1).optional(),
         position: positionSchema,
         id: z.string().min(1).optional(),
-        text: z.string().optional(),
-        note: z.string().optional(),
+        text: nodeTextSchema.optional(),
+        note: nodeNoteSchema.optional(),
         checked: z.boolean().optional(),
         collapsed: z.boolean().optional(),
         color: z.enum(["plain", "blue", "green", "amber", "rose"]).optional(),
+        codeBlock: nodeCodeSchema.optional(),
+        codeLanguage: nodeCodeLanguageSchema.optional(),
         isTodo: z.boolean().optional(),
         children: z.array(writableNodeSchema).optional().default([]),
       },
@@ -303,11 +313,13 @@ export const createLocalOutlineMcpServer = async ({
         ...writeCommonInputSchema,
         documentId: z.string().min(1),
         nodeId: z.string().min(1),
-        text: z.string().optional(),
-        note: z.string().optional(),
+        text: nodeTextSchema.optional(),
+        note: nodeNoteSchema.optional(),
         color: z.enum(["plain", "blue", "green", "amber", "rose"]).optional(),
         collapsed: z.boolean().optional(),
         checked: z.boolean().optional(),
+        codeBlock: nodeCodeSchema.optional(),
+        codeLanguage: nodeCodeLanguageSchema.optional(),
         isTodo: z.boolean().optional(),
       },
       annotations: {

@@ -59,6 +59,14 @@ const normalizeNode = (
     imageAlt:
       typeof rawNode.imageAlt === "string" ? rawNode.imageAlt : undefined,
     table: normalizeTable(rawNode.table),
+    codeBlock:
+      typeof rawNode.codeBlock === "string"
+        ? rawNode.codeBlock.replace(/\r\n?/g, "\n")
+        : undefined,
+    codeLanguage:
+      typeof rawNode.codeLanguage === "string" && rawNode.codeLanguage.trim()
+        ? rawNode.codeLanguage.trim().slice(0, 80)
+        : undefined,
     children: [],
   };
 
@@ -109,9 +117,13 @@ export const migrateWorkspace = (rawWorkspace: unknown): Workspace => {
   }
 
   const usedIds = new Set<string>();
-  const documents = rawWorkspace.documents.map((document) =>
-    migrateDocument(document, usedIds),
-  );
+  const documents = rawWorkspace.documents.flatMap((document) => {
+    try {
+      return [migrateDocument(document, usedIds)];
+    } catch {
+      return [];
+    }
+  });
   if (!documents.length) throw new Error("工作区至少需要一个文档");
 
   const requestedActiveId = textOr(rawWorkspace.activeDocumentId, "");

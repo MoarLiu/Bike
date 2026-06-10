@@ -8,3 +8,7 @@ npm-debug.log*
 *.local
 .playwright-cli/
 *.zip
+.claude/
+.review-test/
+代码审查报告*.md
+修复验收报告*.md
