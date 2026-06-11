@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 
 @MainActor
-final class LocalOutlineAppDelegate: NSObject, NSApplicationDelegate {
+final class BikeAppDelegate: NSObject, NSApplicationDelegate {
     weak var store: AppStore?
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
@@ -12,25 +12,25 @@ final class LocalOutlineAppDelegate: NSObject, NSApplicationDelegate {
 }
 
 @main
-struct LocalOutlineNativeApp: App {
-    @NSApplicationDelegateAdaptor(LocalOutlineAppDelegate.self) private var appDelegate
+struct BikeNativeApp: App {
+    @NSApplicationDelegateAdaptor(BikeAppDelegate.self) private var appDelegate
     @StateObject private var store = AppStore()
 
     init() {
         if CommandLine.arguments.contains("--self-test") {
             do {
                 try SelfTestRunner.run()
-                print("LocalOutlineNative self-tests passed")
+                print("BikeNative self-tests passed")
                 Foundation.exit(0)
             } catch {
-                fputs("LocalOutlineNative self-tests failed: \(error)\n", stderr)
+                fputs("BikeNative self-tests failed: \(error)\n", stderr)
                 Foundation.exit(1)
             }
         }
     }
 
     var body: some Scene {
-        WindowGroup("Local Outline Native") {
+        WindowGroup("Bike Native") {
             ContentView()
                 .environmentObject(store)
                 .frame(minWidth: 980, minHeight: 640)
@@ -49,7 +49,7 @@ struct LocalOutlineNativeApp: App {
                 Button("撤销") { store.undoDocumentCommand() }
                     .keyboardShortcut("z", modifiers: [.command])
             }
-            CommandMenu("Local Outline") {
+            CommandMenu("Bike") {
                 Button("保存") { store.flushSaveNow() }
                     .keyboardShortcut("s", modifiers: [.command])
                 Button("创建快照") { store.createManualSnapshot() }
@@ -61,7 +61,7 @@ struct LocalOutlineNativeApp: App {
                 Divider()
                 Button("创建 JSON 备份") { store.backupToICloud() }
                 Button("载入 iCloud 备份") { store.loadICloudBackup() }
-                Button("打开 Markdown 目录") { LocalOutlineStorage.openDocumentsDirectoryInFinder() }
+                Button("打开 Markdown 目录") { BikeStorage.openDocumentsDirectoryInFinder() }
             }
             CommandMenu("大纲") {
                 Button("新增同级") {

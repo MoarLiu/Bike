@@ -3,8 +3,8 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-export const SERVER_NAME = "localoutline";
-export const SERVER_DISPLAY_NAME = "LocalOutline MCP";
+export const SERVER_NAME = "bike";
+export const SERVER_DISPLAY_NAME = "Bike MCP";
 export const DEFAULT_DOCUMENT_TITLE = "未命名文档";
 export const DEFAULT_NODE_TEXT = "未命名主题";
 export const CURRENT_WORKSPACE_VERSION = 1;
@@ -220,16 +220,30 @@ export const defaultWorkspacePathCandidates = ({
       "Library",
       "Mobile Documents",
       "com~apple~CloudDocs",
+      "Bike",
+    );
+    const legacyBaseDirectory = path.join(
+      homeDir,
+      "Library",
+      "Mobile Documents",
+      "com~apple~CloudDocs",
       "LocalOutline",
     );
     return [
-      path.join(baseDirectory, "localoutline-workspace.json"),
-      path.join(baseDirectory, ".backups", "localoutline-workspace.json"),
+      path.join(baseDirectory, "bike-workspace.json"),
+      path.join(baseDirectory, ".backups", "bike-workspace.json"),
+      path.join(legacyBaseDirectory, "localoutline-workspace.json"),
+      path.join(legacyBaseDirectory, ".backups", "localoutline-workspace.json"),
     ];
   }
 
   if (platform === "win32") {
     return [
+      path.join(
+        env.APPDATA || path.join(homeDir, "AppData", "Roaming"),
+        "Bike",
+        "bike-workspace.json",
+      ),
       path.join(
         env.APPDATA || path.join(homeDir, "AppData", "Roaming"),
         "LocalOutline",
@@ -238,7 +252,10 @@ export const defaultWorkspacePathCandidates = ({
     ];
   }
 
-  return [path.join(homeDir, ".localoutline", "localoutline-workspace.json")];
+  return [
+    path.join(homeDir, ".bike", "bike-workspace.json"),
+    path.join(homeDir, ".localoutline", "localoutline-workspace.json"),
+  ];
 };
 
 const expandHome = (value, homeDir = os.homedir()) =>
@@ -275,6 +292,9 @@ const optionalBoolean = (value, fallback = false) => {
   return fallback;
 };
 
+const envString = (env, key, legacyKey) =>
+  env[key]?.trim() || (legacyKey ? env[legacyKey]?.trim() : "");
+
 const normalizeMode = (value) =>
   typeof value === "string" && value.trim().toLowerCase() === "write"
     ? "write"
@@ -287,19 +307,19 @@ export const loadMcpConfig = async ({
   homeDir = os.homedir(),
   platform = process.platform,
 } = {}) => {
-  const configPath = env.LOCAL_OUTLINE_MCP_CONFIG?.trim();
+  const configPath = envString(env, "BIKE_MCP_CONFIG", "LOCAL_OUTLINE_MCP_CONFIG");
   const fileConfig = configPath
     ? await readJsonFile(expandHome(configPath, homeDir))
     : {};
 
   const configuredWorkspacePath =
-    env.LOCAL_OUTLINE_WORKSPACE_PATH?.trim() ||
+    envString(env, "BIKE_WORKSPACE_PATH", "LOCAL_OUTLINE_WORKSPACE_PATH") ||
     (isRecord(fileConfig) && typeof fileConfig.workspacePath === "string"
       ? fileConfig.workspacePath
       : "");
 
   const rawMode =
-    env.LOCAL_OUTLINE_MCP_MODE?.trim() ||
+    envString(env, "BIKE_MCP_MODE", "LOCAL_OUTLINE_MCP_MODE") ||
     (isRecord(fileConfig) && typeof fileConfig.mode === "string"
       ? fileConfig.mode
       : "readonly");
@@ -316,18 +336,20 @@ export const loadMcpConfig = async ({
     workspacePath,
     mode: normalizeMode(rawMode),
     debug: optionalBoolean(
-      env.LOCAL_OUTLINE_MCP_DEBUG,
+      env.BIKE_MCP_DEBUG ?? env.LOCAL_OUTLINE_MCP_DEBUG,
       boolOr(isRecord(fileConfig) ? fileConfig.debug : undefined, false),
     ),
     maxSearchResults: optionalNumber(
-      env.LOCAL_OUTLINE_MCP_MAX_SEARCH_RESULTS ??
+      env.BIKE_MCP_MAX_SEARCH_RESULTS ??
+        env.LOCAL_OUTLINE_MCP_MAX_SEARCH_RESULTS ??
         (isRecord(fileConfig) ? fileConfig.maxSearchResults : undefined),
       50,
       1,
       HARD_LIMIT,
     ),
     maxDocumentNodes: optionalNumber(
-      env.LOCAL_OUTLINE_MCP_MAX_DOCUMENT_NODES ??
+      env.BIKE_MCP_MAX_DOCUMENT_NODES ??
+        env.LOCAL_OUTLINE_MCP_MAX_DOCUMENT_NODES ??
         (isRecord(fileConfig) ? fileConfig.maxDocumentNodes : undefined),
       2000,
       1,
@@ -609,7 +631,7 @@ export class WorkspaceStore {
 
     if (dryRun) return baseResult;
     if (this.config.mode !== "write") {
-      throw new Error("LocalOutline MCP 当前为 readonly 模式，拒绝真实写入");
+      throw new Error("Bike MCP 当前为 readonly 模式，拒绝真实写入");
     }
     const latestRaw = await this.assertCurrentRevision(current.revision);
 
@@ -661,7 +683,7 @@ export class WorkspaceStore {
         await delay(WRITE_LOCK_RETRY_MS);
       }
     }
-    throw new Error("工作区正在被另一个 LocalOutline MCP 写入，请稍后重试");
+    throw new Error("工作区正在被另一个 Bike MCP 写入，请稍后重试");
   }
 
   lockFileContent(ownerToken) {
@@ -693,7 +715,7 @@ export class WorkspaceStore {
     await fs.mkdir(backupDirectory, { recursive: true });
     const revisionPrefix = hashContent(raw).slice(0, 12);
     const randomSuffix = crypto.randomBytes(4).toString("hex");
-    const filename = `localoutline-mcp-${backupTimestamp(now)}-${revisionPrefix}-${sanitizeOperationName(operation)}-${randomSuffix}.json`;
+    const filename = `bike-mcp-${backupTimestamp(now)}-${revisionPrefix}-${sanitizeOperationName(operation)}-${randomSuffix}.json`;
     const backupPath = path.join(backupDirectory, filename);
     await fs.writeFile(backupPath, raw, { encoding: "utf8", flag: "wx" });
     return {
@@ -2088,13 +2110,13 @@ export const resourceForDocument = (snapshot, document, format = "compact") => {
   const isMarkdown = format === "markdown";
   return {
     uri: isMarkdown
-      ? `localoutline://document-markdown/${encodeURIComponent(document.id)}`
-      : `localoutline://document/${encodeURIComponent(document.id)}`,
+      ? `bike://document-markdown/${encodeURIComponent(document.id)}`
+      : `bike://document/${encodeURIComponent(document.id)}`,
     name: isMarkdown ? `${document.title}.md` : document.title,
     title: isMarkdown ? `${document.title} Markdown` : document.title,
     description: isMarkdown
-      ? "LocalOutline 文档的 Markdown 视图"
-      : "LocalOutline 文档的 compact JSON 视图",
+      ? "Bike 文档的 Markdown 视图"
+      : "Bike 文档的 compact JSON 视图",
     mimeType: isMarkdown ? "text/markdown" : "application/json",
     annotations: {
       audience: ["assistant"],

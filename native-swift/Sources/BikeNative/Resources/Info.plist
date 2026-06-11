@@ -5,15 +5,15 @@
   <key>CFBundleDevelopmentRegion</key>
   <string>zh-Hans</string>
   <key>CFBundleExecutable</key>
-  <string>LocalOutlineNative</string>
+  <string>BikeNative</string>
   <key>CFBundleIconFile</key>
   <string>AppIcon</string>
   <key>CFBundleIdentifier</key>
-  <string>com.localoutline.native</string>
+  <string>com.bike.native</string>
   <key>CFBundleName</key>
-  <string>Local Outline Native</string>
+  <string>Bike Native</string>
   <key>CFBundleDisplayName</key>
-  <string>Local Outline Native</string>
+  <string>Bike Native</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>

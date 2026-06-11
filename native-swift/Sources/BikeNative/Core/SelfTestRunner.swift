@@ -40,7 +40,7 @@ enum SelfTestRunner {
     }
 
     private static func expectDate(_ iso: String, _ message: String) throws -> Date {
-        guard let date = ISO8601DateFormatter.localOutline.date(from: iso) else {
+        guard let date = ISO8601DateFormatter.bike.date(from: iso) else {
             throw SelfTestError.failed(message)
         }
         return date
@@ -215,7 +215,7 @@ enum SelfTestRunner {
     @MainActor
     private static func appStoreDoesNotSaveStarterWorkspaceAfterLoadFailure() throws {
         let base = FileManager.default.temporaryDirectory
-            .appendingPathComponent("LocalOutlineLoadFailureSelfTest-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("BikeLoadFailureSelfTest-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: base) }
 
         let seedRepository = try WorkspaceRepository(inMemory: true, baseURL: base)
@@ -269,7 +269,7 @@ enum SelfTestRunner {
     @MainActor
     private static func repositoryPersistsDocumentsAsMarkdownFiles() throws {
         let base = FileManager.default.temporaryDirectory
-            .appendingPathComponent("LocalOutlineMarkdownSelfTest-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("BikeMarkdownSelfTest-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: base) }
 
         let repository = try WorkspaceRepository(inMemory: true, baseURL: base)
@@ -298,7 +298,7 @@ enum SelfTestRunner {
     @MainActor
     private static func repositoryRenamesWithoutOverwritingOccupiedMarkdownFilename() throws {
         let base = FileManager.default.temporaryDirectory
-            .appendingPathComponent("LocalOutlineRenameCollisionSelfTest-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("BikeRenameCollisionSelfTest-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: base) }
 
         let repository = try WorkspaceRepository(inMemory: true, baseURL: base)
@@ -320,7 +320,7 @@ enum SelfTestRunner {
     @MainActor
     private static func repositoryPreservesNodeMetadataAcrossMarkdownReload() throws {
         let base = FileManager.default.temporaryDirectory
-            .appendingPathComponent("LocalOutlineNodeMetadataSelfTest-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("BikeNodeMetadataSelfTest-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: base) }
 
         let repository = try WorkspaceRepository(inMemory: true, baseURL: base)
@@ -366,7 +366,7 @@ enum SelfTestRunner {
     @MainActor
     private static func repositoryAdoptsExternalMarkdownFilename() throws {
         let base = FileManager.default.temporaryDirectory
-            .appendingPathComponent("LocalOutlineExternalMarkdownSelfTest-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("BikeExternalMarkdownSelfTest-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: base) }
 
         try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
@@ -388,7 +388,7 @@ enum SelfTestRunner {
     @MainActor
     private static func repositoryUsesExternalMarkdownModificationDate() throws {
         let base = FileManager.default.temporaryDirectory
-            .appendingPathComponent("LocalOutlineExternalModificationSelfTest-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("BikeExternalModificationSelfTest-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: base) }
 
         let repository = try WorkspaceRepository(inMemory: true, baseURL: base)
@@ -414,7 +414,7 @@ enum SelfTestRunner {
     @MainActor
     private static func repositorySkipsUnchangedMarkdownWrites() throws {
         let base = FileManager.default.temporaryDirectory
-            .appendingPathComponent("LocalOutlineUnchangedWriteSelfTest-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("BikeUnchangedWriteSelfTest-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: base) }
 
         let repository = try WorkspaceRepository(inMemory: true, baseURL: base)
@@ -439,7 +439,7 @@ enum SelfTestRunner {
     @MainActor
     private static func repositoryMigratesLegacyICloudBackupToMarkdownFiles() throws {
         let base = FileManager.default.temporaryDirectory
-            .appendingPathComponent("LocalOutlineLegacyICloudSelfTest-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("BikeLegacyICloudSelfTest-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: base) }
 
         try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
@@ -461,7 +461,7 @@ enum SelfTestRunner {
     @MainActor
     private static func repositorySavesSnapshotsAndRestores() throws {
         let base = FileManager.default.temporaryDirectory
-            .appendingPathComponent("LocalOutlineSelfTest-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("BikeSelfTest-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: base) }
 
         let repository = try WorkspaceRepository(inMemory: true, baseURL: base)
@@ -484,7 +484,7 @@ enum SelfTestRunner {
 
     private static func iCloudBackupWritesLatestAndStampedFiles() throws {
         let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("LocalOutlineBackupSelfTest-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("BikeBackupSelfTest-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: directory) }
 
         let workspace = SampleData.starterWorkspace()

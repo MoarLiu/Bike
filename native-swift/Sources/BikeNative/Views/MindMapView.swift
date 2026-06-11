@@ -367,7 +367,7 @@ private final class MindMapEventMonitorBag {
 }
 
 enum MindMapLayout {
-    static let rootId = "__local_outline_mindmap_root__"
+    static let rootId = "__bike_mindmap_root__"
 
     struct Item: Identifiable {
         var id: String

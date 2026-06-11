@@ -1,12 +1,15 @@
 import type { Workspace } from "./types";
 import { migrateWorkspace } from "./migrations";
 
-const DB_NAME = "local-outline-db";
+const DB_NAME = "bike-db";
+const LEGACY_DB_NAME = "local-outline-db";
 const STORE_NAME = "workspace-store";
 const WORKSPACE_KEY = "workspace";
 const WORKSPACE_META_KEY = "workspace-meta";
-const FALLBACK_KEY = "local-outline-workspace";
-const FALLBACK_META_KEY = "local-outline-workspace-meta";
+const FALLBACK_KEY = "bike-workspace";
+const FALLBACK_META_KEY = "bike-workspace-meta";
+const LEGACY_FALLBACK_KEY = "local-outline-workspace";
+const LEGACY_FALLBACK_META_KEY = "local-outline-workspace-meta";
 
 export type WorkspaceLoadResult =
   | { status: "loaded"; workspace: Workspace; source: "indexeddb" | "localstorage" }
@@ -28,9 +31,9 @@ const timestamp = (value: string | undefined) => {
 const workspaceUpdatedAt = (workspace: Workspace) =>
   Math.max(0, ...workspace.documents.map((document) => timestamp(document.updatedAt)));
 
-const fallbackSavedAt = () => {
+const fallbackSavedAt = (metaKey = FALLBACK_META_KEY) => {
   try {
-    const raw = localStorage.getItem(FALLBACK_META_KEY);
+    const raw = localStorage.getItem(metaKey);
     if (!raw) return 0;
     const parsed = JSON.parse(raw) as { savedAt?: unknown };
     return typeof parsed.savedAt === "string" ? timestamp(parsed.savedAt) : 0;
@@ -45,9 +48,11 @@ const savedAtFromMeta = (value: unknown) => {
   return typeof savedAt === "string" ? timestamp(savedAt) : 0;
 };
 
-const readFallbackWorkspace = (): WorkspaceLoadResult => {
+const readFallbackWorkspace = (
+  workspaceKey = FALLBACK_KEY,
+): WorkspaceLoadResult => {
   try {
-    const raw = localStorage.getItem(FALLBACK_KEY);
+    const raw = localStorage.getItem(workspaceKey);
     if (!raw) return { status: "empty" };
     return {
       status: "loaded",
@@ -59,9 +64,21 @@ const readFallbackWorkspace = (): WorkspaceLoadResult => {
   }
 };
 
-const openDb = () =>
+const readBestFallbackWorkspace = (): WorkspaceLoadResult => {
+  const current = readFallbackWorkspace();
+  const legacy = readFallbackWorkspace(LEGACY_FALLBACK_KEY);
+  if (current.status === "loaded" && legacy.status === "loaded") {
+    return fallbackSavedAt() >= fallbackSavedAt(LEGACY_FALLBACK_META_KEY)
+      ? current
+      : legacy;
+  }
+  if (current.status !== "empty") return current;
+  return legacy;
+};
+
+const openDb = (dbName = DB_NAME) =>
   new Promise<IDBDatabase>((resolve, reject) => {
-    const request = indexedDB.open(DB_NAME, 1);
+    const request = indexedDB.open(dbName, 1);
     request.onupgradeneeded = () => {
       const db = request.result;
       if (!db.objectStoreNames.contains(STORE_NAME)) {
@@ -72,13 +89,11 @@ const openDb = () =>
     request.onerror = () => reject(request.error);
   });
 
-export const loadWorkspace = async (): Promise<WorkspaceLoadResult> => {
+const loadWorkspaceFromDb = async (dbName: string): Promise<WorkspaceLoadResult> => {
   let db: IDBDatabase;
   try {
-    db = await openDb();
+    db = await openDb(dbName);
   } catch (error) {
-    const fallback = readFallbackWorkspace();
-    if (fallback.status !== "empty") return fallback;
     return { status: "error", source: "indexeddb", error: toError(error) };
   }
 
@@ -90,16 +105,16 @@ export const loadWorkspace = async (): Promise<WorkspaceLoadResult> => {
       const metaRequest = store.get(WORKSPACE_META_KEY);
       tx.oncomplete = () => {
         if (!request.result) {
-          resolve(readFallbackWorkspace());
+          resolve({ status: "empty" });
           return;
         }
         try {
           const workspace = migrateWorkspace(request.result);
-          const fallback = readFallbackWorkspace();
+          const fallback = readBestFallbackWorkspace();
           const indexedDbSavedAt = savedAtFromMeta(metaRequest.result) || workspaceUpdatedAt(workspace);
           if (
             fallback.status === "loaded" &&
-            fallbackSavedAt() > indexedDbSavedAt
+            Math.max(fallbackSavedAt(), fallbackSavedAt(LEGACY_FALLBACK_META_KEY)) > indexedDbSavedAt
           ) {
             resolve(fallback);
             return;
@@ -116,12 +131,25 @@ export const loadWorkspace = async (): Promise<WorkspaceLoadResult> => {
       tx.onerror = () => reject(tx.error ?? request.error ?? metaRequest.error);
     });
   } catch (error) {
-    const fallback = readFallbackWorkspace();
-    if (fallback.status !== "empty") return fallback;
     return { status: "error", source: "indexeddb", error: toError(error) };
   } finally {
     db.close();
   }
+};
+
+export const loadWorkspace = async (): Promise<WorkspaceLoadResult> => {
+  const current = await loadWorkspaceFromDb(DB_NAME);
+  if (current.status === "loaded") return current;
+
+  const legacy = await loadWorkspaceFromDb(LEGACY_DB_NAME);
+  if (legacy.status === "loaded") return legacy;
+
+  const fallback = readBestFallbackWorkspace();
+  if (fallback.status !== "empty") return fallback;
+
+  if (current.status === "error") return current;
+  if (legacy.status === "error") return legacy;
+  return { status: "empty" };
 };
 
 export const saveWorkspace = async (workspace: Workspace): Promise<WorkspaceSaveResult> => {
@@ -139,6 +167,8 @@ export const saveWorkspace = async (workspace: Workspace): Promise<WorkspaceSave
     try {
       localStorage.removeItem(FALLBACK_KEY);
       localStorage.removeItem(FALLBACK_META_KEY);
+      localStorage.removeItem(LEGACY_FALLBACK_KEY);
+      localStorage.removeItem(LEGACY_FALLBACK_META_KEY);
     } catch {}
     return { ok: true, target: "indexeddb" };
   } catch (indexedDbError) {

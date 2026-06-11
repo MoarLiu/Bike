@@ -11,23 +11,23 @@
 ## Backup
 
 - 点击 `iCloud Backup` 后生成：
-  - `~/Library/Mobile Documents/com~apple~CloudDocs/LocalOutline/localoutline-workspace.json`
-  - `~/Library/Mobile Documents/com~apple~CloudDocs/LocalOutline/localoutline-workspace-{timestamp}.json`
+  - `~/Library/Mobile Documents/com~apple~CloudDocs/Bike/.backups/bike-workspace.json`
+  - `~/Library/Mobile Documents/com~apple~CloudDocs/Bike/.backups/bike-workspace-{timestamp}.json`
 - 备份 JSON 可被 Web 端工作区导入逻辑识别。
 - iCloud Drive 不可用时，界面显示错误而不是崩溃。
 
 ## File Panels
 
 - `openWorkspaceJSON` 只允许选择 `.json` 文件。
-- 工作区 JSON 保存默认文件名为 `localoutline-workspace.json`。
+- 工作区 JSON 保存默认文件名为 `bike-workspace.json`。
 - 通用导入面板仍允许 JSON、Markdown/plain text、OPML/XML、HTML 等导入格式。
 - 选择备份目录时允许创建文件夹。
 
 ## Release Scripts
 
 - `./scripts/test_all.sh` 通过。
-- `./scripts/build_and_run.sh --verify` 能构建并启动 `Local Outline Native.app`。
-- `./scripts/package_dmg.sh` 输出 `release/Local-Outline-Native-0.1.0.dmg`。
+- `./scripts/build_and_run.sh --verify` 能构建并启动 `Bike Native.app`。
+- `./scripts/package_dmg.sh` 输出 `release/Bike-Native-0.1.0.dmg`。
 - 挂载 DMG 后可看到 `.app`，复制到 `/Applications` 后可启动。
 
 ## Regression Boundaries

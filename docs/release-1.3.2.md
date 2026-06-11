@@ -1,4 +1,4 @@
-# Local Outline 1.3.2 更新说明
+# Bike 1.3.2 更新说明
 
 发布日期：2026-06-11
 
@@ -37,7 +37,7 @@
 ## 打包说明
 
 - Electron macOS Apple Silicon: `Local.Outline-1.3.2-arm64.dmg`
-- Bundle ID: `com.localoutline.app`
+- Bundle ID: `com.bike.app`
 - App version/build: `1.3.2`
 
 ## SHA-256
@@ -47,5 +47,5 @@
 
 ## 关联文档
 
-- [Local Outline 1.3.1 更新说明](./release-1.3.1.md)
+- [Bike 1.3.1 更新说明](./release-1.3.1.md)
 - [单用户认证部署](./single-user-auth.md)

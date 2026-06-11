@@ -42,9 +42,11 @@ import {
   Plus,
   Presentation,
   Quote,
+  RefreshCw,
   RotateCcw,
   Search,
   Smile,
+  Sparkles,
   Star,
   Strikethrough,
   Sun,
@@ -54,11 +56,24 @@ import {
   Type,
   Underline,
   Upload,
+  WandSparkles,
   X,
   Zap,
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
+import {
+  defaultAiConfig,
+  generatedNodesToOutlineNodes,
+  loadAiConfig,
+  normalizeAiConfig,
+  runAiNodeAction,
+  saveAiConfig,
+  validateAiConfig,
+  type AiApiConfig,
+  type AiGeneratedNode,
+  type AiNodeAction,
+} from "./ai";
 import { saveICloudBackup } from "./backup";
 import {
   downloadText,
@@ -121,9 +136,38 @@ type NodeClipboard = {
   node: OutlineNode;
 };
 type OutlineDropZone = "before" | "after" | "child";
+type StructuredAiTargetId = string;
+type MarkdownAiTarget =
+  | {
+      kind: "heading";
+      text: string;
+      lineStart: number;
+      lineEnd: number;
+      level: number;
+      subtreeEnd: number;
+      prefix: string;
+    }
+  | {
+      kind: "list";
+      text: string;
+      lineStart: number;
+      lineEnd: number;
+      indent: string;
+      marker: string;
+      subtreeEnd: number;
+    }
+  | {
+      kind: "paragraph";
+      text: string;
+      lineStart: number;
+      lineEnd: number;
+      subtreeEnd: number;
+    };
 
 const now = () => new Date().toISOString();
-const ICLOUD_REVISION_KEY = "local-outline-icloud-revision";
+const ICLOUD_REVISION_KEY = "bike-icloud-revision";
+const LEGACY_ICLOUD_REVISION_KEY = "local-outline-icloud-revision";
+const MINDMAP_ROOT_ID = "__bike_mindmap_root__";
 
 const classNames = (...names: Array<string | false | undefined>) =>
   names.filter(Boolean).join(" ");
@@ -175,6 +219,162 @@ const replaceMarkdownTitle = (source: string, title: string) => {
     return lines.join("\n");
   }
   return [`# ${safeTitle}`, "", normalized].join("\n").trimEnd();
+};
+
+const markdownLineInfos = (source: string) => {
+  const lines = source.split("\n");
+  let offset = 0;
+  return lines.map((line) => {
+    const info = {
+      line,
+      start: offset,
+      end: offset + line.length,
+    };
+    offset += line.length + 1;
+    return info;
+  });
+};
+
+const indentationWidth = (value: string) =>
+  Array.from(value).reduce((width, char) => width + (char === "\t" ? 4 : 1), 0);
+
+const cleanMarkdownTopicText = (value: string) =>
+  value
+    .replace(/\s+#+\s*$/, "")
+    .replace(/^\[(?: |x|X)\]\s+/, "")
+    .replace(/[*_~`[\]()]/g, "")
+    .trim();
+
+const findMarkdownAiTarget = (source: string, cursor: number): MarkdownAiTarget | null => {
+  const lines = markdownLineInfos(source);
+  if (!lines.length) return null;
+  const safeCursor = clampNumber(cursor, 0, source.length);
+  let lineIndex = lines.findIndex((line) => safeCursor >= line.start && safeCursor <= line.end);
+  if (lineIndex < 0) lineIndex = lines.length - 1;
+  while (lineIndex > 0 && !lines[lineIndex].line.trim()) {
+    lineIndex -= 1;
+  }
+
+  const lineInfo = lines[lineIndex];
+  const heading = lineInfo.line.match(/^(\s{0,3})(#{1,6})\s+(.*?)\s*$/);
+  if (heading) {
+    const level = heading[2].length;
+    let subtreeEnd = source.length;
+    for (let index = lineIndex + 1; index < lines.length; index += 1) {
+      const nextHeading = lines[index].line.match(/^\s{0,3}(#{1,6})\s+/);
+      if (nextHeading && nextHeading[1].length <= level) {
+        subtreeEnd = lines[index].start;
+        break;
+      }
+    }
+    return {
+      kind: "heading",
+      text: cleanMarkdownTopicText(heading[3]) || "未命名主题",
+      lineStart: lineInfo.start,
+      lineEnd: lineInfo.end,
+      level,
+      subtreeEnd,
+      prefix: `${heading[1]}${heading[2]} `,
+    };
+  }
+
+  const list = lineInfo.line.match(/^([ \t]*)([-*+]|\d+[.)])\s+((?:\[(?: |x|X)\]\s*)?)(.*)$/);
+  if (list) {
+    const baseIndent = indentationWidth(list[1]);
+    let subtreeEnd = source.length;
+    for (let index = lineIndex + 1; index < lines.length; index += 1) {
+      const nextLine = lines[index].line;
+      if (!nextLine.trim()) continue;
+      if (/^\s{0,3}#{1,6}\s+/.test(nextLine)) {
+        subtreeEnd = lines[index].start;
+        break;
+      }
+      const nextList = nextLine.match(/^([ \t]*)([-*+]|\d+[.)])\s+/);
+      const nextIndent = indentationWidth(nextLine.match(/^([ \t]*)/)?.[1] ?? "");
+      if ((nextList && indentationWidth(nextList[1]) <= baseIndent) || (!nextList && nextIndent <= baseIndent)) {
+        subtreeEnd = lines[index].start;
+        break;
+      }
+    }
+    return {
+      kind: "list",
+      text: cleanMarkdownTopicText(list[4]) || "未命名主题",
+      lineStart: lineInfo.start,
+      lineEnd: lineInfo.end,
+      indent: list[1],
+      marker: `${list[2]} ${list[3]}`,
+      subtreeEnd,
+    };
+  }
+
+  const text = lineInfo.line.trim();
+  if (!text) return null;
+  return {
+    kind: "paragraph",
+    text: cleanMarkdownTopicText(text) || "未命名主题",
+    lineStart: lineInfo.start,
+    lineEnd: lineInfo.end,
+    subtreeEnd: lineInfo.end,
+  };
+};
+
+const renderGeneratedMarkdownList = (
+  nodes: AiGeneratedNode[],
+  baseIndent = "",
+  depth = 0,
+): string[] =>
+  nodes.flatMap((node) => [
+    `${baseIndent}${"  ".repeat(depth)}- ${node.text}`,
+    ...renderGeneratedMarkdownList(node.children ?? [], baseIndent, depth + 1),
+  ]);
+
+const renderGeneratedMarkdownHeadings = (
+  nodes: AiGeneratedNode[],
+  baseLevel: number,
+  depth = 1,
+): string[] =>
+  nodes.flatMap((node) => {
+    const level = Math.min(6, baseLevel + depth);
+    return [
+      `${"#".repeat(level)} ${node.text}`,
+      ...renderGeneratedMarkdownHeadings(node.children ?? [], baseLevel, depth + 1),
+    ];
+  });
+
+const formatGeneratedMarkdown = (target: MarkdownAiTarget, nodes: AiGeneratedNode[]) => {
+  if (target.kind === "heading" && target.level <= 3) {
+    return renderGeneratedMarkdownHeadings(nodes, target.level).join("\n");
+  }
+  const baseIndent = target.kind === "list" ? `${target.indent}  ` : "";
+  return renderGeneratedMarkdownList(nodes, baseIndent).join("\n");
+};
+
+const replaceMarkdownTargetLine = (
+  source: string,
+  target: MarkdownAiTarget,
+  text: string,
+) => {
+  const nextLine =
+    target.kind === "heading"
+      ? `${target.prefix}${text}`
+      : target.kind === "list"
+        ? `${target.indent}${target.marker}${text}`
+        : text;
+  return `${source.slice(0, target.lineStart)}${nextLine}${source.slice(target.lineEnd)}`;
+};
+
+const insertMarkdownChildren = (
+  source: string,
+  target: MarkdownAiTarget,
+  children: AiGeneratedNode[],
+) => {
+  const block = formatGeneratedMarkdown(target, children);
+  if (!block) return source;
+  const before = source.slice(0, target.subtreeEnd);
+  const after = source.slice(target.subtreeEnd);
+  const prefix = before.endsWith("\n") ? "" : "\n";
+  const suffix = !after || after.startsWith("\n") ? "" : "\n";
+  return `${before}${prefix}${block}${suffix}${after}`;
 };
 
 const clearDocumentMarkdown = (document: MarkdownDocument): MarkdownDocument => {
@@ -339,6 +539,10 @@ function App() {
   const [showConfirmDelete, setShowConfirmDelete] = useState(false);
   const [sidebarView, setSidebarView] = useState<"all" | "recent">("all");
   const [recentTicker, setRecentTicker] = useState(0);
+  const [aiConfig, setAiConfig] = useState<AiApiConfig>(() => loadAiConfig());
+  const [showAiConfig, setShowAiConfig] = useState(false);
+  const [aiBusyKey, setAiBusyKey] = useState<string | null>(null);
+  const [isCheckingUpdates, setIsCheckingUpdates] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const inputRefs = useRef(new Map<string, HTMLTextAreaElement>());
   const workspaceRef = useRef<Workspace | null>(null);
@@ -414,6 +618,14 @@ function App() {
   useEffect(() => {
     activeNodeIdRef.current = activeNodeId;
   }, [activeNodeId]);
+
+  useEffect(() => {
+    if (!window.localOutline?.onOpenApiConfig) return;
+    return window.localOutline.onOpenApiConfig(() => {
+      setAiConfig(loadAiConfig());
+      setShowAiConfig(true);
+    });
+  }, []);
 
   useEffect(() => {
     let mounted = true;
@@ -905,6 +1117,152 @@ function App() {
     }));
   });
 
+  const ensureAiConfig = useEventCallback(() => {
+    const latest = loadAiConfig();
+    setAiConfig(latest);
+    const error = validateAiConfig(latest);
+    if (error) {
+      setShowAiConfig(true);
+      showNotice("请先配置 API 密钥");
+      return null;
+    }
+    return normalizeAiConfig(latest);
+  });
+
+  const requestAiForTopic = useEventCallback(async (
+    action: AiNodeAction,
+    context: {
+      documentTitle: string;
+      topicText: string;
+      note?: string;
+      existingChildren?: string[];
+    },
+  ) => {
+    const config = ensureAiConfig();
+    if (!config) return null;
+    return runAiNodeAction(config, action, context);
+  });
+
+  const handleStructuredAiAction = useEventCallback(async (
+    action: AiNodeAction,
+    targetId: StructuredAiTargetId,
+  ) => {
+    const currentWorkspace = flushPendingEdits() ?? workspaceRef.current;
+    const document = currentWorkspace?.documents.find(
+      (item) => item.id === currentWorkspace.activeDocumentId,
+    ) as MarkdownDocument | undefined;
+    if (!document) return;
+
+    const isDocumentRoot = targetId === MINDMAP_ROOT_ID;
+    const node = isDocumentRoot ? null : findNode(document.nodes, targetId);
+    if (!isDocumentRoot && !node) return;
+
+    const busyKey = `structured:${targetId}:${action}`;
+    setAiBusyKey(busyKey);
+    showNotice(action === "generate" ? "AI 正在生成子主题..." : "AI 正在润色主题...");
+    try {
+      const result = await requestAiForTopic(action, {
+        documentTitle: document.title,
+        topicText: isDocumentRoot ? document.title : node?.text ?? "",
+        note: node?.note,
+        existingChildren: (isDocumentRoot ? document.nodes : node?.children ?? [])
+          .map((child) => child.text)
+          .filter(Boolean),
+      });
+      if (!result) return;
+
+      if (action === "polish") {
+        const text = result.text?.trim();
+        if (!text) throw new Error("AI 没有返回润色文本");
+        if (isDocumentRoot) {
+          updateTitle(text);
+        } else {
+          handleNodeText(targetId, text);
+        }
+        showNotice("已润色当前主题");
+        return;
+      }
+
+      const generated = generatedNodesToOutlineNodes(result.children);
+      if (!generated.length) throw new Error("AI 没有生成可用子主题");
+      if (isDocumentRoot) {
+        patchActiveDocumentStable((active) => ({
+          ...active,
+          nodes: [...active.nodes, ...generated],
+        }));
+      } else {
+        updateActiveNodesStable((nodes) => updateNode(nodes, targetId, (target) => {
+          target.collapsed = false;
+          target.children = [...target.children, ...generated];
+        }));
+      }
+      setActiveNodeId(generated[0].id);
+      showNotice(`已生成 ${generated.length} 个子主题`);
+    } catch (error) {
+      showNotice(error instanceof Error ? error.message : "AI 操作失败");
+    } finally {
+      setAiBusyKey((current) => (current === busyKey ? null : current));
+    }
+  });
+
+  const handleMarkdownAiAction = useEventCallback(async (
+    action: AiNodeAction,
+    target: MarkdownAiTarget,
+    source: string,
+  ) => {
+    if (!activeDocument) return null;
+    const busyKey = `markdown:${action}`;
+    setAiBusyKey(busyKey);
+    showNotice(action === "generate" ? "AI 正在生成 Markdown 子主题..." : "AI 正在润色 Markdown 主题...");
+    try {
+      const result = await requestAiForTopic(action, {
+        documentTitle: activeDocument.title,
+        topicText: target.text,
+        existingChildren: [],
+      });
+      if (!result) return null;
+
+      if (action === "polish") {
+        const text = result.text?.trim();
+        if (!text) throw new Error("AI 没有返回润色文本");
+        const next = replaceMarkdownTargetLine(source, target, text);
+        const cursor =
+          target.kind === "heading"
+            ? target.lineStart + target.prefix.length + text.length
+            : target.kind === "list"
+              ? target.lineStart + target.indent.length + target.marker.length + text.length
+              : target.lineStart + text.length;
+        handleMarkdownDraftChange(next);
+        showNotice("已润色当前 Markdown 主题");
+        return { value: next, cursor };
+      }
+
+      if (!result.children?.length) throw new Error("AI 没有生成可用子主题");
+      const next = insertMarkdownChildren(source, target, result.children);
+      handleMarkdownDraftChange(next);
+      showNotice("已生成 Markdown 子主题");
+      return { value: next, cursor: target.subtreeEnd + Math.max(0, next.length - source.length) };
+    } catch (error) {
+      showNotice(error instanceof Error ? error.message : "AI 操作失败");
+      return null;
+    } finally {
+      setAiBusyKey((current) => (current === busyKey ? null : current));
+    }
+  });
+
+  const handleSaveAiConfig = useEventCallback((config: AiApiConfig) => {
+    const error = validateAiConfig(config);
+    if (error) {
+      showNotice(error);
+      return false;
+    }
+    const saved = saveAiConfig(config);
+    setAiConfig(saved);
+    setShowAiConfig(false);
+    showNotice("API 密钥配置已保存");
+    return true;
+  });
+
   const copyNodeLink = useEventCallback(async (nodeId: string) => {
     const node = activeDocument ? findNode(activeDocument.nodes, nodeId) : null;
     if (!activeDocument || !node) return;
@@ -943,7 +1301,7 @@ function App() {
     let didInsert = false;
     flushFocusedStructuredInput();
     updateActiveNodesStable((nodes) => {
-      if (id === "__local_outline_mindmap_root__") {
+      if (id === MINDMAP_ROOT_ID) {
         didInsert = true;
         return [...nodes, node];
       }
@@ -1057,7 +1415,7 @@ function App() {
         blocked = true;
         return current;
       }
-      if (targetId !== "__local_outline_mindmap_root__" && !findNode(active.nodes, targetId)) return current;
+      if (targetId !== MINDMAP_ROOT_ID && !findNode(active.nodes, targetId)) return current;
 
       [pasted] =
         clipboard.mode === "copy"
@@ -1068,7 +1426,7 @@ function App() {
         clipboard.mode === "cut" && sourceNode && activeDocumentId === clipboard.sourceDocumentId
           ? removeNode(active.nodes, clipboard.sourceId)
           : active.nodes;
-      const activeNodes = targetId === "__local_outline_mindmap_root__"
+      const activeNodes = targetId === MINDMAP_ROOT_ID
         ? [...activeBaseNodes, pasted]
         : addChild(activeBaseNodes, targetId, pasted);
       didPaste = true;
@@ -1289,10 +1647,14 @@ function App() {
     const currentWorkspace = flushPendingEdits() ?? workspaceRef.current;
     if (!currentWorkspace) return;
     try {
-      const expectedRevision = localStorage.getItem(ICLOUD_REVISION_KEY) ?? undefined;
+      const expectedRevision =
+        localStorage.getItem(ICLOUD_REVISION_KEY) ??
+        localStorage.getItem(LEGACY_ICLOUD_REVISION_KEY) ??
+        undefined;
       const result = await saveICloudBackup(currentWorkspace, expectedRevision);
       if (result.ok && result.revision) {
         localStorage.setItem(ICLOUD_REVISION_KEY, result.revision);
+        localStorage.removeItem(LEGACY_ICLOUD_REVISION_KEY);
       }
       showNotice(result.ok ? `iCloud 备份已保存：${result.path}` : result.error ?? "备份失败");
     } catch (error) {
@@ -1303,7 +1665,7 @@ function App() {
   const loadCloudBackup = useEventCallback(async () => {
     flushPendingEdits();
     if (!window.localOutline) {
-      showNotice("浏览器版请用“导入”选择 iCloud Drive 里的 localoutline-workspace.json");
+      showNotice("浏览器版请用“导入”选择 iCloud Drive 里的 bike-workspace.json");
       return;
     }
     const result = await window.localOutline.loadICloudBackup();
@@ -1321,10 +1683,55 @@ function App() {
       replaceWorkspace(next);
       setActiveNodeId(firstNodeIdInWorkspace(next));
       setFocusNodeId(null);
-      if (result.revision) localStorage.setItem(ICLOUD_REVISION_KEY, result.revision);
+      if (result.revision) {
+        localStorage.setItem(ICLOUD_REVISION_KEY, result.revision);
+        localStorage.removeItem(LEGACY_ICLOUD_REVISION_KEY);
+      }
       showNotice(`已载入 iCloud 备份：${result.path}`);
     } catch (error) {
       showNotice(`载入备份失败：${error instanceof Error ? error.message : String(error)}`);
+    }
+  });
+
+  const checkUpdates = useEventCallback(async () => {
+    if (isCheckingUpdates) return;
+    setIsCheckingUpdates(true);
+    showNotice("正在检查更新...");
+    try {
+      if (!window.localOutline?.checkForUpdates) {
+        const shouldOpen = window.confirm(
+          `当前版本：${__APP_VERSION__}\n\n浏览器版无法自动读取桌面发布信息，是否打开发布页查看更新？`,
+        );
+        if (shouldOpen) {
+          window.open(__RELEASE_PAGE_URL__, "_blank", "noopener,noreferrer");
+          showNotice("已打开发布页查看更新");
+        } else {
+          showNotice("已取消检查更新");
+        }
+        return;
+      }
+
+      const result = await window.localOutline.checkForUpdates();
+      if (!result.ok) {
+        showNotice(`检查更新失败：${result.error ?? "请稍后重试"}`);
+        return;
+      }
+      if (!result.updateAvailable) {
+        showNotice(`已是最新版本：${result.currentVersion}`);
+        return;
+      }
+
+      const shouldOpen = window.confirm(
+        `发现新版本 ${result.latestVersion}\n当前版本：${result.currentVersion}\n\n是否打开发布页？`,
+      );
+      if (shouldOpen) {
+        window.open(result.releaseUrl || __RELEASE_PAGE_URL__, "_blank", "noopener,noreferrer");
+      }
+      showNotice(`发现新版本：${result.latestVersion}`);
+    } catch (error) {
+      showNotice(`检查更新失败：${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setIsCheckingUpdates(false);
     }
   });
 
@@ -1348,7 +1755,7 @@ function App() {
           const backup = exportWorkspace(currentWorkspace);
           const stamp = new Date().toISOString().replace(/[:.]/g, "-");
           downloadText(
-            `localoutline-workspace-before-import-${stamp}.json`,
+            `bike-workspace-before-import-${stamp}.json`,
             backup.content,
             backup.mime,
           );
@@ -1412,7 +1819,7 @@ function App() {
             <ListTree size={20} />
           </div>
           <div>
-            <strong>Local Outline</strong>
+            <strong>Bike</strong>
             <span>本地优先大纲</span>
           </div>
         </div>
@@ -1518,6 +1925,14 @@ function App() {
           </button>
           <button title="iCloud 备份" onClick={backupToCloud}>
             <Cloud size={16} />
+          </button>
+          <button
+            className={classNames(isCheckingUpdates && "spinning")}
+            title="检查更新"
+            onClick={checkUpdates}
+            disabled={isCheckingUpdates}
+          >
+            <RefreshCw size={16} />
           </button>
           <button title="回收站" onClick={() => showNotice("回收站功能开发中，敬请期待")}>
             <Trash2 size={16} />
@@ -1692,6 +2107,8 @@ function App() {
                 onCopyLink={copyNodeLink}
                 onExportNode={exportNodeMarkdown}
                 onUpdateNodes={setActiveNodes}
+                onAiAction={handleStructuredAiAction}
+                isAiBusy={(id) => Boolean(aiBusyKey?.startsWith(`structured:${id}:`))}
               />
             )}
 
@@ -1717,6 +2134,8 @@ function App() {
                 onRemove={removeActiveNode}
                 onToggleSiblingCollapse={toggleSiblingCollapse}
                 onFocusNode={setFocusNodeId}
+                onAiAction={handleStructuredAiAction}
+                isAiBusy={(id) => Boolean(aiBusyKey?.startsWith(`structured:${id}:`))}
               />
             )}
 
@@ -1734,6 +2153,8 @@ function App() {
                 viewMode={markdownPaneMode}
                 onChange={handleMarkdownDraftChange}
                 onViewModeChange={setMarkdownPaneMode}
+                onAiAction={handleMarkdownAiAction}
+                isAiBusy={Boolean(aiBusyKey?.startsWith("markdown:"))}
               />
             )}
           </section>
@@ -1821,6 +2242,14 @@ function App() {
         </div>
       )}
 
+      {showAiConfig && (
+        <AiConfigDialog
+          initialConfig={aiConfig || defaultAiConfig}
+          onSave={handleSaveAiConfig}
+          onClose={() => setShowAiConfig(false)}
+        />
+      )}
+
       {showConfirmDelete && (
         <div className="confirm-overlay" onClick={() => setShowConfirmDelete(false)}>
           <div className="confirm-dialog" onClick={(e) => e.stopPropagation()}>
@@ -1842,6 +2271,185 @@ interface MarkdownViewProps {
   viewMode: MarkdownPaneMode;
   onChange: (value: string) => void;
   onViewModeChange: (mode: MarkdownPaneMode) => void;
+  onAiAction: (
+    action: AiNodeAction,
+    target: MarkdownAiTarget,
+    source: string,
+  ) => Promise<{ value: string; cursor: number } | null>;
+  isAiBusy: boolean;
+}
+
+interface AiInlineMenuProps {
+  busy: boolean;
+  onAction: (action: AiNodeAction) => void;
+}
+
+function AiButtonGlyph() {
+  return <Sparkles className="ai-button-glyph" size={15} strokeWidth={2.25} aria-hidden="true" />;
+}
+
+function AiInlineMenu({ busy, onAction }: AiInlineMenuProps) {
+  const [open, setOpen] = useState(false);
+  const wrapperRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const handlePointerDown = (event: PointerEvent) => {
+      if (wrapperRef.current?.contains(event.target as Node)) return;
+      setOpen(false);
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    window.addEventListener("pointerdown", handlePointerDown);
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("pointerdown", handlePointerDown);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [open]);
+
+  const run = (action: AiNodeAction) => {
+    setOpen(false);
+    onAction(action);
+  };
+
+  return (
+    <div
+      ref={wrapperRef}
+      className={classNames("ai-inline", open && "open", busy && "busy")}
+      onClick={(event) => event.stopPropagation()}
+      onPointerDown={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+      }}
+    >
+      <button
+        type="button"
+        className="ai-inline-button"
+        title={busy ? "AI 正在处理" : "AI 助手"}
+        disabled={busy}
+        onClick={() => setOpen((value) => !value)}
+      >
+        <AiButtonGlyph />
+      </button>
+      {open && (
+        <div className="ai-action-menu">
+          <button type="button" onClick={() => run("generate")}>
+            <Sparkles size={15} />
+            生成
+          </button>
+          <button type="button" onClick={() => run("polish")}>
+            <WandSparkles size={15} />
+            润色
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AiConfigDialog({
+  initialConfig,
+  onSave,
+  onClose,
+}: {
+  initialConfig: AiApiConfig;
+  onSave: (config: AiApiConfig) => boolean;
+  onClose: () => void;
+}) {
+  const [draft, setDraft] = useState<AiApiConfig>(() => ({
+    ...defaultAiConfig,
+    ...initialConfig,
+  }));
+  const [showKey, setShowKey] = useState(false);
+  const error = validateAiConfig(draft);
+
+  const updateDraft = <Key extends keyof AiApiConfig>(key: Key, value: AiApiConfig[Key]) => {
+    setDraft((current) => ({ ...current, [key]: value }));
+  };
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <form
+        className="api-config-dialog"
+        onSubmit={(event) => {
+          event.preventDefault();
+          onSave(draft);
+        }}
+        onClick={(event) => event.stopPropagation()}
+      >
+        <header>
+          <div>
+            <h3>配置API密钥</h3>
+            <p>用于大纲、思维导图和 Markdown 模式的 AI 生成与润色。</p>
+          </div>
+          <button type="button" className="dialog-close" onClick={onClose} title="关闭">
+            <X size={16} />
+          </button>
+        </header>
+
+        <label className="config-field">
+          <span>协议端点</span>
+          <select
+            value={draft.endpoint}
+            onChange={(event) => updateDraft("endpoint", event.target.value as AiApiConfig["endpoint"])}
+          >
+            <option value="responses">Responses</option>
+            <option value="chat_completions">Chat/completions</option>
+          </select>
+        </label>
+
+        <label className="config-field">
+          <span>API baseurl</span>
+          <input
+            value={draft.baseUrl}
+            onChange={(event) => updateDraft("baseUrl", event.target.value)}
+            placeholder="https://api.openai.com/v1"
+            spellCheck={false}
+          />
+        </label>
+
+        <label className="config-field">
+          <span>API key</span>
+          <div className="api-key-input">
+            <input
+              value={draft.apiKey}
+              type={showKey ? "text" : "password"}
+              onChange={(event) => updateDraft("apiKey", event.target.value)}
+              placeholder="sk-..."
+              spellCheck={false}
+              autoComplete="current-password"
+            />
+            <button type="button" onClick={() => setShowKey((value) => !value)}>
+              {showKey ? "隐藏" : "显示"}
+            </button>
+          </div>
+        </label>
+
+        <label className="config-field">
+          <span>大模型</span>
+          <input
+            value={draft.model}
+            onChange={(event) => updateDraft("model", event.target.value)}
+            placeholder="gpt-5.5"
+            spellCheck={false}
+          />
+        </label>
+
+        {error && <p className="config-error">{error}</p>}
+
+        <footer>
+          <button type="button" className="secondary" onClick={onClose}>
+            取消
+          </button>
+          <button type="submit" className="primary">
+            保存
+          </button>
+        </footer>
+      </form>
+    </div>
+  );
 }
 
 function MarkdownView({
@@ -1849,9 +2457,17 @@ function MarkdownView({
   viewMode,
   onChange,
   onViewModeChange,
+  onAiAction,
+  isAiBusy,
 }: MarkdownViewProps) {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const [isSourceFocused, setIsSourceFocused] = useState(false);
+  const [cursorPosition, setCursorPosition] = useState(0);
   const editorToolsDisabled = viewMode === "preview";
+  const markdownAiTarget = useMemo(
+    () => findMarkdownAiTarget(value, cursorPosition),
+    [cursorPosition, value],
+  );
 
   const replaceRange = (
     start: number,
@@ -1978,6 +2594,33 @@ function MarkdownView({
     }
   };
 
+  const refreshCursorPosition = () => {
+    setCursorPosition(textareaRef.current?.selectionStart ?? value.length);
+  };
+
+  const handleSourceBlur = () => {
+    window.setTimeout(() => {
+      const wrapper = textareaRef.current?.closest(".markdown-source-wrap");
+      setIsSourceFocused(Boolean(wrapper?.contains(document.activeElement)));
+    }, 0);
+  };
+
+  const runMarkdownAi = async (action: AiNodeAction) => {
+    const target = findMarkdownAiTarget(
+      value,
+      textareaRef.current?.selectionStart ?? cursorPosition,
+    );
+    if (!target) return;
+    const result = await onAiAction(action, target, value);
+    if (!result) return;
+    window.requestAnimationFrame(() => {
+      const nextCursor = clampNumber(result.cursor, 0, result.value.length);
+      textareaRef.current?.focus();
+      textareaRef.current?.setSelectionRange(nextCursor, nextCursor);
+      setCursorPosition(nextCursor);
+    });
+  };
+
   return (
     <div className={classNames("markdown-editor", "markdown-view", `mode-${viewMode}`, `markdown-view-${viewMode}`)}>
       <div className="markdown-toolbar">
@@ -2059,15 +2702,36 @@ function MarkdownView({
 
       <div className="markdown-workbench">
         {viewMode !== "preview" && (
-          <textarea
-            ref={textareaRef}
-            className="markdown-source"
-            value={value}
-            onChange={(event) => onChange(event.target.value)}
-            onKeyDown={handleKeyDown}
-            spellCheck={false}
-            aria-label="Markdown 源码"
-          />
+          <div className={classNames("markdown-source-wrap", isSourceFocused && Boolean(markdownAiTarget) && "has-ai-target")}>
+            <textarea
+              ref={textareaRef}
+              className="markdown-source"
+              value={value}
+              onChange={(event) => {
+                onChange(event.target.value);
+                setCursorPosition(event.target.selectionStart);
+              }}
+              onKeyDown={handleKeyDown}
+              onKeyUp={refreshCursorPosition}
+              onClick={refreshCursorPosition}
+              onSelect={refreshCursorPosition}
+              onFocus={() => {
+                setIsSourceFocused(true);
+                refreshCursorPosition();
+              }}
+              onBlur={handleSourceBlur}
+              spellCheck={false}
+              aria-label="Markdown 源码"
+            />
+            {isSourceFocused && markdownAiTarget && (
+              <div className="markdown-ai-anchor">
+                <AiInlineMenu
+                  busy={isAiBusy}
+                  onAction={runMarkdownAi}
+                />
+              </div>
+            )}
+          </div>
         )}
         {viewMode !== "edit" && (
           <MarkdownPreview content={value} />
@@ -2393,6 +3057,8 @@ interface OutlineViewProps {
   onCopyLink: (id: string) => void;
   onExportNode: (id: string) => void;
   onUpdateNodes: (nodes: OutlineNode[]) => void;
+  onAiAction: (action: AiNodeAction, targetId: StructuredAiTargetId) => void;
+  isAiBusy: (id: StructuredAiTargetId) => boolean;
 }
 
 interface OutlineNodeRowProps {
@@ -2414,6 +3080,8 @@ interface OutlineNodeRowProps {
   onDragEnd: (event: React.DragEvent) => void;
   onDrop: (event: React.DragEvent, id: string) => void;
   dropZone: OutlineDropZone | null;
+  onAiAction: (action: AiNodeAction, targetId: StructuredAiTargetId) => void;
+  isAiBusy: boolean;
 }
 
 const OutlineNodeRow = React.memo(function OutlineNodeRow({
@@ -2435,6 +3103,8 @@ const OutlineNodeRow = React.memo(function OutlineNodeRow({
   onDragEnd,
   onDrop,
   dropZone,
+  onAiAction,
+  isAiBusy,
 }: OutlineNodeRowProps) {
   const [localText, setLocalText] = useState(node.text);
   const isFocusedRef = useRef(false);
@@ -2586,6 +3256,10 @@ const OutlineNodeRow = React.memo(function OutlineNodeRow({
           onFocus={handleFocus}
           onBlur={handleBlur}
           placeholder="输入主题"
+        />
+        <AiInlineMenu
+          busy={isAiBusy}
+          onAction={(action) => onAiAction(action, node.id)}
         />
         {node.imageName && (
           <span className="node-attachment">
@@ -2779,6 +3453,8 @@ function OutlineView(props: OutlineViewProps) {
           onDragEnd={handleDragEnd}
           onDrop={handleDrop}
           dropZone={dropState?.id === node.id ? dropState.zone : null}
+          onAiAction={props.onAiAction}
+          isAiBusy={props.isAiBusy(node.id)}
         />
       ))}
       {menuState && menuNode && (
@@ -3010,6 +3686,8 @@ interface MindMapProps {
   onRemove: (id: string) => void;
   onToggleSiblingCollapse: (id: string) => void;
   onFocusNode: (id: string) => void;
+  onAiAction: (action: AiNodeAction, targetId: StructuredAiTargetId) => void;
+  isAiBusy: (id: StructuredAiTargetId) => boolean;
 }
 
 interface MindMapItem {
@@ -3044,8 +3722,10 @@ function MindMap({
   onRemove,
   onToggleSiblingCollapse,
   onFocusNode,
+  onAiAction,
+  isAiBusy,
 }: MindMapProps) {
-  const mapRootId = "__local_outline_mindmap_root__";
+  const mapRootId = MINDMAP_ROOT_ID;
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const dragRef = useRef<{
     pointerId: number;
@@ -3419,6 +4099,12 @@ function MindMap({
                         }
                       }}
                       onBlur={() => setEditingNodeId(null)}
+                    />
+                    <AiInlineMenu
+                      busy={isAiBusy(isRootNode(item.node.id) ? rootActionTargetId() : item.node.id)}
+                      onAction={(action) =>
+                        onAiAction(action, isRootNode(item.node.id) ? rootActionTargetId() : item.node.id)
+                      }
                     />
                     <button
                       className="map-node-add"

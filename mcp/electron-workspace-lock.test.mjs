@@ -13,8 +13,8 @@ const {
 } = require("../electron/workspace-lock.cjs");
 
 const makeWorkspacePath = async () => {
-  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "localoutline-electron-lock-"));
-  return path.join(directory, "localoutline-workspace.json");
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "bike-electron-lock-"));
+  return path.join(directory, "bike-workspace.json");
 };
 
 test("electron workspace helper writes files atomically and removes temp files", async () => {
@@ -93,7 +93,7 @@ test("electron workspace lock times out while another writer owns it", async () 
         staleMs: 60_000,
         retryMs: 1,
       }),
-      /正在被另一个 LocalOutline 写入/,
+      /正在被另一个 Bike 写入/,
     );
   } finally {
     await release();

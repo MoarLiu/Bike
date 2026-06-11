@@ -11,7 +11,7 @@ struct SidebarView: View {
                     .foregroundStyle(.white)
                     .background(Color.primary, in: Circle())
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Local Outline").font(.headline)
+                    Text("Bike").font(.headline)
                     Text("原生 Swift").font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -82,7 +82,7 @@ struct SidebarView: View {
                     .help("创建 JSON 备份")
                 Button { store.toggleDarkMode() } label: { Image(systemName: store.useDarkMode ? "sun.max" : "moon") }
                     .help(store.useDarkMode ? "切换到明亮模式" : "切换到暗黑模式")
-                Button { LocalOutlineStorage.openDocumentsDirectoryInFinder() } label: { Image(systemName: "folder") }
+                Button { BikeStorage.openDocumentsDirectoryInFinder() } label: { Image(systemName: "folder") }
                     .help("在 Finder 中打开 Markdown 保存目录")
                 Spacer()
             }
@@ -92,7 +92,7 @@ struct SidebarView: View {
                 Image(systemName: "checkmark.icloud")
                 VStack(alignment: .leading, spacing: 2) {
                     Text("iCloud Markdown").font(.caption.bold())
-                    Text(store.notice ?? "自动保存到 iCloud Drive/LocalOutline").font(.caption2).foregroundStyle(.secondary).lineLimit(2)
+                    Text(store.notice ?? "自动保存到 iCloud Drive/Bike").font(.caption2).foregroundStyle(.secondary).lineLimit(2)
                 }
                 Spacer()
             }
@@ -121,7 +121,7 @@ private struct DocumentRow: View {
     }
 
     private func format(_ iso: String) -> String {
-        guard let date = ISO8601DateFormatter.localOutline.date(from: iso) else { return "时间未知" }
+        guard let date = ISO8601DateFormatter.bike.date(from: iso) else { return "时间未知" }
         return date.formatted(date: .abbreviated, time: .shortened)
     }
 }

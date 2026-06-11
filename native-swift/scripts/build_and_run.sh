@@ -2,12 +2,12 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-APP_NAME="Local Outline Native"
-PRODUCT_NAME="LocalOutlineNative"
+APP_NAME="Bike Native"
+PRODUCT_NAME="BikeNative"
 DIST_DIR="$ROOT_DIR/dist"
 BUNDLE_PATH="$DIST_DIR/$APP_NAME.app"
-INFO_PLIST="$ROOT_DIR/Sources/LocalOutlineNative/Resources/Info.plist"
-APP_ICON="$ROOT_DIR/Sources/LocalOutlineNative/Resources/AppIcon.icns"
+INFO_PLIST="$ROOT_DIR/Sources/BikeNative/Resources/Info.plist"
+APP_ICON="$ROOT_DIR/Sources/BikeNative/Resources/AppIcon.icns"
 LOGS=false
 VERIFY=false
 

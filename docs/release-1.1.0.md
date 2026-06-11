@@ -1,4 +1,4 @@
-# Local Outline 1.1.0 更新说明
+# Bike 1.1.0 更新说明
 
 发布日期：2026-05-22
 
@@ -25,7 +25,7 @@
 - 从 Markdown 解析节点时会尽量复用已有节点 ID 和折叠、颜色、样式、图标等状态，减少视图切换抖动。
 - 当用户在结构化视图继续编辑节点、标题、备注或样式时，会以节点树为准重新生成 Markdown，避免原文和结构内容长期不一致。
 - Markdown 图片会保留 alt 和 URL；表格单元格中的 `|` 会进行转义处理。
-- OPML 导出增加 Local Outline 扩展属性，用于保留更多节点状态。
+- OPML 导出增加 Bike 扩展属性，用于保留更多节点状态。
 
 ## 修复
 
@@ -39,9 +39,9 @@
 
 ## 发布资产
 
-- macOS Apple Silicon: `Local Outline-1.1.0-arm64.dmg`
+- macOS Apple Silicon: `Bike-1.1.0-arm64.dmg`
   - SHA256: `c0aa57ba78bfd9792d567e7d2de1d36521e26a86d8d7c80670833bdd2e546bf7`
-- Windows x64: `Local Outline-1.1.0-x64.zip`
+- Windows x64: `Bike-1.1.0-x64.zip`
   - SHA256: `b0f77586c05ef1258d9745438a33eaef20c5750e3a32c21d7bc0da80edecdc56`
 
 当前桌面产物为未正式签名构建，适合个人安装和测试；公开分发前仍建议接入 Apple Developer ID 签名、notarization 和 Windows 代码签名。

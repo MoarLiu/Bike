@@ -70,7 +70,7 @@ private struct WorkspaceLoadingView: View {
                 .controlSize(.large)
             Text("正在载入工作区")
                 .font(.headline)
-            Text("正在读取 iCloud Drive/LocalOutline 中的 Markdown 文档。")
+            Text("正在读取 iCloud Drive/Bike 中的 Markdown 文档。")
                 .font(.callout)
                 .foregroundStyle(.secondary)
         }
@@ -100,7 +100,7 @@ private struct WorkspaceLoadErrorView: View {
                     Label("重试", systemImage: "arrow.clockwise")
                 }
                 .buttonStyle(.borderedProminent)
-                Button { LocalOutlineStorage.openDocumentsDirectoryInFinder() } label: {
+                Button { BikeStorage.openDocumentsDirectoryInFinder() } label: {
                     Label("打开 Markdown 目录", systemImage: "folder")
                 }
                 .buttonStyle(.bordered)
@@ -233,10 +233,10 @@ struct SettingsView: View {
             HStack {
                 Text("Markdown 保存目录")
                 Spacer()
-                Text(LocalOutlineStorage.documentsDirectoryURL().path)
+                Text(BikeStorage.documentsDirectoryURL().path)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
-                Button("在 Finder 中打开") { LocalOutlineStorage.openDocumentsDirectoryInFinder() }
+                Button("在 Finder 中打开") { BikeStorage.openDocumentsDirectoryInFinder() }
             }
         }
         .padding()

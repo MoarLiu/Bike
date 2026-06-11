@@ -2,7 +2,7 @@ node_modules/
 dist/
 release/
 build/win-icon-png/
-config/local-outline.config.json
+config/bike.config.json
 .DS_Store
 npm-debug.log*
 *.local

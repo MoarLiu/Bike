@@ -239,7 +239,7 @@ export const exportDocument = (
 };
 
 export const exportWorkspace = (workspace: Workspace) => ({
-  filename: "localoutline-workspace.json",
+  filename: "bike-workspace.json",
   mime: "application/json",
   content: JSON.stringify(workspace, null, 2),
 });

@@ -62,10 +62,10 @@ const stopServer = async (child) => {
 };
 
 const startAuthServer = async (t) => {
-  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "localoutline-auth-"));
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "bike-auth-"));
   const port = await getFreePort();
   const password = "correct horse battery staple";
-  const configPath = path.join(directory, "local-outline.config.json");
+  const configPath = path.join(directory, "bike.config.json");
   await fs.writeFile(
     configPath,
     JSON.stringify(
@@ -89,7 +89,7 @@ const startAuthServer = async (t) => {
 
   const child = spawn(process.execPath, ["server/auth-server.mjs"], {
     cwd: projectRoot,
-    env: { ...process.env, LOCAL_OUTLINE_CONFIG: configPath },
+    env: { ...process.env, BIKE_CONFIG: configPath },
     stdio: ["ignore", "pipe", "pipe"],
   });
   const output = [];
@@ -110,7 +110,7 @@ const login = async (baseUrl, password) => {
   assert.equal(response.status, 302);
   assert.equal(response.headers.get("location"), "/");
   const cookie = response.headers.get("set-cookie")?.split(";")[0];
-  assert.match(cookie ?? "", /^local_outline_session=/);
+  assert.match(cookie ?? "", /^bike_session=/);
   return cookie;
 };
 
@@ -179,5 +179,5 @@ test("user-scoped login throttling does not lock out valid credentials", async (
   });
   assert.equal(valid.status, 302);
   assert.equal(valid.headers.get("location"), "/");
-  assert.match(valid.headers.get("set-cookie") ?? "", /^local_outline_session=/);
+  assert.match(valid.headers.get("set-cookie") ?? "", /^bike_session=/);
 });

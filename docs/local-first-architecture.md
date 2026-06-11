@@ -130,10 +130,10 @@ export interface Workspace {
 
 当前实现位于 `src/storage.ts`：
 
-- IndexedDB 数据库名：`local-outline-db`。
+- IndexedDB 数据库名：`bike-db`。
 - object store：`workspace-store`。
 - key：`workspace`。
-- 回退 localStorage key：`local-outline-workspace`。
+- 回退 localStorage key：`bike-workspace`。
 - 自动保存节流：应用状态变化后约 250ms 写入一次。
 
 ### 保存流程
@@ -194,13 +194,13 @@ export interface Workspace {
 备份目录：
 
 ```text
-~/Library/Mobile Documents/com~apple~CloudDocs/LocalOutline
+~/Library/Mobile Documents/com~apple~CloudDocs/Bike
 ```
 
 保存时写入两个文件：
 
-- `localoutline-workspace.json`：最新备份。
-- `localoutline-workspace-{timestamp}.json`：带时间戳的历史备份。
+- `bike-workspace.json`：最新备份。
+- `bike-workspace-{timestamp}.json`：带时间戳的历史备份。
 
 优点：
 
@@ -263,7 +263,7 @@ export interface Workspace {
 
 工作区导出：
 
-- `localoutline-workspace.json`：保存完整 `Workspace`。
+- `bike-workspace.json`：保存完整 `Workspace`。
 
 ### 导入
 
@@ -363,7 +363,7 @@ export function migrateWorkspace(raw: unknown): Workspace {
 场景：
 
 - 本地 IndexedDB 有较新编辑。
-- iCloud `localoutline-workspace.json` 也有不同内容。
+- iCloud `bike-workspace.json` 也有不同内容。
 - 用户点击载入备份。
 
 建议处理：
@@ -404,7 +404,7 @@ export function migrateWorkspace(raw: unknown): Workspace {
 可评估从“一个工作区 JSON”演进到“一个文档一个文件”：
 
 ```text
-LocalOutline/
+Bike/
   workspace.json
   documents/
     doc_a.json

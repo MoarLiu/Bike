@@ -1,10 +1,10 @@
-# Local Outline 1.1.2 更新说明
+# Bike 1.1.2 更新说明
 
 发布日期：2026-06-02
 
 ## 新增
 
-- Swift 原生版默认使用 iCloud Drive/LocalOutline 作为 Markdown 保存目录。
+- Swift 原生版默认使用 iCloud Drive/Bike 作为 Markdown 保存目录。
 - Swift 原生版会把每个文档保存为独立 `.md` 文件，并维护隐藏 metadata 用于文档顺序、活动文档和文件名映射。
 - Swift 原生版新增加载失败错误页，支持重试和打开 Markdown 目录。
 
@@ -29,14 +29,14 @@
 
 ## 打包说明
 
-- Electron macOS Apple Silicon: `Local Outline-1.1.2-arm64.dmg`
+- Electron macOS Apple Silicon: `Bike-1.1.2-arm64.dmg`
 - Swift 原生版: `Local-Outline-Native-1.1.2.dmg`
 
 ## SHA-256
 
 ```text
-ec1d3beabc4921e85cb5dafd6ce2f774c2fb6e6b98296b99402ea0bbda9ca4a4  release/Local Outline-1.1.2-arm64.dmg
-3f3a377d1a90138a3ea8037249d634664eb2f9fdbc04de52ba0cb71fa23a1a8d  release/Local Outline-1.1.2-arm64.dmg.blockmap
-ae97e423fba81d05eaf0c0d372a7e0aecd416d875d19cd55a4f911e5783cd718  release/Local Outline-1.1.2-x64.zip
+ec1d3beabc4921e85cb5dafd6ce2f774c2fb6e6b98296b99402ea0bbda9ca4a4  release/Bike-1.1.2-arm64.dmg
+3f3a377d1a90138a3ea8037249d634664eb2f9fdbc04de52ba0cb71fa23a1a8d  release/Bike-1.1.2-arm64.dmg.blockmap
+ae97e423fba81d05eaf0c0d372a7e0aecd416d875d19cd55a4f911e5783cd718  release/Bike-1.1.2-x64.zip
 9be156865a5e74cf736026950faf1dc9730f5a599e76443c799ea525391e27d9  native-swift/release/Local-Outline-Native-1.1.2.dmg
 ```

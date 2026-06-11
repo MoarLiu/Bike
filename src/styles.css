@@ -736,6 +736,15 @@ button:disabled {
   background: #eeeeec;
 }
 
+.sidebar-dock button:disabled {
+  opacity: 0.68;
+  cursor: progress;
+}
+
+.sidebar-dock button.spinning svg {
+  animation: ai-spin 1s linear infinite;
+}
+
 .workspace {
   display: grid;
   min-width: 0;
@@ -1114,6 +1123,24 @@ button:disabled {
 
 .markdown-workbench {
   display: contents;
+}
+
+.markdown-source-wrap {
+  position: relative;
+  display: grid;
+  min-width: 0;
+  min-height: 480px;
+}
+
+.markdown-ai-anchor {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 9;
+}
+
+.markdown-ai-anchor .ai-inline {
+  opacity: 1;
 }
 
 .markdown-source {
@@ -1986,6 +2013,163 @@ textarea.markdown-source:focus {
   background: #f4f3f1;
 }
 
+.outline-text-cell > textarea {
+  flex: 1 1 auto;
+}
+
+.ai-inline {
+  position: relative;
+  z-index: 8;
+  display: inline-grid;
+  flex: 0 0 auto;
+  opacity: 0;
+  transition:
+    opacity 120ms ease,
+    transform 120ms ease;
+}
+
+.ai-inline.open,
+.ai-inline.busy,
+.outline-row:hover .ai-inline,
+.outline-row.active .ai-inline,
+.outline-row:focus-within .ai-inline,
+.markdown-source-wrap.has-ai-target .ai-inline,
+.map-node.editing .ai-inline {
+  opacity: 1;
+}
+
+.ai-inline-button {
+  display: grid;
+  width: 26px;
+  height: 26px;
+  min-width: 26px;
+  place-items: center;
+  border: 1px solid rgba(117, 119, 128, 0.24);
+  border-radius: 50%;
+  color: #555b64;
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow:
+    0 2px 8px rgba(28, 28, 31, 0.08),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.55);
+  cursor: pointer;
+  transition:
+    border-color 140ms ease,
+    background 140ms ease,
+    color 140ms ease,
+    box-shadow 140ms ease,
+    transform 140ms ease;
+}
+
+.ai-inline-button:hover:not(:disabled) {
+  border-color: rgba(107, 79, 215, 0.45);
+  color: var(--primary);
+  background: #ffffff;
+  box-shadow:
+    0 6px 16px rgba(28, 28, 31, 0.12),
+    0 0 0 3px rgba(107, 79, 215, 0.08);
+  transform: translateY(-1px);
+}
+
+.ai-inline.open .ai-inline-button {
+  border-color: var(--primary);
+  color: #ffffff;
+  background: var(--primary);
+  box-shadow: 0 7px 18px rgba(107, 79, 215, 0.24);
+  transform: translateY(-1px);
+}
+
+svg.ai-button-glyph {
+  display: block;
+  width: 15px;
+  height: 15px;
+  color: currentColor;
+}
+
+.ai-inline-button:disabled {
+  opacity: 0.72;
+  cursor: progress;
+}
+
+.ai-inline.busy .ai-button-glyph {
+  animation: ai-spin 1.2s linear infinite;
+}
+
+.ai-action-menu {
+  position: absolute;
+  z-index: 60;
+  top: calc(100% + 7px);
+  right: 0;
+  display: grid;
+  width: 136px;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: rgba(255, 255, 255, 0.98);
+  box-shadow: 0 14px 34px rgba(28, 28, 31, 0.16);
+}
+
+.ai-action-menu button {
+  display: flex;
+  min-width: 0;
+  min-height: 34px;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  background: transparent;
+  font-size: 13px;
+  font-weight: 650;
+  text-align: left;
+  cursor: pointer;
+}
+
+.ai-action-menu button:hover {
+  color: var(--primary);
+  background: var(--primary-soft);
+}
+
+[data-theme="dark"] .ai-action-menu {
+  border-color: #3a3938;
+  background: rgba(30, 30, 34, 0.98);
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.42);
+}
+
+[data-theme="dark"] .ai-action-menu button:hover {
+  background: #28282c;
+}
+
+[data-theme="dark"] .ai-inline-button {
+  border-color: rgba(255, 255, 255, 0.14);
+  color: #d9d3ff;
+  background: rgba(35, 35, 39, 0.94);
+  box-shadow:
+    0 2px 10px rgba(0, 0, 0, 0.3),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.04);
+}
+
+[data-theme="dark"] .ai-inline-button:hover:not(:disabled) {
+  border-color: rgba(166, 149, 255, 0.55);
+  color: #ffffff;
+  background: #2c2c31;
+  box-shadow:
+    0 8px 18px rgba(0, 0, 0, 0.38),
+    0 0 0 3px rgba(166, 149, 255, 0.12);
+}
+
+[data-theme="dark"] .ai-inline.open .ai-inline-button {
+  border-color: var(--primary);
+  color: #ffffff;
+  background: var(--primary);
+}
+
+@keyframes ai-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .mindmap-scroll {
   position: relative;
   min-width: 0;
@@ -2254,7 +2438,7 @@ textarea.markdown-source:focus {
   min-width: 0;
   min-height: 0;
   resize: none;
-  padding: 11px 46px 9px 14px;
+  padding: 11px 78px 9px 14px;
   border: 0;
   outline: 0;
   color: var(--text);
@@ -2263,6 +2447,19 @@ textarea.markdown-source:focus {
   line-height: 1.35;
   overflow: hidden;
   white-space: nowrap;
+}
+
+.map-node-edit-wrap .ai-inline {
+  position: absolute;
+  top: 50%;
+  right: 42px;
+  transform: translateY(-50%);
+  opacity: 1;
+}
+
+.map-node-edit-wrap .ai-action-menu {
+  top: calc(100% + 9px);
+  right: -8px;
 }
 
 .map-node.depth-0 .map-node-edit-wrap textarea {
@@ -2740,6 +2937,172 @@ textarea.markdown-source:focus {
   border-color: #c53030;
 }
 
+.modal-overlay {
+  position: fixed;
+  z-index: 220;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.35);
+  backdrop-filter: blur(4px);
+  animation: fade-in 0.18s ease;
+}
+
+.api-config-dialog {
+  display: grid;
+  width: min(540px, 100%);
+  gap: 15px;
+  padding: 24px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  color: var(--text);
+  background: var(--surface);
+  box-shadow: 0 24px 56px rgba(0, 0, 0, 0.18);
+  animation: dialog-pop 0.24s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.api-config-dialog header {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.api-config-dialog h3 {
+  margin: 0 0 6px;
+  font-size: 18px;
+  font-weight: 760;
+  line-height: 1.2;
+}
+
+.api-config-dialog p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.dialog-close {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  min-width: 30px;
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
+  color: var(--text-muted);
+  background: transparent;
+  cursor: pointer;
+}
+
+.dialog-close:hover {
+  color: var(--text);
+  background: var(--surface-subtle);
+}
+
+.config-field {
+  display: grid;
+  min-width: 0;
+  gap: 7px;
+}
+
+.config-field span {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 720;
+}
+
+.config-field input,
+.config-field select {
+  width: 100%;
+  min-height: 38px;
+  padding: 0 11px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  outline: 0;
+  color: var(--text);
+  background: var(--surface);
+  font-size: 13px;
+  line-height: 1.25;
+}
+
+.config-field input:focus,
+.config-field select:focus {
+  border-color: #d8d4ee;
+  box-shadow: 0 0 0 3px var(--focus);
+}
+
+.api-key-input {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.api-key-input button,
+.api-config-dialog footer button {
+  min-height: 38px;
+  padding: 0 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  background: var(--surface);
+  font-size: 13px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.api-key-input button:hover,
+.api-config-dialog footer button.secondary:hover {
+  border-color: var(--border-strong);
+  background: var(--surface-subtle);
+}
+
+.config-error {
+  padding: 8px 10px;
+  border: 1px solid #e3c0c6;
+  border-radius: var(--radius-sm);
+  color: var(--danger);
+  background: var(--danger-soft);
+  font-size: 12px !important;
+}
+
+.api-config-dialog footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  padding-top: 4px;
+}
+
+.api-config-dialog footer button.primary {
+  border-color: var(--primary);
+  color: #ffffff;
+  background: var(--primary);
+}
+
+.api-config-dialog footer button.primary:hover {
+  border-color: var(--primary-hover);
+  background: var(--primary-hover);
+}
+
+[data-theme="dark"] .modal-overlay {
+  background: rgba(0, 0, 0, 0.55);
+}
+
+[data-theme="dark"] .api-config-dialog {
+  border-color: #3e3e44;
+  background: #242428;
+  box-shadow: 0 24px 56px rgba(0, 0, 0, 0.5);
+}
+
+[data-theme="dark"] .config-field input,
+[data-theme="dark"] .config-field select,
+[data-theme="dark"] .api-key-input button,
+[data-theme="dark"] .api-config-dialog footer button {
+  background: #1c1c1f;
+}
+
 @keyframes fade-in {
   0% { opacity: 0; }
   100% { opacity: 1; }
@@ -2907,6 +3270,7 @@ textarea.markdown-source:focus {
 
   .markdown-source,
   .markdown-preview,
+  .markdown-source-wrap,
   textarea.markdown-source,
   .markdown-source textarea {
     min-height: 360px;
@@ -2995,6 +3359,7 @@ textarea.markdown-source:focus {
 
   .markdown-source,
   .markdown-preview,
+  .markdown-source-wrap,
   textarea.markdown-source,
   .markdown-source textarea {
     min-height: 300px;

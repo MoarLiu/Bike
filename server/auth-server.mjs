@@ -12,12 +12,12 @@ const distDir = path.join(projectRoot, "dist");
 const defaultConfigPath = path.join(
   projectRoot,
   "config",
-  "local-outline.config.json",
+  "bike.config.json",
 );
-const configPath = process.env.LOCAL_OUTLINE_CONFIG
-  ? path.resolve(process.env.LOCAL_OUTLINE_CONFIG)
+const configPath = process.env.BIKE_CONFIG || process.env.LOCAL_OUTLINE_CONFIG
+  ? path.resolve(process.env.BIKE_CONFIG || process.env.LOCAL_OUTLINE_CONFIG)
   : defaultConfigPath;
-const cookieName = "local_outline_session";
+const cookieName = "bike_session";
 const loginAttempts = new Map();
 let sessionRevokedBefore = 0;
 const maxLoginFailures = 8;
@@ -66,7 +66,7 @@ const readConfig = async () => {
     parsed = JSON.parse(await readFile(configPath, "utf8"));
   } catch (error) {
     throw new Error(
-      `无法读取认证配置：${configPath}\n请复制 config/local-outline.config.example.json 为 config/local-outline.config.json 后再启动。\n${error instanceof Error ? error.message : String(error)}`,
+      `无法读取认证配置：${configPath}\n请复制 config/bike.config.example.json 为 config/bike.config.json 后再启动。\n${error instanceof Error ? error.message : String(error)}`,
     );
   }
 
@@ -104,7 +104,7 @@ const html = (body) => `<!doctype html>
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Local Outline 登录</title>
+  <title>Bike 登录</title>
   <style>
     * { box-sizing: border-box; }
     body {
@@ -365,7 +365,7 @@ const readRequestBody = (request) =>
 
 const loginPage = (error = "") =>
   html(`<main>
-  <h1>Local Outline</h1>
+  <h1>Bike</h1>
   <p>请输入部署配置里的单用户账号。登录后才能访问你的本地优先大纲工具。</p>
   ${error ? `<div class="error">${escapeHtml(error)}</div>` : ""}
   <form method="post" action="/auth/login">
@@ -539,6 +539,6 @@ createServer((request, response) => {
     });
   });
 }).listen(config.port, config.host, () => {
-  console.log(`Local Outline 已启动：http://${config.host}:${config.port}`);
+  console.log(`Bike 已启动：http://${config.host}:${config.port}`);
   console.log(`认证配置：${configPath}`);
 });

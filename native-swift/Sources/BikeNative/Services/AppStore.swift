@@ -144,7 +144,7 @@ final class AppStore: ObservableObject {
         saveTask?.cancel()
         do {
             try repository.saveWorkspace(workspace)
-            show("已保存到 iCloud Drive/LocalOutline")
+            show("已保存到 iCloud Drive/Bike")
         } catch {
             show("保存失败：\(error.localizedDescription)")
         }
@@ -509,7 +509,7 @@ final class AppStore: ObservableObject {
             show("工作区尚未载入，无法导出")
             return
         }
-        guard let url = FilePanelService.savePanel(filename: "localoutline-workspace.json") else { return }
+        guard let url = FilePanelService.savePanel(filename: "bike-workspace.json") else { return }
         do {
             try ImportExportCodec.exportWorkspace(workspace).write(to: url, options: .atomic)
             show("已导出工作区")

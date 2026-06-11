@@ -1,8 +1,8 @@
 {
-  "name": "local-outline",
+  "name": "bike",
   "version": "1.3.2",
   "private": true,
-  "description": "Local-first outline note and mind map app with optional iCloud Drive backup.",
+  "description": "Bike is a local-first outline note and mind map app with optional iCloud Drive backup.",
   "main": "electron/main.cjs",
   "type": "module",
   "scripts": {
@@ -11,13 +11,14 @@
     "preview": "vite preview --host 127.0.0.1",
     "auth:hash": "node scripts/hash-password.mjs",
     "icon:win": "node scripts/create-windows-icon.mjs",
-    "mcp:localoutline": "node mcp/localoutline-server.mjs",
+    "mcp:bike": "node mcp/bike-server.mjs",
     "mcp:test": "node --test mcp/*.test.mjs",
-    "mcp:smoke": "node mcp/localoutline-server.smoke.mjs",
+    "mcp:smoke": "node mcp/bike-server.smoke.mjs",
     "serve:auth": "node server/auth-server.mjs",
     "start:web": "npm run build && npm run serve:auth",
     "electron:dev": "concurrently -k \"vite --host 127.0.0.1\" \"wait-on http://127.0.0.1:5173 && electron .\"",
     "electron:start": "vite build && electron .",
+    "electron:test": "node --test electron/*.test.mjs",
     "electron:dist:mac": "npm run build && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac --arm64",
     "electron:dist:win": "npm run build && electron-builder --win zip --x64"
   },
@@ -42,8 +43,8 @@
     "wait-on": "^8.0.0"
   },
   "build": {
-    "appId": "com.localoutline.app",
-    "productName": "Local Outline",
+    "appId": "com.bike.app",
+    "productName": "Bike",
     "artifactName": "${productName}-${version}-${arch}.${ext}",
     "directories": {
       "output": "release"
@@ -51,8 +52,8 @@
     "files": [
       "dist/**/*",
       "electron/**/*",
-      "mcp/localoutline-core.mjs",
-      "mcp/localoutline-server.mjs",
+      "mcp/bike-core.mjs",
+      "mcp/bike-server.mjs",
       "package.json"
     ],
     "afterPack": "scripts/after-pack.cjs",

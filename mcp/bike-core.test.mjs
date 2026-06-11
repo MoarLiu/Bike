@@ -24,7 +24,7 @@ import {
   setNodeCheckedForMcp,
   updateDocumentTitleForMcp,
   updateNodeForMcp,
-} from "./localoutline-core.mjs";
+} from "./bike-core.mjs";
 
 const sampleWorkspace = () => ({
   version: 1,
@@ -89,8 +89,8 @@ const sampleWorkspace = () => ({
 });
 
 const makeStore = async ({ mode = "readonly" } = {}) => {
-  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "localoutline-mcp-"));
-  const workspacePath = path.join(directory, "localoutline-workspace.json");
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "bike-mcp-"));
+  const workspacePath = path.join(directory, "bike-workspace.json");
   await fs.writeFile(workspacePath, JSON.stringify(sampleWorkspace(), null, 2), "utf8");
   return new WorkspaceStore({
     workspacePath,
@@ -144,15 +144,15 @@ test("summarizes and lists workspace documents", async () => {
 });
 
 test("uses Swift native backup path when Electron backup is absent on macOS", async () => {
-  const homeDir = await fs.mkdtemp(path.join(os.tmpdir(), "localoutline-home-"));
+  const homeDir = await fs.mkdtemp(path.join(os.tmpdir(), "bike-home-"));
   const swiftBackupPath = path.join(
     homeDir,
     "Library",
     "Mobile Documents",
     "com~apple~CloudDocs",
-    "LocalOutline",
+    "Bike",
     ".backups",
-    "localoutline-workspace.json",
+    "bike-workspace.json",
   );
   await fs.mkdir(path.dirname(swiftBackupPath), { recursive: true });
   await fs.writeFile(swiftBackupPath, "{}", "utf8");
@@ -164,6 +164,28 @@ test("uses Swift native backup path when Electron backup is absent on macOS", as
   });
 
   assert.equal(config.workspacePath, swiftBackupPath);
+});
+
+test("falls back to legacy workspace path when renamed Bike path is absent", async () => {
+  const homeDir = await fs.mkdtemp(path.join(os.tmpdir(), "bike-legacy-home-"));
+  const legacyWorkspacePath = path.join(
+    homeDir,
+    "Library",
+    "Mobile Documents",
+    "com~apple~CloudDocs",
+    "LocalOutline",
+    "localoutline-workspace.json",
+  );
+  await fs.mkdir(path.dirname(legacyWorkspacePath), { recursive: true });
+  await fs.writeFile(legacyWorkspacePath, "{}", "utf8");
+
+  const config = await loadMcpConfig({
+    env: {},
+    homeDir,
+    platform: "darwin",
+  });
+
+  assert.equal(config.workspacePath, legacyWorkspacePath);
 });
 
 test("migrateWorkspace skips malformed documents while preserving valid ones", () => {
@@ -536,8 +558,8 @@ test("rejects write payloads that exceed maxDocumentNodes", async () => {
 });
 
 test("rejects move_node when the resulting subtree depth exceeds the write limit", async () => {
-  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "localoutline-mcp-"));
-  const workspacePath = path.join(directory, "localoutline-workspace.json");
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "bike-mcp-"));
+  const workspacePath = path.join(directory, "bike-workspace.json");
   const workspace = {
     version: 1,
     activeDocumentId: "doc_deep_move",

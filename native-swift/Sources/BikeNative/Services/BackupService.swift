@@ -15,11 +15,13 @@ struct BackupFile: Identifiable, Equatable {
 }
 
 enum ICloudBackupService {
-    static let latestBackupFilename = "localoutline-workspace.json"
-    static let stampedBackupPrefix = "localoutline-workspace-"
+    static let latestBackupFilename = "bike-workspace.json"
+    static let stampedBackupPrefix = "bike-workspace-"
+    static let legacyLatestBackupFilename = "localoutline-workspace.json"
+    static let legacyStampedBackupPrefix = "localoutline-workspace-"
 
     static func directoryURL() -> URL {
-        LocalOutlineStorage.backupDirectoryURL()
+        BikeStorage.backupDirectoryURL()
     }
 
     static func save(workspace: WorkspaceV1DTO, directory: URL = directoryURL()) -> BackupResult {
@@ -37,9 +39,21 @@ enum ICloudBackupService {
         }
     }
 
-    static func load(directory: URL = directoryURL()) -> Result<(WorkspaceV1DTO, String), Error> {
+    static func load(directory: URL? = nil) -> Result<(WorkspaceV1DTO, String), Error> {
         Result {
-            let latest = directory.appendingPathComponent(latestBackupFilename)
+            let directories = directory.map { [$0] } ?? [
+                directoryURL(),
+                BikeStorage.legacyBackupDirectoryURL()
+            ]
+            let candidates = directories.flatMap { directory in
+                [
+                    directory.appendingPathComponent(latestBackupFilename),
+                    directory.appendingPathComponent(legacyLatestBackupFilename)
+                ]
+            }
+            guard let latest = candidates.first(where: { FileManager.default.fileExists(atPath: $0.path) }) ?? candidates.first else {
+                throw CocoaError(.fileReadNoSuchFile)
+            }
             let data = try coordinatedReadData(from: latest)
             let workspace = try ImportExportCodec.jsonDecoder.decode(WorkspaceV1DTO.self, from: data)
             return (TreeOperations.normalizeWorkspace(workspace), latest.path)
@@ -56,7 +70,9 @@ enum ICloudBackupService {
             .filter { url in
                 let name = url.lastPathComponent
                 return name == latestBackupFilename
+                    || name == legacyLatestBackupFilename
                     || (name.hasPrefix(stampedBackupPrefix) && name.hasSuffix(".json"))
+                    || (name.hasPrefix(legacyStampedBackupPrefix) && name.hasSuffix(".json"))
             }
             .map { url in
                 let values = try url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
@@ -66,7 +82,7 @@ enum ICloudBackupService {
     }
 
     static func openDirectoryInFinder() {
-        LocalOutlineStorage.openDocumentsDirectoryInFinder()
+        BikeStorage.openDocumentsDirectoryInFinder()
     }
 
     private static func coordinatedWrite(_ data: Data, to url: URL) throws {
@@ -118,8 +134,9 @@ enum ICloudBackupService {
     }
 }
 
-enum LocalOutlineStorage {
-    static let folderName = "LocalOutline"
+enum BikeStorage {
+    static let folderName = "Bike"
+    static let legacyFolderName = "LocalOutline"
 
     static func documentsDirectoryURL() -> URL {
         FileManager.default.homeDirectoryForCurrentUser
@@ -128,6 +145,15 @@ enum LocalOutlineStorage {
 
     static func backupDirectoryURL() -> URL {
         documentsDirectoryURL().appendingPathComponent(".backups", isDirectory: true)
+    }
+
+    static func legacyDocumentsDirectoryURL() -> URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Mobile Documents/com~apple~CloudDocs/\(legacyFolderName)", isDirectory: true)
+    }
+
+    static func legacyBackupDirectoryURL() -> URL {
+        legacyDocumentsDirectoryURL().appendingPathComponent(".backups", isDirectory: true)
     }
 
     static func openDocumentsDirectoryInFinder() {

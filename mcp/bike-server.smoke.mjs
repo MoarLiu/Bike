@@ -31,8 +31,8 @@ const workspace = {
 };
 
 const workspacePath = async () => {
-  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "localoutline-mcp-smoke-"));
-  const filePath = path.join(directory, "localoutline-workspace.json");
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "bike-mcp-smoke-"));
+  const filePath = path.join(directory, "bike-workspace.json");
   await fs.writeFile(filePath, JSON.stringify(workspace, null, 2), "utf8");
   return filePath;
 };
@@ -43,17 +43,17 @@ const main = async () => {
   const filePath = await workspacePath();
   const transport = new StdioClientTransport({
     command: process.execPath,
-    args: ["mcp/localoutline-server.mjs"],
+    args: ["mcp/bike-server.mjs"],
     cwd: process.cwd(),
     env: {
       ...process.env,
-      LOCAL_OUTLINE_WORKSPACE_PATH: filePath,
-      LOCAL_OUTLINE_MCP_DEBUG: "true",
+      BIKE_WORKSPACE_PATH: filePath,
+      BIKE_MCP_DEBUG: "true",
     },
     stderr: "pipe",
   });
   const client = new Client({
-    name: "localoutline-mcp-smoke",
+    name: "bike-mcp-smoke",
     version: "1.0.0",
   });
 
@@ -115,12 +115,12 @@ const main = async () => {
     const resources = await client.listResources();
     assert.ok(
       resources.resources.some(
-        (resource) => resource.uri === "localoutline://workspace/summary",
+        (resource) => resource.uri === "bike://workspace/summary",
       ),
     );
 
     const markdownResource = await client.readResource({
-      uri: "localoutline://document-markdown/doc_mcp",
+      uri: "bike://document-markdown/doc_mcp",
     });
     assert.match(markdownResource.contents[0].text, /# MCP 服务需求/);
 

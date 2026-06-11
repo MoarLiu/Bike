@@ -5,31 +5,56 @@ final class WorkspaceRepository {
     private let snapshotsURL: URL
     private let backupsURL: URL
     private let markdownDirectoryURL: URL
+    private let legacyMarkdownDirectoryURL: URL?
     private let metadataURL: URL
+    private let legacyMetadataURL: URL?
     private let legacyStoreURL: URL
-    private let legacyICloudBackupURL: URL
+    private let legacyICloudBackupURLs: [URL]
 
     init(inMemory: Bool = false, baseURL: URL? = nil) throws {
-        let legacyBase = (
+        let legacyApplicationSupportBase = (
             inMemory
-                ? URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("LocalOutlineNative-\(UUID().uuidString)", isDirectory: true)
+                ? URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("BikeNative-\(UUID().uuidString)", isDirectory: true)
                 : FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Local Outline Native", isDirectory: true)
         )
-        let base = baseURL ?? LocalOutlineStorage.documentsDirectoryURL()
+        let base = baseURL ?? BikeStorage.documentsDirectoryURL()
+        let legacyBase = baseURL == nil ? BikeStorage.legacyDocumentsDirectoryURL() : nil
+        let legacyBackupBase = legacyBase?.appendingPathComponent(".backups", isDirectory: true)
         try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         markdownDirectoryURL = base
-        metadataURL = base.appendingPathComponent(".localoutline-workspace.json")
-        legacyICloudBackupURL = base.appendingPathComponent(ICloudBackupService.latestBackupFilename)
-        legacyStoreURL = legacyBase.appendingPathComponent("workspace.json")
+        legacyMarkdownDirectoryURL = legacyBase
+        metadataURL = base.appendingPathComponent(".bike-workspace.json")
+        legacyMetadataURL = legacyBase?.appendingPathComponent(".localoutline-workspace.json")
+        legacyStoreURL = legacyApplicationSupportBase.appendingPathComponent("workspace.json")
+        legacyICloudBackupURLs = [
+            base.appendingPathComponent(ICloudBackupService.latestBackupFilename),
+            base.appendingPathComponent(ICloudBackupService.legacyLatestBackupFilename),
+            legacyBase?.appendingPathComponent(ICloudBackupService.legacyLatestBackupFilename),
+            legacyBackupBase?.appendingPathComponent(ICloudBackupService.legacyLatestBackupFilename)
+        ].compactMap { $0 }
         snapshotsURL = base.appendingPathComponent(".snapshots", isDirectory: true)
         backupsURL = base.appendingPathComponent(".backups", isDirectory: true)
         try FileManager.default.createDirectory(at: snapshotsURL, withIntermediateDirectories: true)
     }
 
     func loadWorkspace() throws -> WorkspaceV1DTO {
-        let markdownWorkspace = try loadMarkdownWorkspaceIfAvailable()
+        let markdownWorkspace = try loadMarkdownWorkspaceIfAvailable(
+            directoryURL: markdownDirectoryURL,
+            metadataURL: metadataURL
+        )
         if let markdownWorkspace {
             return markdownWorkspace
+        }
+
+        if let legacyMarkdownDirectoryURL, let legacyMetadataURL {
+            let legacyMarkdownWorkspace = try loadMarkdownWorkspaceIfAvailable(
+                directoryURL: legacyMarkdownDirectoryURL,
+                metadataURL: legacyMetadataURL
+            )
+            if let legacyMarkdownWorkspace {
+                try saveWorkspace(legacyMarkdownWorkspace)
+                return legacyMarkdownWorkspace
+            }
         }
 
         if FileManager.default.fileExists(atPath: legacyStoreURL.path) {
@@ -41,7 +66,7 @@ final class WorkspaceRepository {
             return normalized
         }
 
-        if FileManager.default.fileExists(atPath: legacyICloudBackupURL.path) {
+        if let legacyICloudBackupURL = legacyICloudBackupURLs.first(where: { FileManager.default.fileExists(atPath: $0.path) }) {
             let data = try Data(contentsOf: legacyICloudBackupURL)
             let workspace = try ImportExportCodec.jsonDecoder.decode(WorkspaceV1DTO.self, from: data)
             let normalized = TreeOperations.normalizeWorkspace(workspace)
@@ -109,11 +134,14 @@ final class WorkspaceRepository {
         return normalized
     }
 
-    private func loadMarkdownWorkspaceIfAvailable() throws -> WorkspaceV1DTO? {
-        guard FileManager.default.fileExists(atPath: markdownDirectoryURL.path) else { return nil }
-        let metadata = try loadMetadata()
+    private func loadMarkdownWorkspaceIfAvailable(
+        directoryURL: URL,
+        metadataURL: URL
+    ) throws -> WorkspaceV1DTO? {
+        guard FileManager.default.fileExists(atPath: directoryURL.path) else { return nil }
+        let metadata = try loadMetadata(from: metadataURL)
         let urls = try FileManager.default.contentsOfDirectory(
-            at: markdownDirectoryURL,
+            at: directoryURL,
             includingPropertiesForKeys: [.contentModificationDateKey, .creationDateKey],
             options: [.skipsHiddenFiles]
         )
@@ -134,9 +162,9 @@ final class WorkspaceRepository {
             let fileId = url.lastPathComponent
             let item = metadata.documents.first { $0.filename == fileId }
             let values = try url.resourceValues(forKeys: [.contentModificationDateKey, .creationDateKey])
-            let fileModifiedAt = values.contentModificationDate.map { ISO8601DateFormatter.localOutline.string(from: $0) }
+            let fileModifiedAt = values.contentModificationDate.map { ISO8601DateFormatter.bike.string(from: $0) }
             let modifiedAt = [item?.updatedAt, fileModifiedAt].compactMap { $0 }.max() ?? Date.isoNow
-            let createdAt = item?.createdAt ?? values.creationDate.map { ISO8601DateFormatter.localOutline.string(from: $0) } ?? modifiedAt
+            let createdAt = item?.createdAt ?? values.creationDate.map { ISO8601DateFormatter.bike.string(from: $0) } ?? modifiedAt
             let document = MarkdownCodec.parseDocument(
                 content,
                 filename: url.lastPathComponent,
@@ -267,7 +295,8 @@ final class WorkspaceRepository {
         return candidate
     }
 
-    private func loadMetadata() throws -> PersistedWorkspaceMetadata {
+    private func loadMetadata(from metadataURL: URL? = nil) throws -> PersistedWorkspaceMetadata {
+        let metadataURL = metadataURL ?? self.metadataURL
         guard FileManager.default.fileExists(atPath: metadataURL.path) else {
             return PersistedWorkspaceMetadata(activeDocumentId: "", documents: [])
         }
@@ -291,7 +320,9 @@ final class WorkspaceRepository {
         let backupURLs = urls.filter { url in
             let name = url.lastPathComponent
             return name == ICloudBackupService.latestBackupFilename
+                || name == ICloudBackupService.legacyLatestBackupFilename
                 || (name.hasPrefix(ICloudBackupService.stampedBackupPrefix) && name.hasSuffix(".json"))
+                || (name.hasPrefix(ICloudBackupService.legacyStampedBackupPrefix) && name.hasSuffix(".json"))
         }
         guard !backupURLs.isEmpty else { return }
 

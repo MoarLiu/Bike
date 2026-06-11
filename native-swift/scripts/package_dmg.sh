@@ -2,18 +2,18 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-APP_NAME="Local Outline Native"
-PRODUCT_NAME="LocalOutlineNative"
+APP_NAME="Bike Native"
+PRODUCT_NAME="BikeNative"
 VERSION="${VERSION:-$(node -p "require('$ROOT_DIR/../package.json').version" 2>/dev/null || echo "1.1.2")}"
 DIST_DIR="$ROOT_DIR/dist"
 RELEASE_DIR="$ROOT_DIR/release"
 BUNDLE_PATH="$DIST_DIR/$APP_NAME.app"
 DMG_STAGING_DIR="$DIST_DIR/dmg-staging"
-INFO_PLIST="$ROOT_DIR/Sources/LocalOutlineNative/Resources/Info.plist"
-ENTITLEMENTS="$ROOT_DIR/Sources/LocalOutlineNative/Resources/LocalOutlineNative.entitlements"
-APP_ICON="$ROOT_DIR/Sources/LocalOutlineNative/Resources/AppIcon.icns"
-DMG_PATH="$RELEASE_DIR/Local-Outline-Native-$VERSION.dmg"
-VOLUME_NAME="Local Outline Native $VERSION"
+INFO_PLIST="$ROOT_DIR/Sources/BikeNative/Resources/Info.plist"
+ENTITLEMENTS="$ROOT_DIR/Sources/BikeNative/Resources/BikeNative.entitlements"
+APP_ICON="$ROOT_DIR/Sources/BikeNative/Resources/AppIcon.icns"
+DMG_PATH="$RELEASE_DIR/Bike-Native-$VERSION.dmg"
+VOLUME_NAME="Bike Native $VERSION"
 
 cd "$ROOT_DIR"
 

@@ -25,7 +25,7 @@ import {
   textToolResult,
   updateDocumentTitleForMcp,
   updateNodeForMcp,
-} from "./localoutline-core.mjs";
+} from "./bike-core.mjs";
 
 const jsonContent = (uri, data) => ({
   contents: [
@@ -54,13 +54,13 @@ const documentResourceMetadata = (document, format = "compact") => {
   const isMarkdown = format === "markdown";
   return {
     uri: isMarkdown
-      ? `localoutline://document-markdown/${encodeURIComponent(document.id)}`
-      : `localoutline://document/${encodeURIComponent(document.id)}`,
+      ? `bike://document-markdown/${encodeURIComponent(document.id)}`
+      : `bike://document/${encodeURIComponent(document.id)}`,
     name: isMarkdown ? `${document.title}.md` : document.title,
     title: isMarkdown ? `${document.title} Markdown` : document.title,
     description: isMarkdown
-      ? "LocalOutline 文档的 Markdown 视图"
-      : "LocalOutline 文档的 compact JSON 视图",
+      ? "Bike 文档的 Markdown 视图"
+      : "Bike 文档的 compact JSON 视图",
     mimeType: isMarkdown ? "text/markdown" : "application/json",
     annotations: {
       audience: ["assistant"],
@@ -105,7 +105,7 @@ const writableNodeSchema = z.object({
   children: z.array(z.any()).optional().default([]),
 });
 
-export const createLocalOutlineMcpServer = async ({
+export const createBikeMcpServer = async ({
   store,
   version,
 } = {}) => {
@@ -116,7 +116,7 @@ export const createLocalOutlineMcpServer = async ({
       name: SERVER_NAME,
       title: SERVER_DISPLAY_NAME,
       version: resolvedVersion,
-      websiteUrl: "https://github.com/MoarLiu/LocalOutline",
+      websiteUrl: "https://github.com/MoarLiu/Bike",
     },
     {
       capabilities: {
@@ -133,7 +133,7 @@ export const createLocalOutlineMcpServer = async ({
     "get_workspace_summary",
     {
       title: "Get Workspace Summary",
-      description: "读取 LocalOutline 工作区概览，不返回完整文档内容。",
+      description: "读取 Bike 工作区概览，不返回完整文档内容。",
       inputSchema: {},
       annotations: {
         readOnlyHint: true,
@@ -147,7 +147,7 @@ export const createLocalOutlineMcpServer = async ({
     "list_documents",
     {
       title: "List Documents",
-      description: "列出 LocalOutline 文档，可按标题过滤。",
+      description: "列出 Bike 文档，可按标题过滤。",
       inputSchema: {
         query: z.string().optional().default("").describe("按文档标题过滤"),
         limit: z.number().int().min(1).max(100).optional().default(20),
@@ -187,7 +187,7 @@ export const createLocalOutlineMcpServer = async ({
     "get_document",
     {
       title: "Get Document",
-      description: "读取指定 LocalOutline 文档，支持 compact、json、markdown。",
+      description: "读取指定 Bike 文档，支持 compact、json、markdown。",
       inputSchema: {
         documentId: z.string().min(1),
         format: z.enum(["compact", "json", "markdown"]).optional().default("compact"),
@@ -242,7 +242,7 @@ export const createLocalOutlineMcpServer = async ({
     "create_document",
     {
       title: "Create Document",
-      description: "创建 LocalOutline 文档。默认 dry-run 只返回预览；真实写入需要 write 模式和 dryRun=false。",
+      description: "创建 Bike 文档。默认 dry-run 只返回预览；真实写入需要 write 模式和 dryRun=false。",
       inputSchema: {
         ...writeCommonInputSchema,
         documentId: z.string().min(1).optional(),
@@ -261,7 +261,7 @@ export const createLocalOutlineMcpServer = async ({
     "update_document_title",
     {
       title: "Update Document Title",
-      description: "更新 LocalOutline 文档标题，结构化写入前会校验 revision。",
+      description: "更新 Bike 文档标题，结构化写入前会校验 revision。",
       inputSchema: {
         ...writeCommonInputSchema,
         documentId: z.string().min(1),
@@ -409,10 +409,10 @@ export const createLocalOutlineMcpServer = async ({
 
   server.registerResource(
     "workspace-summary",
-    "localoutline://workspace/summary",
+    "bike://workspace/summary",
     {
       title: "Workspace Summary",
-      description: "LocalOutline 工作区概览",
+      description: "Bike 工作区概览",
       mimeType: "application/json",
       annotations: { audience: ["assistant"], priority: 0.6 },
     },
@@ -421,10 +421,10 @@ export const createLocalOutlineMcpServer = async ({
 
   server.registerResource(
     "documents",
-    "localoutline://documents",
+    "bike://documents",
     {
       title: "Document List",
-      description: "LocalOutline 文档列表",
+      description: "Bike 文档列表",
       mimeType: "application/json",
       annotations: { audience: ["assistant"], priority: 0.7 },
     },
@@ -433,7 +433,7 @@ export const createLocalOutlineMcpServer = async ({
 
   server.registerResource(
     "document",
-    new ResourceTemplate("localoutline://document/{documentId}", {
+    new ResourceTemplate("bike://document/{documentId}", {
       list: async () => {
         const current = await snapshot();
         return {
@@ -454,7 +454,7 @@ export const createLocalOutlineMcpServer = async ({
     }),
     {
       title: "Document",
-      description: "LocalOutline 文档 compact JSON",
+      description: "Bike 文档 compact JSON",
       mimeType: "application/json",
       annotations: { audience: ["assistant"], priority: 0.8 },
     },
@@ -469,7 +469,7 @@ export const createLocalOutlineMcpServer = async ({
 
   server.registerResource(
     "document-markdown",
-    new ResourceTemplate("localoutline://document-markdown/{documentId}", {
+    new ResourceTemplate("bike://document-markdown/{documentId}", {
       list: async () => {
         const current = await snapshot();
         return {
@@ -490,7 +490,7 @@ export const createLocalOutlineMcpServer = async ({
     }),
     {
       title: "Document Markdown",
-      description: "LocalOutline 文档 Markdown",
+      description: "Bike 文档 Markdown",
       mimeType: "text/markdown",
       annotations: { audience: ["assistant"], priority: 0.8 },
     },
@@ -506,7 +506,7 @@ export const createLocalOutlineMcpServer = async ({
 
   server.registerResource(
     "node",
-    new ResourceTemplate("localoutline://node/{documentId}/{nodeId}", {
+    new ResourceTemplate("bike://node/{documentId}/{nodeId}", {
       list: undefined,
       complete: {
         documentId: async (value) => {
@@ -520,7 +520,7 @@ export const createLocalOutlineMcpServer = async ({
     }),
     {
       title: "Node",
-      description: "LocalOutline 节点上下文",
+      description: "Bike 节点上下文",
       mimeType: "application/json",
       annotations: { audience: ["assistant"], priority: 0.9 },
     },
@@ -542,14 +542,14 @@ export const createLocalOutlineMcpServer = async ({
 
   const targetText = ({ documentId, nodeId }) =>
     nodeId
-      ? `LocalOutline 文档 ${documentId} 中的节点 ${nodeId}`
-      : `LocalOutline 文档 ${documentId}`;
+      ? `Bike 文档 ${documentId} 中的节点 ${nodeId}`
+      : `Bike 文档 ${documentId}`;
 
   server.registerPrompt(
     "summarize_outline",
     {
       title: "Summarize Outline",
-      description: "总结指定 LocalOutline 文档或节点。",
+      description: "总结指定 Bike 文档或节点。",
       argsSchema: {
         documentId: z.string().min(1),
         nodeId: z.string().optional(),
@@ -562,7 +562,7 @@ export const createLocalOutlineMcpServer = async ({
           role: "user",
           content: {
             type: "text",
-            text: `请先通过 LocalOutline MCP 读取 ${targetText(args)}，再用 ${args.style} 风格总结。保留大纲层级中的关键判断、待办和备注，不要引入大纲外的信息。`,
+            text: `请先通过 Bike MCP 读取 ${targetText(args)}，再用 ${args.style} 风格总结。保留大纲层级中的关键判断、待办和备注，不要引入大纲外的信息。`,
           },
         },
       ],
@@ -647,18 +647,18 @@ const isMainModule = () =>
   process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
 
 const printHelp = () => {
-  process.stdout.write(`LocalOutline MCP
+  process.stdout.write(`Bike MCP
 
 Usage:
-  npm run mcp:localoutline
-  LOCAL_OUTLINE_WORKSPACE_PATH=/path/to/localoutline-workspace.json npm run mcp:localoutline
+  npm run mcp:bike
+  BIKE_WORKSPACE_PATH=/path/to/bike-workspace.json npm run mcp:bike
 
 Environment:
-  LOCAL_OUTLINE_WORKSPACE_PATH   Workspace JSON path. On macOS, defaults to the Electron iCloud backup path,
+  BIKE_WORKSPACE_PATH   Workspace JSON path. On macOS, defaults to the Electron iCloud backup path,
                                  then falls back to the Swift native .backups path when absent.
-  LOCAL_OUTLINE_MCP_CONFIG       Optional JSON config path.
-  LOCAL_OUTLINE_MCP_DEBUG        Set true to show absolute workspace paths in tool results.
-  LOCAL_OUTLINE_MCP_MODE         readonly (default) or write. Real writes require write mode.
+  BIKE_MCP_CONFIG       Optional JSON config path.
+  BIKE_MCP_DEBUG        Set true to show absolute workspace paths in tool results.
+  BIKE_MCP_MODE         readonly (default) or write. Real writes require write mode.
 
 Options:
   --help                         Show this help.
@@ -681,7 +681,7 @@ const main = async () => {
           ...store.config,
           workspacePath: store.config.debug
             ? store.config.workspacePath
-            : "redacted; set LOCAL_OUTLINE_MCP_DEBUG=true to show",
+            : "redacted; set BIKE_MCP_DEBUG=true to show",
         },
         null,
         2,
@@ -690,7 +690,7 @@ const main = async () => {
     return;
   }
 
-  const server = await createLocalOutlineMcpServer({
+  const server = await createBikeMcpServer({
     store,
     version: await readPackageVersion(),
   });
@@ -702,7 +702,7 @@ const main = async () => {
 if (isMainModule()) {
   main().catch((error) => {
     process.stderr.write(
-      `LocalOutline MCP failed: ${error instanceof Error ? error.message : String(error)}\n`,
+      `Bike MCP failed: ${error instanceof Error ? error.message : String(error)}\n`,
     );
     process.exit(1);
   });

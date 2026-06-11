@@ -3,21 +3,21 @@
 import PackageDescription
 
 let package = Package(
-    name: "LocalOutlineNative",
+    name: "BikeNative",
     defaultLocalization: "zh-Hans",
     platforms: [
         .macOS(.v15)
     ],
     products: [
-        .executable(name: "LocalOutlineNative", targets: ["LocalOutlineNative"])
+        .executable(name: "BikeNative", targets: ["BikeNative"])
     ],
     targets: [
         .executableTarget(
-            name: "LocalOutlineNative",
-            path: "Sources/LocalOutlineNative",
+            name: "BikeNative",
+            path: "Sources/BikeNative",
             exclude: [
                 "Resources/Info.plist",
-                "Resources/LocalOutlineNative.entitlements",
+                "Resources/BikeNative.entitlements",
                 "Resources/AppIcon.icns"
             ]
         )

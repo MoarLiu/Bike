@@ -101,7 +101,7 @@ const acquireWorkspaceWriteLock = async (workspacePath, options = {}) => {
       await delay(retryMs);
     }
   }
-  throw new Error("工作区正在被另一个 LocalOutline 写入，请稍后重试");
+  throw new Error("工作区正在被另一个 Bike 写入，请稍后重试");
 };
 
 const withWorkspaceWriteLock = async (workspacePath, callback, options = {}) => {

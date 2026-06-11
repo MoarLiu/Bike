@@ -5,4 +5,4 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 swift build
-.build/debug/LocalOutlineNative --self-test
+.build/debug/BikeNative --self-test
