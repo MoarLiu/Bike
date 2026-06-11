@@ -32,6 +32,10 @@ struct ContentView: View {
         } message: {
             Text("此操作会删除所选文档。")
         }
+        .sheet(isPresented: $store.showAiConfigDialog) {
+            AiConfigDialog(config: store.aiConfig)
+                .environmentObject(store)
+        }
     }
 }
 
@@ -212,6 +216,10 @@ struct ToolStripView: View {
                 Divider().frame(height: 22)
                 Button { store.backupToICloud() } label: { Label("JSON 备份", systemImage: "icloud.and.arrow.up") }
                 Button { store.loadICloudBackup() } label: { Label("载入备份", systemImage: "icloud.and.arrow.down") }
+                Divider().frame(height: 22)
+                Button { store.openAiConfig() } label: { Label("配置API", systemImage: "key") }
+                Button { store.checkForUpdates() } label: { Label("检查更新", systemImage: "arrow.triangle.2.circlepath") }
+                    .disabled(store.isCheckingUpdates)
             }
             .buttonStyle(.bordered)
             .controlSize(.small)
@@ -230,6 +238,17 @@ struct SettingsView: View {
                 get: { store.useDarkMode },
                 set: { store.setDarkMode($0) }
             ))
+            HStack {
+                Text("AI")
+                Spacer()
+                Button("配置 API 密钥") { store.openAiConfig() }
+            }
+            HStack {
+                Text("检查更新")
+                Spacer()
+                Button(store.isCheckingUpdates ? "正在检查..." : "检查") { store.checkForUpdates() }
+                    .disabled(store.isCheckingUpdates)
+            }
             HStack {
                 Text("Markdown 保存目录")
                 Spacer()

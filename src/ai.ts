@@ -33,6 +33,14 @@ type AiMessage = {
   content: string;
 };
 
+type ResponsesInputItem = {
+  role: "user";
+  content: Array<{
+    type: "input_text";
+    text: string;
+  }>;
+};
+
 const AI_CONFIG_KEY = "bike-ai-config";
 const LEGACY_AI_CONFIG_KEY = "local-outline-ai-config";
 
@@ -135,6 +143,37 @@ const buildPrompt = (action: AiNodeAction, context: AiActionContext) => {
   ].filter(Boolean).join("\n");
 };
 
+const responsesInputFor = (messages: AiMessage[]): ResponsesInputItem[] => {
+  const userPrompt = messages
+    .filter((message) => message.role !== "system")
+    .map((message) => message.content)
+    .join("\n\n");
+  return [{
+    role: "user",
+    content: [{ type: "input_text", text: userPrompt }],
+  }];
+};
+
+const providerErrorMessage = (data: unknown): string | undefined => {
+  if (!isRecord(data)) return undefined;
+  if (isRecord(data.error) && typeof data.error.message === "string") return data.error.message;
+  if (typeof data.error === "string") return data.error;
+  if (typeof data.detail === "string") return data.detail;
+  if (Array.isArray(data.detail)) {
+    const details = data.detail
+      .map((item) => {
+        if (typeof item === "string") return item;
+        if (isRecord(item) && typeof item.msg === "string") return item.msg;
+        if (isRecord(item) && typeof item.message === "string") return item.message;
+        return "";
+      })
+      .filter(Boolean);
+    if (details.length) return details.join("; ");
+  }
+  if (typeof data.message === "string") return data.message;
+  return undefined;
+};
+
 const requestBodyFor = (config: AiApiConfig, messages: AiMessage[]) => {
   if (config.endpoint === "chat_completions") {
     return {
@@ -147,21 +186,91 @@ const requestBodyFor = (config: AiApiConfig, messages: AiMessage[]) => {
   return {
     model: config.model,
     instructions: messages.find((message) => message.role === "system")?.content,
-    input: messages
-      .filter((message) => message.role !== "system")
-      .map((message) => message.content)
-      .join("\n\n"),
-    temperature: 0.55,
+    input: responsesInputFor(messages),
   };
 };
 
+const extractTextFromOutputContent = (content: unknown) => {
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((item) => {
+      if (!isRecord(item)) return "";
+      if (typeof item.text === "string") return item.text;
+      if (typeof item.output_text === "string") return item.output_text;
+      return "";
+    })
+    .join("");
+};
+
+const extractTextFromEventStream = (value: string) => {
+  if (!/^\s*(event|data):/m.test(value)) return "";
+
+  const deltas: string[] = [];
+  const completedTexts: string[] = [];
+
+  value.split(/\r?\n/).forEach((line) => {
+    if (!line.startsWith("data:")) return;
+    const payload = line.slice(5).trim();
+    if (!payload || payload === "[DONE]") return;
+
+    let eventData: unknown;
+    try {
+      eventData = JSON.parse(payload);
+    } catch {
+      return;
+    }
+    if (!isRecord(eventData)) return;
+
+    if (eventData.type === "response.output_text.delta" && typeof eventData.delta === "string") {
+      deltas.push(eventData.delta);
+      return;
+    }
+
+    if (eventData.type === "response.output_text.done" && typeof eventData.text === "string") {
+      completedTexts.push(eventData.text);
+      return;
+    }
+
+    const part = isRecord(eventData.part) ? eventData.part : null;
+    if (part && part.type === "output_text" && typeof part.text === "string" && part.text) {
+      completedTexts.push(part.text);
+      return;
+    }
+
+    const item = isRecord(eventData.item) ? eventData.item : null;
+    const itemText = item ? extractTextFromOutputContent(item.content) : "";
+    if (itemText) {
+      completedTexts.push(itemText);
+      return;
+    }
+
+    const response = isRecord(eventData.response) ? eventData.response : null;
+    const responseOutput = response && Array.isArray(response.output) ? response.output : [];
+    const responseText = responseOutput
+      .map((outputItem) => isRecord(outputItem) ? extractTextFromOutputContent(outputItem.content) : "")
+      .join("");
+    if (responseText) completedTexts.push(responseText);
+  });
+
+  return deltas.join("") || completedTexts.join("");
+};
+
+const parseProviderPayload = (value: string): unknown => {
+  if (!value.trim()) return null;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return { text: value };
+  }
+};
+
 const extractTextFromResponse = (data: unknown): string => {
-  if (typeof data === "string") return data;
+  if (typeof data === "string") return extractTextFromEventStream(data) || data;
   if (!isRecord(data)) return "";
 
-  if (typeof data.output_text === "string") return data.output_text;
-  if (typeof data.text === "string") return data.text;
-  if (typeof data.content === "string") return data.content;
+  if (typeof data.output_text === "string") return extractTextFromEventStream(data.output_text) || data.output_text;
+  if (typeof data.text === "string") return extractTextFromEventStream(data.text) || data.text;
+  if (typeof data.content === "string") return extractTextFromEventStream(data.content) || data.content;
 
   const choices = Array.isArray(data.choices) ? data.choices : [];
   const firstChoice = choices.find(isRecord);
@@ -188,29 +297,101 @@ const parseJsonText = (value: string): unknown => {
   try {
     return JSON.parse(trimmed);
   } catch {
-    const objectStart = trimmed.indexOf("{");
-    const objectEnd = trimmed.lastIndexOf("}");
-    if (objectStart >= 0 && objectEnd > objectStart) {
-      return JSON.parse(trimmed.slice(objectStart, objectEnd + 1));
-    }
-    const arrayStart = trimmed.indexOf("[");
-    const arrayEnd = trimmed.lastIndexOf("]");
-    if (arrayStart >= 0 && arrayEnd > arrayStart) {
-      return JSON.parse(trimmed.slice(arrayStart, arrayEnd + 1));
-    }
+    const jsonSlice = firstBalancedJsonSlice(trimmed);
+    if (jsonSlice) return JSON.parse(jsonSlice);
     throw new Error("AI 返回内容不是有效 JSON");
   }
 };
 
+const firstBalancedJsonSlice = (value: string) => {
+  for (let start = 0; start < value.length; start += 1) {
+    const firstChar = value[start];
+    if (firstChar !== "{" && firstChar !== "[") continue;
+
+    const stack = [firstChar === "{" ? "}" : "]"];
+    let inString = false;
+    let escaped = false;
+
+    for (let index = start + 1; index < value.length; index += 1) {
+      const char = value[index];
+
+      if (inString) {
+        if (escaped) {
+          escaped = false;
+        } else if (char === "\\") {
+          escaped = true;
+        } else if (char === "\"") {
+          inString = false;
+        }
+        continue;
+      }
+
+      if (char === "\"") {
+        inString = true;
+        continue;
+      }
+
+      if (char === "{") {
+        stack.push("}");
+      } else if (char === "[") {
+        stack.push("]");
+      } else if (char === "}" || char === "]") {
+        if (stack[stack.length - 1] !== char) break;
+        stack.pop();
+        if (!stack.length) return value.slice(start, index + 1);
+      }
+    }
+  }
+
+  return null;
+};
+
+const generatedTextKeys = ["text", "title", "name", "label", "content", "heading", "topic"] as const;
+const generatedChildrenKeys = [
+  "children",
+  "childNodes",
+  "subtopics",
+  "subTopics",
+  "topics",
+  "nodes",
+  "items",
+  "outline",
+  "subnodes",
+  "subNodes",
+] as const;
+
+const generatedNodeText = (value: unknown) => {
+  if (typeof value === "string") return value.trim();
+  if (!isRecord(value)) return "";
+  for (const key of generatedTextKeys) {
+    const text = value[key];
+    if (typeof text === "string" && text.trim()) return text.trim();
+  }
+  return "";
+};
+
+const generatedNodeChildren = (value: unknown): unknown => {
+  if (!isRecord(value)) return undefined;
+  for (const key of generatedChildrenKeys) {
+    const children = value[key];
+    if (Array.isArray(children)) return children;
+  }
+  return undefined;
+};
+
 const sanitizeGeneratedNodes = (value: unknown, depth = 1): AiGeneratedNode[] => {
-  if (depth > 3 || !Array.isArray(value)) return [];
-  return value.flatMap((item) => {
-    if (!isRecord(item)) return [];
-    const text = typeof item.text === "string" ? item.text.trim() : "";
-    if (!text) return [];
+  if (depth > 3) return [];
+  const items = Array.isArray(value) ? value : generatedNodeChildren(value);
+  if (!Array.isArray(items)) return [];
+
+  return items.flatMap((item) => {
+    const text = generatedNodeText(item);
+    if (!text) {
+      return sanitizeGeneratedNodes(generatedNodeChildren(item), depth);
+    }
     return [{
       text: text.slice(0, 120),
-      children: sanitizeGeneratedNodes(item.children, depth + 1),
+      children: sanitizeGeneratedNodes(generatedNodeChildren(item), depth + 1),
     }];
   }).slice(0, 8);
 };
@@ -221,11 +402,11 @@ const normalizeActionResult = (action: AiNodeAction, parsed: unknown): AiActionR
   }
   if (!isRecord(parsed)) throw new Error("AI 返回 JSON 结构不正确");
   if (action === "polish") {
-    const text = typeof parsed.text === "string" ? parsed.text.trim() : "";
+    const text = generatedNodeText(parsed);
     if (!text) throw new Error("AI 没有返回润色文本");
     return { text };
   }
-  return { children: sanitizeGeneratedNodes(parsed.children) };
+  return { children: sanitizeGeneratedNodes(parsed) };
 };
 
 export const generatedNodesToOutlineNodes = (
@@ -262,8 +443,9 @@ export const runAiNodeAction = async (
   };
 
   let data: unknown;
-  if (window.localOutline?.invokeAiProvider) {
-    const result = await window.localOutline.invokeAiProvider(invokePayload);
+  const bikeBridge = window.bike ?? window.localOutline;
+  if (bikeBridge?.invokeAiProvider) {
+    const result = await bikeBridge.invokeAiProvider(invokePayload);
     if (!result.ok) throw new Error(result.error ?? "AI 请求失败");
     data = result.data;
   } else {
@@ -275,11 +457,13 @@ export const runAiNodeAction = async (
       },
       body: JSON.stringify(body),
     });
-    data = await response.json().catch(() => null);
+    const contentType = response.headers.get("content-type") || "";
+    data = parseProviderPayload(await response.text());
+    if (response.ok && /^text\/html\b/i.test(contentType)) {
+      throw new Error("AI 端点返回了 HTML 页面，请检查 API baseurl 和协议端点是否匹配");
+    }
     if (!response.ok) {
-      const message = isRecord(data) && typeof data.error === "string"
-        ? data.error
-        : `AI 请求失败：HTTP ${response.status}`;
+      const message = providerErrorMessage(data) ?? `AI 请求失败：HTTP ${response.status}`;
       throw new Error(message);
     }
   }

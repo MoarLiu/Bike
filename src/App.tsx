@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowDown,
   ArrowUp,
@@ -620,8 +620,9 @@ function App() {
   }, [activeNodeId]);
 
   useEffect(() => {
-    if (!window.localOutline?.onOpenApiConfig) return;
-    return window.localOutline.onOpenApiConfig(() => {
+    const bikeBridge = window.bike ?? window.localOutline;
+    if (!bikeBridge?.onOpenApiConfig) return;
+    return bikeBridge.onOpenApiConfig(() => {
       setAiConfig(loadAiConfig());
       setShowAiConfig(true);
     });
@@ -1664,11 +1665,12 @@ function App() {
 
   const loadCloudBackup = useEventCallback(async () => {
     flushPendingEdits();
-    if (!window.localOutline) {
+    const bikeBridge = window.bike ?? window.localOutline;
+    if (!bikeBridge) {
       showNotice("浏览器版请用“导入”选择 iCloud Drive 里的 bike-workspace.json");
       return;
     }
-    const result = await window.localOutline.loadICloudBackup();
+    const result = await bikeBridge.loadICloudBackup();
     if (
       !result.ok ||
       !result.payload ||
@@ -1698,7 +1700,8 @@ function App() {
     setIsCheckingUpdates(true);
     showNotice("正在检查更新...");
     try {
-      if (!window.localOutline?.checkForUpdates) {
+      const bikeBridge = window.bike ?? window.localOutline;
+      if (!bikeBridge?.checkForUpdates) {
         const shouldOpen = window.confirm(
           `当前版本：${__APP_VERSION__}\n\n浏览器版无法自动读取桌面发布信息，是否打开发布页查看更新？`,
         );
@@ -1711,7 +1714,7 @@ function App() {
         return;
       }
 
-      const result = await window.localOutline.checkForUpdates();
+      const result = await bikeBridge.checkForUpdates();
       if (!result.ok) {
         showNotice(`检查更新失败：${result.error ?? "请稍后重试"}`);
         return;
@@ -3107,15 +3110,26 @@ const OutlineNodeRow = React.memo(function OutlineNodeRow({
   isAiBusy,
 }: OutlineNodeRowProps) {
   const [localText, setLocalText] = useState(node.text);
+  const [textCellWidth, setTextCellWidth] = useState(0);
   const isFocusedRef = useRef(false);
   const debounceTimerRef = useRef<number | null>(null);
+  const resizeFrameRef = useRef<number | null>(null);
+  const resizeTimerRef = useRef<number | null>(null);
+  const textCellRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
-  const autoResize = (el: HTMLTextAreaElement | null) => {
+  const autoResize = useCallback((el: HTMLTextAreaElement | null) => {
     if (!el) return;
     el.style.height = "auto";
     el.style.height = `${el.scrollHeight}px`;
-  };
+  }, []);
+
+  const updateTextCellWidth = useCallback(() => {
+    const nextWidth = textCellRef.current?.clientWidth ?? 0;
+    setTextCellWidth((currentWidth) => (
+      Math.abs(currentWidth - nextWidth) < 1 ? currentWidth : nextWidth
+    ));
+  }, []);
 
   useEffect(() => {
     if (!isFocusedRef.current) {
@@ -3123,13 +3137,43 @@ const OutlineNodeRow = React.memo(function OutlineNodeRow({
     }
   }, [node.text]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     autoResize(textareaRef.current);
-  }, [localText]);
+    if (resizeFrameRef.current) window.cancelAnimationFrame(resizeFrameRef.current);
+    if (resizeTimerRef.current) window.clearTimeout(resizeTimerRef.current);
+    resizeFrameRef.current = window.requestAnimationFrame(() => {
+      autoResize(textareaRef.current);
+      resizeFrameRef.current = window.requestAnimationFrame(() => {
+        resizeFrameRef.current = null;
+        autoResize(textareaRef.current);
+      });
+    });
+    resizeTimerRef.current = window.setTimeout(() => {
+      resizeTimerRef.current = null;
+      autoResize(textareaRef.current);
+    }, 140);
+  }, [autoResize, localText, textCellWidth]);
+
+  useEffect(() => {
+    const textCell = textCellRef.current;
+    const observer = textCell && "ResizeObserver" in window
+      ? new ResizeObserver(updateTextCellWidth)
+      : null;
+    if (observer && textCell) observer.observe(textCell);
+    window.addEventListener("resize", updateTextCellWidth);
+    updateTextCellWidth();
+
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener("resize", updateTextCellWidth);
+    };
+  }, [updateTextCellWidth]);
 
   useEffect(() => {
     return () => {
       if (debounceTimerRef.current) window.clearTimeout(debounceTimerRef.current);
+      if (resizeFrameRef.current) window.cancelAnimationFrame(resizeFrameRef.current);
+      if (resizeTimerRef.current) window.clearTimeout(resizeTimerRef.current);
     };
   }, []);
 
@@ -3234,7 +3278,7 @@ const OutlineNodeRow = React.memo(function OutlineNodeRow({
         </button>
       )}
 
-      <div className="outline-text-cell">
+      <div className="outline-text-cell" ref={textCellRef}>
         {node.icon && <span className="node-icon">{node.icon}</span>}
         <textarea
           ref={(element) => {
@@ -3759,6 +3803,15 @@ function MindMap({
     [nodes, title],
   );
   const layout = useMemo(() => createMindMapLayout(mapNodes), [mapNodes]);
+  const renderedItems = useMemo(() => {
+    if (!editingNodeId) return layout.items;
+    const editingItems = layout.items.filter((item) => item.node.id === editingNodeId);
+    if (editingItems.length === 0) return layout.items;
+    return [
+      ...layout.items.filter((item) => item.node.id !== editingNodeId),
+      ...editingItems,
+    ];
+  }, [editingNodeId, layout.items]);
   const renderedActiveNodeId = rootTargetId && activeNodeId === rootTargetId ? mapRootId : activeNodeId;
   const contextItem = contextMenu
     ? layout.items.find((item) => item.node.id === contextMenu.nodeId) ?? null
@@ -4036,9 +4089,10 @@ function MindMap({
               }, ${edge.to.x} ${edge.to.y + edge.to.height / 2}`}
             />
           ))}
-          {layout.items.map((item) => (
+          {renderedItems.map((item) => (
             <foreignObject
               key={item.node.id}
+              className="map-node-object"
               x={item.x}
               y={item.y}
               width={item.width}

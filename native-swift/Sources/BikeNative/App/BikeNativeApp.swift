@@ -40,6 +40,7 @@ struct BikeNativeApp: App {
                     store.load()
                 }
         }
+        .defaultSize(width: 1366, height: 960)
         .commands {
             CommandGroup(replacing: .newItem) {
                 Button("新建文档") { store.createDocument() }
@@ -52,6 +53,9 @@ struct BikeNativeApp: App {
             CommandMenu("Bike") {
                 Button("保存") { store.flushSaveNow() }
                     .keyboardShortcut("s", modifiers: [.command])
+                Divider()
+                Button("配置API密钥") { store.openAiConfig() }
+                Button("检查更新") { store.checkForUpdates() }
                 Button("创建快照") { store.createManualSnapshot() }
                     .keyboardShortcut("s", modifiers: [.command, .shift])
                 Divider()

@@ -20,6 +20,10 @@ enum SelfTestRunner {
         try codeBlockRoundTripsAcrossCodecs()
         try jsonWorkspaceCompatibility()
         try tagAndLinkExtraction()
+        try updateCheckerComparesSemanticVersions()
+        try aiParserAcceptsFlexibleGeneratedNodes()
+        try aiParserExtractsResponsesEventStream()
+        try mindMapLayoutExposesCollapsedChildrenState()
         try documentUndoWorksAcrossOutlineMindMapAndMarkdown()
         try appStoreDoesNotSaveStarterWorkspaceAfterLoadFailure()
         try appStoreDeleteConfirmationTargetsRequestedDocument()
@@ -147,6 +151,64 @@ enum SelfTestRunner {
     private static func tagAndLinkExtraction() throws {
         try expect(TreeOperations.extractTags("hello #项目 #local-first") == ["项目", "local-first"], "tag extraction failed")
         try expect(TreeOperations.extractLinks("见 [[文档名]] 和 [[A#B]]") == ["文档名", "A#B"], "link extraction failed")
+    }
+
+    private static func updateCheckerComparesSemanticVersions() throws {
+        try expect(UpdateChecker.compareVersions("1.4.0", "1.3.2") == 1, "1.4.0 should be newer than 1.3.2")
+        try expect(UpdateChecker.compareVersions("v1.4.0", "1.4.0") == 0, "v-prefix should be ignored")
+        let result = UpdateChecker.resultFromRelease(currentVersion: "1.3.2", release: [
+            "tag_name": "v1.4.0",
+            "html_url": "https://example.com/releases",
+            "name": "Bike 1.4.0"
+        ])
+        try expect(result.updateAvailable, "release result should detect update")
+        try expect(result.latestVersion == "1.4.0", "release tag should normalize")
+    }
+
+    private static func aiParserAcceptsFlexibleGeneratedNodes() throws {
+        let parsed = try AiService.parseJSONText("""
+        前置说明
+        {"topics":[{"title":"一级","items":["二级",{"topic":"二级 B","subtopics":[{"label":"三级"}]}]}]}
+        后置说明
+        """)
+        let result = try AiService.normalizeActionResult(action: .generate, parsed: parsed)
+        let nodes = result.children ?? []
+        try expect(nodes.count == 1, "AI parser should find topics container")
+        try expect(nodes[0].text == "一级", "AI parser should accept title field")
+        try expect(nodes[0].children.count == 2, "AI parser should accept string and object children")
+        try expect(nodes[0].children[1].children.first?.text == "三级", "AI parser should accept nested label field")
+    }
+
+    private static func aiParserExtractsResponsesEventStream() throws {
+        let stream = """
+        event: response.output_text.delta
+        data: {"type":"response.output_text.delta","delta":"{\\"children\\":[{\\"text\\":\\"A\\"}]}"}
+
+        data: [DONE]
+        """
+        let text = AiService.extractTextFromEventStream(stream)
+        let parsed = try AiService.parseJSONText(text)
+        let result = try AiService.normalizeActionResult(action: .generate, parsed: parsed)
+        try expect(result.children?.first?.text == "A", "AI parser should read response event stream")
+    }
+
+    private static func mindMapLayoutExposesCollapsedChildrenState() throws {
+        let parent = OutlineNodeDTO(
+            id: "collapsed-parent",
+            text: "Parent",
+            collapsed: true,
+            children: [
+                OutlineNodeDTO(id: "hidden-child", text: "Child")
+            ]
+        )
+        let layout = MindMapLayout.layout(title: "Doc", nodes: [parent])
+        guard let item = layout.items.first(where: { $0.id == "collapsed-parent" }) else {
+            throw SelfTestError.failed("collapsed parent should be visible in mind map layout")
+        }
+        try expect(item.hasChildren, "collapsed parent should expose children state for expand control")
+        try expect(item.childCount == 1, "collapsed parent should expose direct child count for expand control")
+        try expect(item.isCollapsed, "collapsed parent should expose collapsed state for expand control")
+        try expect(layout.items.contains { $0.id == "hidden-child" } == false, "collapsed child should stay hidden until expanded")
     }
 
     @MainActor

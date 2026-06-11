@@ -66,6 +66,7 @@ private struct FocusBannerView: View {
 private struct OutlineRowView: View {
     @EnvironmentObject private var store: AppStore
     var row: FlatNode
+    @State private var isHovering = false
 
     var body: some View {
         HStack(alignment: .center, spacing: 6) {
@@ -147,6 +148,12 @@ private struct OutlineRowView: View {
             .frame(minHeight: rowHeight(row.node))
             .background(row.node.highlight == true ? Color.yellow.opacity(0.25) : Color.clear)
 
+            if isHovering || store.activeNodeId == row.node.id || store.isAiBusy(row.node.id) {
+                AiActionMenu(isBusy: store.isAiBusy(row.node.id)) { action in
+                    store.performAiNodeAction(action, targetId: row.node.id)
+                }
+            }
+
             Spacer(minLength: 8)
 
             ForEach(TreeOperations.extractTags(row.node.text), id: \.self) { tag in
@@ -158,9 +165,13 @@ private struct OutlineRowView: View {
         .background(store.activeNodeId == row.node.id ? Color.accentColor.opacity(0.12) : Color.clear, in: RoundedRectangle(cornerRadius: 6))
         .contentShape(Rectangle())
         .onTapGesture { store.selectNode(row.node.id, focusEditor: true) }
+        .onHover { isHovering = $0 }
         .contextMenu {
             Button("新增同级") { store.insertAfter(row.node.id) }
             Button("新增子级") { store.insertChild(row.node.id) }
+            Divider()
+            Button("AI 生成") { store.performAiNodeAction(.generate, targetId: row.node.id) }
+            Button("AI 润色") { store.performAiNodeAction(.polish, targetId: row.node.id) }
             if store.focusNodeId == row.node.id {
                 Button("退出聚焦") { store.clearFocus() }
             } else {

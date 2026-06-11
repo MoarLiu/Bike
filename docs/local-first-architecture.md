@@ -217,7 +217,7 @@ export interface Workspace {
 
 ### 浏览器路径
 
-`src/backup.ts` 中优先调用 `window.localOutline`。如果不在 Electron 中，则尝试使用 `showDirectoryPicker` 让用户选择可写目录。
+`src/backup.ts` 中优先调用 `window.bike`，旧版 `window.localOutline` 仅作为兼容别名保留。如果不在 Electron 中，则尝试使用 `showDirectoryPicker` 让用户选择可写目录。
 
 限制：
 

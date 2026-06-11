@@ -2,6 +2,7 @@ import SwiftUI
 
 struct MarkdownEditorView: View {
     @EnvironmentObject private var store: AppStore
+    @State private var selectedRange = NSRange(location: 0, length: 0)
 
     var body: some View {
         VStack(spacing: 12) {
@@ -56,6 +57,8 @@ struct MarkdownEditorView: View {
                 store.undoDocumentCommand()
             }, onEditingEnded: {
                 store.finishCoalescedUndo()
+            }, onSelectionChange: { range in
+                selectedRange = range
             })
         }
         .padding(16)
@@ -87,6 +90,10 @@ struct MarkdownEditorView: View {
             Button { prefix("- ") } label: { Image(systemName: "list.bullet") }
             Button { prefix("- [ ] ") } label: { Image(systemName: "checklist") }
             Button { insert("\n| 列 A | 列 B |\n| --- | --- |\n| 内容 | 内容 |\n") } label: { Image(systemName: "tablecells") }
+            Divider().frame(height: 18)
+            AiActionMenu(isBusy: store.isAiBusy("markdown")) { action in
+                store.performMarkdownAiAction(action, source: source(), selectedRange: selectedRange)
+            }
         }
         .buttonStyle(.bordered)
         .controlSize(.small)

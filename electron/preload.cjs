@@ -1,6 +1,6 @@
 const { contextBridge, ipcRenderer } = require("electron");
 
-contextBridge.exposeInMainWorld("localOutline", {
+const bikeBridge = {
   saveICloudBackup: (payload) => ipcRenderer.invoke("save-icloud-backup", payload),
   loadICloudBackup: () => ipcRenderer.invoke("load-icloud-backup"),
   checkForUpdates: () => ipcRenderer.invoke("check-for-updates"),
@@ -10,4 +10,7 @@ contextBridge.exposeInMainWorld("localOutline", {
     ipcRenderer.on("open-api-config", handler);
     return () => ipcRenderer.removeListener("open-api-config", handler);
   },
-});
+};
+
+contextBridge.exposeInMainWorld("bike", bikeBridge);
+contextBridge.exposeInMainWorld("localOutline", bikeBridge);

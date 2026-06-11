@@ -30,7 +30,7 @@
 ## 打包说明
 
 - Electron macOS Apple Silicon: `Bike-1.1.2-arm64.dmg`
-- Swift 原生版: `Local-Outline-Native-1.1.2.dmg`
+- Swift 原生版: `Bike-Native-1.1.2.dmg`
 
 ## SHA-256
 
@@ -38,5 +38,5 @@
 ec1d3beabc4921e85cb5dafd6ce2f774c2fb6e6b98296b99402ea0bbda9ca4a4  release/Bike-1.1.2-arm64.dmg
 3f3a377d1a90138a3ea8037249d634664eb2f9fdbc04de52ba0cb71fa23a1a8d  release/Bike-1.1.2-arm64.dmg.blockmap
 ae97e423fba81d05eaf0c0d372a7e0aecd416d875d19cd55a4f911e5783cd718  release/Bike-1.1.2-x64.zip
-9be156865a5e74cf736026950faf1dc9730f5a599e76443c799ea525391e27d9  native-swift/release/Local-Outline-Native-1.1.2.dmg
+9be156865a5e74cf736026950faf1dc9730f5a599e76443c799ea525391e27d9  native-swift/release/Bike-Native-1.1.2.dmg
 ```

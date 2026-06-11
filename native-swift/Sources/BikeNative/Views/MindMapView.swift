@@ -15,6 +15,7 @@ struct MindMapView: View {
     var body: some View {
         GeometryReader { proxy in
             let layout = MindMapLayout.layout(title: title, nodes: nodes)
+            let renderedItems = renderItems(layout.items)
             ZStack(alignment: .topLeading) {
                 ZStack(alignment: .topLeading) {
                     Color.clear
@@ -35,7 +36,7 @@ struct MindMapView: View {
                         }
                         .frame(width: layout.width, height: layout.height)
 
-                        ForEach(layout.items) { item in
+                        ForEach(renderedItems) { item in
                             MindMapNode(
                                 item: item,
                                 editingNodeId: $editingNodeId,
@@ -44,6 +45,13 @@ struct MindMapView: View {
                                 cancelEditing: { _ = cancelEditingAndClearSelection() }
                             )
                                 .position(x: item.rect.midX, y: item.rect.midY)
+                        }
+
+                        ForEach(renderedItems.filter { $0.id != MindMapLayout.rootId && $0.hasChildren }) { item in
+                            MindMapCollapseControl(item: item) {
+                                toggleCollapse(item)
+                            }
+                            .position(x: item.rect.maxX + 14, y: item.rect.midY)
                         }
                     }
                     .frame(width: layout.width, height: layout.height)
@@ -149,6 +157,21 @@ struct MindMapView: View {
         )
         return layout.items.contains { $0.rect.insetBy(dx: -8, dy: -8).contains(localPoint) }
     }
+
+    private func renderItems(_ items: [MindMapLayout.Item]) -> [MindMapLayout.Item] {
+        guard let editingNodeId else { return items }
+        let editingItems = items.filter { $0.id == editingNodeId }
+        guard !editingItems.isEmpty else { return items }
+        return items.filter { $0.id != editingNodeId } + editingItems
+    }
+
+    private func toggleCollapse(_ item: MindMapLayout.Item) {
+        guard item.id != MindMapLayout.rootId else { return }
+        store.updateNode(item.id, preservesMarkdown: true) { node in
+            node.collapsed.toggle()
+        }
+        store.selectNode(item.id)
+    }
 }
 
 private struct MindMapNode: View {
@@ -167,11 +190,21 @@ private struct MindMapNode: View {
                 .textFieldStyle(.plain)
                 .font(item.depth == 0 ? .headline : .body)
                 .multilineTextAlignment(.center)
-                .padding(.horizontal, 14)
+                .padding(.leading, 14)
+                .padding(.trailing, item.id == MindMapLayout.rootId ? 14 : 44)
                 .padding(.vertical, 10)
                 .frame(width: item.rect.width, height: item.rect.height)
                 .background(background, in: RoundedRectangle(cornerRadius: 8))
                 .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.accentColor, lineWidth: 2))
+                .overlay(alignment: .trailing) {
+                    if item.id != MindMapLayout.rootId {
+                        AiActionMenu(isBusy: store.isAiBusy(item.id)) { action in
+                            saveEdit()
+                            store.performAiNodeAction(action, targetId: item.id)
+                        }
+                        .padding(.trailing, 9)
+                    }
+                }
                 .focused($isTextFieldFocused)
                 .onSubmit {
                     commitEdit()
@@ -217,6 +250,14 @@ private struct MindMapNode: View {
                     } else {
                         Button("新增同级") { store.insertAfter(item.id) }
                         Button("新增子级") { store.insertChild(item.id) }
+                        if item.hasChildren {
+                            Button(item.isCollapsed ? "展开下级主题" : "折叠下级主题") {
+                                toggleCollapse()
+                            }
+                        }
+                        Divider()
+                        Button("AI 生成") { store.performAiNodeAction(.generate, targetId: item.id) }
+                        Button("AI 润色") { store.performAiNodeAction(.polish, targetId: item.id) }
                         if store.focusNodeId == item.id {
                             Button("退出聚焦") { store.clearFocus() }
                         } else {
@@ -231,6 +272,14 @@ private struct MindMapNode: View {
 
     private var background: Color {
         item.depth == 0 ? Color.accentColor.opacity(0.16) : Color(nsColor: .controlBackgroundColor)
+    }
+
+    private func toggleCollapse() {
+        guard item.id != MindMapLayout.rootId else { return }
+        store.updateNode(item.id, preservesMarkdown: true) { node in
+            node.collapsed.toggle()
+        }
+        store.selectNode(item.id)
     }
 
     private func startEditing() {
@@ -280,6 +329,41 @@ private struct MindMapNode: View {
         saveEdit()
         shouldIgnoreFocusLoss = true
         editingNodeId = nil
+    }
+}
+
+private struct MindMapCollapseControl: View {
+    var item: MindMapLayout.Item
+    var onToggle: () -> Void
+
+    var body: some View {
+        Button(action: onToggle) {
+            ZStack {
+                Circle()
+                    .fill(Color(nsColor: .textBackgroundColor))
+                    .overlay(
+                        Circle()
+                            .stroke(Color.accentColor.opacity(0.82), lineWidth: 1.35)
+                    )
+                    .shadow(color: .black.opacity(0.07), radius: 3, x: 0, y: 1)
+
+                Text(item.isCollapsed ? childCountText : "-")
+                    .font(.system(size: item.isCollapsed ? 10 : 14, weight: .semibold, design: .rounded))
+                    .monospacedDigit()
+                    .foregroundStyle(Color.accentColor)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.72)
+            }
+            .frame(width: 21, height: 21)
+            .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .help(item.isCollapsed ? "展开 \(item.childCount) 个子主题" : "折叠下级主题")
+        .accessibilityLabel(item.isCollapsed ? "展开 \(item.childCount) 个子主题" : "折叠下级主题")
+    }
+
+    private var childCountText: String {
+        item.childCount > 99 ? "99+" : "\(item.childCount)"
     }
 }
 
@@ -375,6 +459,9 @@ enum MindMapLayout {
         var rect: CGRect
         var depth: Int
         var parentId: String?
+        var hasChildren: Bool
+        var childCount: Int
+        var isCollapsed: Bool
     }
 
     struct Edge {
@@ -408,7 +495,16 @@ enum MindMapLayout {
                 let childCenters = children.map { visit($0, depth: depth + 1, parent: node.id) }
                 y = ((childCenters.min() ?? 0) + (childCenters.max() ?? 0)) / 2 - size.height / 2
             }
-            items.append(Item(id: node.id, title: node.text.isEmpty ? Defaults.nodeText : node.text, rect: CGRect(origin: CGPoint(x: CGFloat(depth) * xGap, y: y), size: size), depth: depth, parentId: parent))
+            items.append(Item(
+                id: node.id,
+                title: node.text.isEmpty ? Defaults.nodeText : node.text,
+                rect: CGRect(origin: CGPoint(x: CGFloat(depth) * xGap, y: y), size: size),
+                depth: depth,
+                parentId: parent,
+                hasChildren: !node.children.isEmpty,
+                childCount: node.children.count,
+                isCollapsed: node.collapsed
+            ))
             return y + size.height / 2
         }
 

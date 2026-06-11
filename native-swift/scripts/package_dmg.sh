@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_NAME="Bike Native"
 PRODUCT_NAME="BikeNative"
-VERSION="${VERSION:-$(node -p "require('$ROOT_DIR/../package.json').version" 2>/dev/null || echo "1.1.2")}"
+VERSION="${VERSION:-$(node -p "require('$ROOT_DIR/../package.json').version" 2>/dev/null || echo "1.4.0")}"
 DIST_DIR="$ROOT_DIR/dist"
 RELEASE_DIR="$ROOT_DIR/release"
 BUNDLE_PATH="$DIST_DIR/$APP_NAME.app"

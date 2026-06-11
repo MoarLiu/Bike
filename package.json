@@ -1,6 +1,6 @@
 {
   "name": "bike",
-  "version": "1.3.2",
+  "version": "1.4.0",
   "private": true,
   "description": "Bike is a local-first outline note and mind map app with optional iCloud Drive backup.",
   "main": "electron/main.cjs",

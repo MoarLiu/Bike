@@ -36,14 +36,14 @@
 
 ## 打包说明
 
-- Electron macOS Apple Silicon: `Local.Outline-1.3.2-arm64.dmg`
+- Electron macOS Apple Silicon: `Bike-1.3.2-arm64.dmg`
 - Bundle ID: `com.bike.app`
 - App version/build: `1.3.2`
 
 ## SHA-256
 
-- `Local.Outline-1.3.2-arm64.dmg`: `deedce844a8d945613283c05cb8518a9b8cd3704d80cfac4be94a5dad605b1ad`
-- `Local.Outline-1.3.2-arm64.dmg.blockmap`: `09e155bafce41a1ef1662696726df10b59bbcf4710dbce97ce0ae74d2e9216b4`
+- `Bike-1.3.2-arm64.dmg`: `deedce844a8d945613283c05cb8518a9b8cd3704d80cfac4be94a5dad605b1ad`
+- `Bike-1.3.2-arm64.dmg.blockmap`: `09e155bafce41a1ef1662696726df10b59bbcf4710dbce97ce0ae74d2e9216b4`
 
 ## 关联文档
 

@@ -11,6 +11,14 @@
 - Markdown storage path: `~/Library/Mobile Documents/com~apple~CloudDocs/Bike/`
 - JSON backup path: `~/Library/Mobile Documents/com~apple~CloudDocs/Bike/.backups/`
 
+## 1.4.0 parity
+
+- Product name, bundle metadata, iCloud paths, and release script defaults are aligned with Bike 1.4.0.
+- The app menu, toolbar, and settings expose API key configuration and update checking.
+- Outline, mind map, and Markdown modes expose AI generate/polish actions.
+- AI provider compatibility matches the Electron/Web implementation: Responses input uses a list, Chat/completions is supported, HTML endpoint mismatches show a clear error, Responses SSE text streams are parsed, and generated children accept flexible JSON keys such as `children`, `nodes`, `items`, `topics`, `title`, `name`, and `label`.
+- The main window defaults to `1366 × 960` with a minimum size of `980 × 640`.
+
 This workspace currently uses SwiftPM. `scripts/build_and_run.sh` builds a native `.app` bundle under `native-swift/dist/`. The release script writes a local DMG under `native-swift/release/`; build outputs are ignored by `native-swift/.gitignore`.
 
 ## Persistence / Backup
@@ -33,7 +41,7 @@ Useful variants:
 ```bash
 ./scripts/build_and_run.sh --verify
 ./scripts/build_and_run.sh --logs
-VERSION=0.1.0 ./scripts/package_dmg.sh
+VERSION=1.4.0 ./scripts/package_dmg.sh
 CODE_SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" ./scripts/package_dmg.sh
 ```
 

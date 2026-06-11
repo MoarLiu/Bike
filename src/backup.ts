@@ -5,8 +5,9 @@ export const saveICloudBackup = async (
   workspace: Workspace,
   expectedRevision?: string,
 ): Promise<BackupResult> => {
-  if (window.localOutline) {
-    return window.localOutline.saveICloudBackup({ workspace, expectedRevision });
+  const bikeBridge = window.bike ?? window.localOutline;
+  if (bikeBridge) {
+    return bikeBridge.saveICloudBackup({ workspace, expectedRevision });
   }
 
   const picker = (window as unknown as {

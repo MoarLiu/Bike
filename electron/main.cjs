@@ -71,10 +71,30 @@ const isRecord = (value) => typeof value === "object" && value !== null;
 
 const hashContent = (value) => crypto.createHash("sha256").update(value).digest("hex");
 
+const providerErrorMessage = (data) => {
+  if (!isRecord(data)) return undefined;
+  if (isRecord(data.error) && typeof data.error.message === "string") return data.error.message;
+  if (typeof data.error === "string") return data.error;
+  if (typeof data.detail === "string") return data.detail;
+  if (Array.isArray(data.detail)) {
+    const details = data.detail
+      .map((item) => {
+        if (typeof item === "string") return item;
+        if (isRecord(item) && typeof item.msg === "string") return item.msg;
+        if (isRecord(item) && typeof item.message === "string") return item.message;
+        return "";
+      })
+      .filter(Boolean);
+    if (details.length) return details.join("; ");
+  }
+  if (typeof data.message === "string") return data.message;
+  return undefined;
+};
+
 const createWindow = () => {
   const window = new BrowserWindow({
-    width: 1280,
-    height: 820,
+    width: 1366,
+    height: 960,
     minWidth: 980,
     minHeight: 640,
     title: "Bike",
@@ -438,6 +458,7 @@ ipcMain.handle("invoke-ai-provider", async (_event, payload) => {
       body: JSON.stringify(body),
       signal: controller.signal,
     }).finally(() => clearTimeout(timeout));
+    const contentType = response.headers.get("content-type") || "";
     const text = await response.text();
     const data = text
       ? (() => {
@@ -448,12 +469,11 @@ ipcMain.handle("invoke-ai-provider", async (_event, payload) => {
           }
         })()
       : null;
+    if (response.ok && /^text\/html\\b/i.test(contentType)) {
+      throw new Error("AI 端点返回了 HTML 页面，请检查 API baseurl 和协议端点是否匹配");
+    }
     if (!response.ok) {
-      const providerError = isRecord(data) && isRecord(data.error)
-        ? data.error.message
-        : isRecord(data) && typeof data.error === "string"
-          ? data.error
-          : undefined;
+      const providerError = providerErrorMessage(data);
       throw new Error(providerError || `AI 请求失败：HTTP ${response.status}`);
     }
     return { ok: true, data };

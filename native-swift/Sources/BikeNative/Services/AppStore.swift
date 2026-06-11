@@ -33,6 +33,10 @@ final class AppStore: ObservableObject {
     @Published var undoApplyRevision = 0
     @Published var focusRequestToken = 0
     @Published var focusRequestNodeId: String?
+    @Published var aiConfig: AiApiConfig = AiConfigStore.load()
+    @Published var showAiConfigDialog = false
+    @Published var aiBusyTargetIds: Set<String> = []
+    @Published var isCheckingUpdates = false
 
     let repository: WorkspaceRepository
     private var saveTask: Task<Void, Never>?
@@ -472,6 +476,46 @@ final class AppStore: ObservableObject {
         setDarkMode(!useDarkMode)
     }
 
+    func openAiConfig() {
+        aiConfig = AiConfigStore.load()
+        showAiConfigDialog = true
+    }
+
+    func saveAiConfig(_ config: AiApiConfig) {
+        if let message = AiConfigStore.validationMessage(for: config) {
+            show(message)
+            return
+        }
+        aiConfig = AiConfigStore.save(config)
+        showAiConfigDialog = false
+        show("API 密钥配置已保存")
+    }
+
+    func isAiBusy(_ targetId: String) -> Bool {
+        aiBusyTargetIds.contains(targetId)
+    }
+
+    func performAiNodeAction(_ action: AiNodeAction, targetId: String) {
+        Task { await runAiNodeAction(action, targetId: targetId) }
+    }
+
+    func performMarkdownAiAction(_ action: AiNodeAction, source: String, selectedRange: NSRange) {
+        Task { await runMarkdownAiAction(action, source: source, selectedRange: selectedRange) }
+    }
+
+    func checkForUpdates() {
+        guard !isCheckingUpdates else { return }
+        isCheckingUpdates = true
+        show("正在检查更新...")
+        Task {
+            let result = await UpdateChecker.fetchLatestRelease()
+            await MainActor.run {
+                self.isCheckingUpdates = false
+                self.presentUpdateResult(result)
+            }
+        }
+    }
+
     func exportActive(format: ExportFormat) {
         guard isWorkspaceReady else {
             show("工作区尚未载入，无法导出")
@@ -682,5 +726,212 @@ final class AppStore: ObservableObject {
             copy.children = rekey(copy.children)
             return copy
         }
+    }
+
+    private func runAiNodeAction(_ action: AiNodeAction, targetId: String) async {
+        guard canEditWorkspace() else { return }
+        guard let document = activeDocument,
+              let target = TreeOperations.findNode(in: document.nodes, id: targetId) else {
+            show("请选择一个主题")
+            return
+        }
+        guard AiConfigStore.validationMessage(for: aiConfig) == nil else {
+            show("请先配置 API 密钥")
+            openAiConfig()
+            return
+        }
+        guard !aiBusyTargetIds.contains(targetId) else { return }
+
+        aiBusyTargetIds.insert(targetId)
+        show(action == .generate ? "AI 正在生成子主题..." : "AI 正在润色主题...")
+        defer { aiBusyTargetIds.remove(targetId) }
+
+        do {
+            let result = try await AiService.run(
+                config: aiConfig,
+                action: action,
+                context: AiActionContext(
+                    documentTitle: document.title,
+                    topicText: target.text,
+                    note: target.note,
+                    existingChildren: target.children.map(\.text)
+                )
+            )
+
+            switch action {
+            case .polish:
+                guard let text = result.text?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else {
+                    throw AiServiceError.missingPolishText
+                }
+                updateNodeText(targetId, text: text)
+                show("已润色当前主题")
+            case .generate:
+                let generated = AiService.generatedNodesToOutlineNodes(result.children)
+                guard !generated.isEmpty else {
+                    throw AiServiceError.requestFailed("AI 没有生成可用子主题")
+                }
+                guard let latestDocument = activeDocument else { return }
+                setActiveNodes(TreeOperations.updateNode(latestDocument.nodes, id: targetId) { node in
+                    node.collapsed = false
+                    node.children.append(contentsOf: generated)
+                })
+                show("已生成 \(generated.count) 个子主题")
+            }
+        } catch {
+            show(error.localizedDescription)
+        }
+    }
+
+    private func runMarkdownAiAction(_ action: AiNodeAction, source: String, selectedRange: NSRange) async {
+        guard canEditWorkspace() else { return }
+        guard let document = activeDocument else { return }
+        guard let target = markdownLineTarget(source: source, selectedRange: selectedRange) else {
+            show("请先把光标放在一个 Markdown 主题行")
+            return
+        }
+        guard AiConfigStore.validationMessage(for: aiConfig) == nil else {
+            show("请先配置 API 密钥")
+            openAiConfig()
+            return
+        }
+
+        let busyKey = "markdown"
+        guard !aiBusyTargetIds.contains(busyKey) else { return }
+        aiBusyTargetIds.insert(busyKey)
+        show(action == .generate ? "AI 正在生成 Markdown 子主题..." : "AI 正在润色 Markdown 主题...")
+        defer { aiBusyTargetIds.remove(busyKey) }
+
+        do {
+            let result = try await AiService.run(
+                config: aiConfig,
+                action: action,
+                context: AiActionContext(
+                    documentTitle: document.title,
+                    topicText: target.text,
+                    note: "",
+                    existingChildren: []
+                )
+            )
+            switch action {
+            case .polish:
+                guard let text = result.text?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else {
+                    throw AiServiceError.missingPolishText
+                }
+                let next = replaceMarkdownLineBody(source: source, target: target, replacement: text)
+                setMarkdownSource(next, coalescingKey: "markdown-ai:\(document.id)")
+                show("已润色当前 Markdown 主题")
+            case .generate:
+                let generated = result.children ?? []
+                guard !generated.isEmpty else {
+                    throw AiServiceError.requestFailed("AI 没有生成可用子主题")
+                }
+                let insertion = markdownChildLines(for: generated, parentPrefix: target.prefix)
+                let next = insertMarkdownLines(source: source, target: target, insertion: insertion)
+                setMarkdownSource(next, coalescingKey: "markdown-ai:\(document.id)")
+                show("已生成 Markdown 子主题")
+            }
+        } catch {
+            show(error.localizedDescription)
+        }
+    }
+
+    private func presentUpdateResult(_ result: UpdateCheckResult) {
+        if !result.ok {
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = "检查更新失败"
+            alert.informativeText = "\(result.error ?? "请稍后重试")\n\n当前版本：\(result.currentVersion)"
+            alert.addButton(withTitle: "好")
+            alert.addButton(withTitle: "打开发布页")
+            if alert.runModal() == .alertSecondButtonReturn {
+                NSWorkspace.shared.open(result.releaseUrl)
+            }
+            return
+        }
+
+        let alert = NSAlert()
+        alert.alertStyle = result.updateAvailable ? .informational : .informational
+        alert.messageText = result.updateAvailable ? "发现新版本 \(result.latestVersion)" : "当前已是最新版本"
+        alert.informativeText = result.updateAvailable
+            ? "当前版本：\(result.currentVersion)\n最新版本：\(result.latestVersion)\n\(result.releaseName)"
+            : "当前版本：\(result.currentVersion)"
+        alert.addButton(withTitle: result.updateAvailable ? "打开发布页" : "好")
+        alert.addButton(withTitle: result.updateAvailable ? "稍后" : "打开发布页")
+        let response = alert.runModal()
+        if (result.updateAvailable && response == .alertFirstButtonReturn) ||
+            (!result.updateAvailable && response == .alertSecondButtonReturn) {
+            NSWorkspace.shared.open(result.releaseUrl)
+        }
+    }
+
+    private struct MarkdownLineTarget {
+        var lineRange: NSRange
+        var bodyRange: NSRange
+        var prefix: String
+        var text: String
+        var line: String
+    }
+
+    private func markdownLineTarget(source: String, selectedRange: NSRange) -> MarkdownLineTarget? {
+        let nsSource = source as NSString
+        let length = nsSource.length
+        guard length > 0 else { return nil }
+        let location = min(max(0, selectedRange.location), max(0, length - 1))
+        let lineRange = nsSource.lineRange(for: NSRange(location: location, length: 0))
+        let rawLine = nsSource.substring(with: lineRange)
+        let line = rawLine.trimmingCharacters(in: .newlines)
+        guard !line.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+
+        let pattern = #"^([ \t]*(?:(?:[-*+]|\d+[.)])\s+(?:\[[ xX]\]\s+)?|#{1,6}\s+|>\s*)?)(.*)$"#
+        guard let regex = try? NSRegularExpression(pattern: pattern),
+              let match = regex.firstMatch(in: line, range: NSRange(line.startIndex..., in: line)),
+              match.numberOfRanges >= 3,
+              let prefixRange = Range(match.range(at: 1), in: line),
+              let bodyRangeInLine = Range(match.range(at: 2), in: line) else {
+            return nil
+        }
+
+        let prefix = String(line[prefixRange])
+        let text = String(line[bodyRangeInLine]).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return nil }
+        let prefixLength = (prefix as NSString).length
+        let bodyLength = (line as NSString).length - prefixLength
+        return MarkdownLineTarget(
+            lineRange: lineRange,
+            bodyRange: NSRange(location: lineRange.location + prefixLength, length: bodyLength),
+            prefix: prefix,
+            text: text,
+            line: line
+        )
+    }
+
+    private func replaceMarkdownLineBody(source: String, target: MarkdownLineTarget, replacement: String) -> String {
+        let mutable = NSMutableString(string: source)
+        mutable.replaceCharacters(in: target.bodyRange, with: replacement)
+        return mutable as String
+    }
+
+    private func insertMarkdownLines(source: String, target: MarkdownLineTarget, insertion: String) -> String {
+        let mutable = NSMutableString(string: source)
+        let insertAt = target.lineRange.location + target.lineRange.length
+        let needsLeadingNewline = !target.line.hasSuffix("\n") && insertAt >= (source as NSString).length
+        mutable.insert((needsLeadingNewline ? "\n" : "") + insertion, at: insertAt)
+        return mutable as String
+    }
+
+    private func markdownChildLines(for nodes: [AiGeneratedNode], parentPrefix: String) -> String {
+        let parentIndent = parentPrefix.prefix { $0 == " " || $0 == "\t" }
+        let childIndent = String(parentIndent) + "  "
+
+        func lines(_ nodes: [AiGeneratedNode], indent: String, depth: Int) -> [String] {
+            guard depth <= 3 else { return [] }
+            return nodes.flatMap { node -> [String] in
+                let text = node.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !text.isEmpty else { return [] }
+                return ["\(indent)- \(text)"] + lines(node.children, indent: indent + "  ", depth: depth + 1)
+            }
+        }
+
+        return lines(nodes, indent: childIndent, depth: 1).joined(separator: "\n") + "\n"
     }
 }

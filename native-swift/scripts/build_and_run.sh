@@ -7,6 +7,7 @@ PRODUCT_NAME="BikeNative"
 DIST_DIR="$ROOT_DIR/dist"
 BUNDLE_PATH="$DIST_DIR/$APP_NAME.app"
 INFO_PLIST="$ROOT_DIR/Sources/BikeNative/Resources/Info.plist"
+ENTITLEMENTS="$ROOT_DIR/Sources/BikeNative/Resources/BikeNative.entitlements"
 APP_ICON="$ROOT_DIR/Sources/BikeNative/Resources/AppIcon.icns"
 LOGS=false
 VERIFY=false
@@ -62,6 +63,7 @@ cp "$BUILD_DIR/$PRODUCT_NAME" "$BUNDLE_PATH/Contents/MacOS/$PRODUCT_NAME"
 chmod +x "$BUNDLE_PATH/Contents/MacOS/$PRODUCT_NAME"
 cp "$INFO_PLIST" "$BUNDLE_PATH/Contents/Info.plist"
 cp "$APP_ICON" "$BUNDLE_PATH/Contents/Resources/AppIcon.icns"
+codesign --force --deep --entitlements "$ENTITLEMENTS" --sign - "$BUNDLE_PATH"
 
 /usr/bin/open -n "$BUNDLE_PATH"
 

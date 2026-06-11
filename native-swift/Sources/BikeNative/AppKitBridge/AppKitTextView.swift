@@ -6,6 +6,7 @@ struct AppKitTextView: NSViewRepresentable {
     var forceRefreshToken: Int = 0
     var onUndoShortcut: (() -> Void)?
     var onEditingEnded: (() -> Void)?
+    var onSelectionChange: ((NSRange) -> Void)?
 
     func makeNSView(context: Context) -> NSScrollView {
         let scroll = NSScrollView()
@@ -42,6 +43,7 @@ struct AppKitTextView: NSViewRepresentable {
     func updateNSView(_ nsView: NSScrollView, context: Context) {
         context.coordinator.forceRefreshToken = forceRefreshToken
         context.coordinator.onEditingEnded = onEditingEnded
+        context.coordinator.onSelectionChange = onSelectionChange
         if let plainTextView = nsView.documentView as? PlainTextView {
             plainTextView.onUndoShortcut = onUndoShortcut
         }
@@ -59,7 +61,7 @@ struct AppKitTextView: NSViewRepresentable {
     }
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(text: $text, forceRefreshToken: forceRefreshToken, onEditingEnded: onEditingEnded)
+        Coordinator(text: $text, forceRefreshToken: forceRefreshToken, onEditingEnded: onEditingEnded, onSelectionChange: onSelectionChange)
     }
 
     final class Coordinator: NSObject, NSTextViewDelegate {
@@ -68,12 +70,14 @@ struct AppKitTextView: NSViewRepresentable {
         var isApplyingExternalText = false
         var forceRefreshToken: Int
         var onEditingEnded: (() -> Void)?
+        var onSelectionChange: ((NSRange) -> Void)?
         private var lastAppliedRefreshToken: Int
 
-        init(text: Binding<String>, forceRefreshToken: Int, onEditingEnded: (() -> Void)?) {
+        init(text: Binding<String>, forceRefreshToken: Int, onEditingEnded: (() -> Void)?, onSelectionChange: ((NSRange) -> Void)?) {
             _text = text
             self.forceRefreshToken = forceRefreshToken
             self.onEditingEnded = onEditingEnded
+            self.onSelectionChange = onSelectionChange
             lastAppliedRefreshToken = forceRefreshToken
         }
 
@@ -96,6 +100,11 @@ struct AppKitTextView: NSViewRepresentable {
             guard let view = notification.object as? NSTextView else { return }
             guard !isApplyingExternalText else { return }
             text = view.string
+        }
+
+        func textViewDidChangeSelection(_ notification: Notification) {
+            guard let view = notification.object as? NSTextView else { return }
+            onSelectionChange?(view.selectedRange())
         }
     }
 }
