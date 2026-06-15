@@ -78,6 +78,38 @@ cd native-swift
 
 产物会输出到 `native-swift/release/`。
 
+## Mobile Companion
+
+移动端 Companion 位于 `apps/`：
+
+- `apps/android`：原生 Kotlin + Jetpack Compose，当前 beta 为 `0.1.13-ios-ux-alignment`。
+- `apps/ios`：原生 SwiftUI，当前 beta 为 `0.1.13`。
+
+移动端不是桌面端完整替代品，而是用于手机上的快速捕捉、阅读、轻量编辑和 AI 生成/润色。Android 与 iOS 共享 Bike Workspace v1 JSON 语义，并尽量保留桌面端未知字段，避免移动端轻编辑破坏桌面端数据。
+
+移动端当前不包含脑图视图、MCP、自动同步、拖拽排序、多选批量大纲操作和完整富文本字段编辑。平台能力矩阵见 `docs/mobile/platform-matrix.md`。
+
+Android 本地验证：
+
+```bash
+cd apps/android
+JAVA_HOME=/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home \
+PATH=/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home/bin:$PATH \
+ANDROID_HOME=/opt/homebrew/share/android-commandlinetools \
+./gradlew testDebugUnitTest assembleDebug
+```
+
+iOS 本地验证：
+
+```bash
+cd apps/ios
+swift build
+swift run BikeCoreChecks
+xcodebuild -project BikeiOS.xcodeproj -scheme BikeiOS -destination 'generic/platform=iOS Simulator' -derivedDataPath /tmp/BikeIOSXcodeDerived build CODE_SIGNING_ALLOWED=NO
+```
+
+APK、IPA、dSYM、zip 等发布产物不要提交到 git；请通过 GitHub Releases 分发，并附上 release notes 与 SHA-256 校验值。
+
 ## 数据与隐私
 
 Bike 默认把数据保存在本机。Web/Electron 版使用 IndexedDB，macOS 桌面版可写入 iCloud Drive 备份路径：
