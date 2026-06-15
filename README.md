@@ -2,7 +2,16 @@
 
 Bike 是一个本地优先的大纲、思维导图和 Markdown 写作工具。它用同一份树形数据承载想法：你可以在大纲里快速拆解结构，在脑图里观察关系，在 Markdown 里整理成文档，也可以通过 MCP 把本地大纲交给 Codex、Claude 等 agent 读取和整理。
 
-当前版本：1.4.0。
+## 当前版本
+
+| 平台 | 版本 | 状态 | 位置 |
+| --- | --- | --- | --- |
+| Web / Electron Desktop | `1.4.0` | 当前桌面主线 | 根目录 |
+| macOS Swift Native | `1.4.0` | 原生 macOS 客户端 | `native-swift/` |
+| Android Companion | `0.1.13-ios-ux-alignment` | Mobile beta | `apps/android/` |
+| iOS Companion | `0.1.13` | Mobile beta | `apps/ios/` |
+
+桌面端是完整 Bike 体验；移动端是 companion client，优先服务手机上的快速捕捉、阅读、轻量编辑和 AI 生成/润色，不追求与桌面端完全功能一致。
 
 ## 1.4.0 重点
 
@@ -27,17 +36,46 @@ AI 能力使用用户自己的接口配置，支持 `chat/completions` 与 `resp
 - 检查更新：桌面菜单和应用内入口可检查 GitHub Release，并跳转发布页获取新版本。
 - MCP 服务：把本地工作区暴露为可读取、可搜索、可定位、可导出的结构化上下文，并支持受控写入。
 
-## 发布产物
+## 平台与范围
 
-1.4.0 预发布包含三份桌面产物：
+| 能力 | Web / Electron | macOS Swift Native | Android Companion | iOS Companion |
+| --- | --- | --- | --- | --- |
+| Workspace v1 JSON | Yes | Yes | Yes | Yes |
+| 未知 JSON 字段保留 | Yes | Yes | Yes | Yes |
+| 文档库 | Yes | Yes | Yes | Yes |
+| 文档重命名 / 删除 / 复制 | Yes | Yes | Yes | Yes |
+| 大纲阅读 | Yes | Yes | Yes | Yes |
+| 轻量大纲编辑 | Yes | Yes | Yes | Yes |
+| AI 生成 / 润色 | Yes | Yes | Yes | Yes |
+| Responses / Chat Completions | Yes | Yes | Yes | Yes |
+| 思维导图 | Yes | Yes | Deferred | Deferred |
+| MCP | Yes | Planned / partial | Deferred | Deferred |
+| 自动同步 | No | iCloud backup path | Deferred | Deferred |
+| 拖拽排序 | Yes | Yes | Deferred | Deferred |
+| 多节点批量操作 | Yes | Yes | Deferred | Deferred |
+| 完整富文本字段编辑 | Yes | Yes | Deferred | Deferred |
 
-- Windows Electron x64：`Bike-1.4.0-x64.zip`
-- macOS Electron Apple Silicon：`Bike-1.4.0-arm64.dmg`
-- macOS Swift Native：`Bike-Native-1.4.0.dmg`
+更完整的平台能力矩阵见 `docs/mobile/platform-matrix.md`。
 
-当前打包使用本机 ad-hoc/未签名流程，适合个人安装测试。正式面向更多用户分发时，应接入 Apple Developer ID 签名、notarization、stapling，以及 Windows 代码签名。
+## 项目结构
 
-## 运行开发版
+```text
+.
+├── src/                    # Web / Electron 共享前端
+├── electron/               # Electron 壳
+├── native-swift/           # macOS Swift Native 客户端
+├── apps/
+│   ├── android/            # Android Companion，Kotlin + Jetpack Compose
+│   └── ios/                # iOS Companion，SwiftUI + SwiftPM/Xcode
+├── server/                 # 单用户公网部署服务
+├── mcp/                    # Bike MCP server
+├── config/                 # 单用户部署配置模板
+└── docs/                   # 项目文档
+```
+
+## 快速开始
+
+安装依赖并运行 Web 开发版：
 
 ```bash
 npm install
@@ -50,15 +88,15 @@ npm run dev
 npm run electron:dev
 ```
 
-## 打包 Electron 版
+## 桌面端构建
 
-macOS Apple Silicon：
+macOS Apple Silicon Electron：
 
 ```bash
 npm run electron:dist:mac
 ```
 
-Windows x64：
+Windows x64 Electron：
 
 ```bash
 npm run electron:dist:win
@@ -66,9 +104,7 @@ npm run electron:dist:win
 
 产物会输出到 `release/`。
 
-## Swift Native 版
-
-Swift Native 版本位于 `native-swift/`，目标是提供更贴近 macOS 原生体验的 Bike 客户端，并与 Electron 版共享 1.4.0 的核心功能。
+Swift Native macOS：
 
 ```bash
 cd native-swift
@@ -77,6 +113,42 @@ cd native-swift
 ```
 
 产物会输出到 `native-swift/release/`。
+
+## 移动端开发
+
+移动端不是桌面端完整替代品，而是用于手机上的快速捕捉、阅读、轻量编辑和 AI 生成/润色。Android 与 iOS 共享 Bike Workspace v1 JSON 语义，并尽量保留桌面端未知字段，避免移动端轻编辑破坏桌面端数据。
+
+移动端当前不包含脑图视图、MCP、自动同步、拖拽排序、多选批量大纲操作和完整富文本字段编辑。
+
+Android 本地验证：
+
+```bash
+cd apps/android
+JAVA_HOME=/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home \
+PATH=/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home/bin:$PATH \
+ANDROID_HOME=/opt/homebrew/share/android-commandlinetools \
+./gradlew testDebugUnitTest assembleDebug
+```
+
+iOS 本地验证：
+
+```bash
+cd apps/ios
+swift build
+swift run BikeCoreChecks
+xcodebuild -project BikeiOS.xcodeproj \
+  -scheme BikeiOS \
+  -destination 'generic/platform=iOS Simulator' \
+  -derivedDataPath /tmp/BikeIOSXcodeDerived \
+  build CODE_SIGNING_ALLOWED=NO
+```
+
+移动端封版资产通过 GitHub Releases 分发。当前 beta 使用 `mobile-v0.1.13` 标签：
+
+- Android：debug keystore 签名的 APK，可用于侧载 beta 测试。
+- iOS：Simulator `.app` 可用于模拟器测试；`iphoneos` IPA 目前未签名，真机安装需要 Apple Developer 证书和 provisioning profile。
+
+APK、IPA、dSYM、zip 等发布产物不要提交到 git；发布时附上 release notes 与 SHA-256 校验值。
 
 ## 数据与隐私
 
@@ -92,7 +164,7 @@ Swift Native 版的 JSON 备份路径：
 ~/Library/Mobile Documents/com~apple~CloudDocs/Bike/.backups/bike-workspace.json
 ```
 
-API key、单用户部署配置和本机工作区文件都不应该提交到仓库。项目已经忽略 `config/bike.config.json`、`release/`、`dist/`、Swift 构建目录和常见临时文件。
+移动端使用各自平台的本地存储和系统安全能力保存工作区与 AI 配置。API key、单用户部署配置、本机工作区文件、移动端签名文件、keystore、provisioning profile 都不应该提交到仓库。项目已经忽略 `config/bike.config.json`、`release/`、`dist/`、Swift/Android 构建目录和常见临时文件。
 
 ## MCP 服务
 
@@ -173,8 +245,15 @@ npm run start:web
 
 如果放在 Nginx/Caddy/Cloudflare Tunnel 后面并启用 HTTPS，把 `secureCookies` 改为 `true`。真实配置文件 `config/bike.config.json` 已加入 `.gitignore`，不要提交到仓库。
 
+## 发布规则
+
+- 桌面端 release 使用 `v1.x.x` 标签。
+- 移动端 beta release 使用 `mobile-v0.x.x` 标签。
+- 不提交构建产物、签名文件、证书、密钥、工作区 JSON 或本机路径。
+- GitHub Release 必须包含 release notes 和 SHA-256 校验文件。
+
 ## 后续方向
 
 - 增加版本历史、节点级反向链接、附件本地库和更完整的 PDF/图片导出。
 - 为 MCP 写入增加应用内控制面板、写入审计日志和快照恢复 UI。
-- 完成正式代码签名、notarization、stapling 和 Windows 签名流程。
+- 完成正式代码签名、notarization、stapling、Windows 签名、Android release keystore 和 iOS Developer signing 流程。
