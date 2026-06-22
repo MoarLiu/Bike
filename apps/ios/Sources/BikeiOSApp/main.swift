@@ -27,6 +27,9 @@ struct AppRootView: View {
         .sheet(isPresented: $store.showAISettings) {
             AISettingsView(store: store)
         }
+        .sheet(isPresented: $store.showSyncSettings) {
+            SyncSettingsView(store: store)
+        }
         .task {
             if store.payload == nil {
                 store.load()

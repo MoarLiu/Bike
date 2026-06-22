@@ -34,12 +34,22 @@ struct LibraryView: View {
         .navigationTitle("Bike")
         .toolbar {
             ToolbarItem(placement: leadingToolbarPlacement) {
-                Button {
-                    store.showAISettings = true
-                } label: {
-                    Image(systemName: "sparkles")
+                HStack(spacing: 14) {
+                    Button {
+                        store.showAISettings = true
+                    } label: {
+                        Image(systemName: "sparkles")
+                    }
+                    .accessibilityLabel("AI 设置")
+
+                    Button {
+                        store.showSyncSettings = true
+                    } label: {
+                        Image(systemName: store.isSyncing ? "arrow.triangle.2.circlepath" : "arrow.clockwise.icloud")
+                    }
+                    .accessibilityLabel("Web Sync")
+                    .disabled(store.isSyncing)
                 }
-                .accessibilityLabel("AI 设置")
             }
             ToolbarItem(placement: trailingToolbarPlacement) {
                 Button(action: createDocument) {

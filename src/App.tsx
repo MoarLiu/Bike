@@ -86,6 +86,20 @@ import { documentToMarkdown, parseMarkdownDocument } from "./markdown";
 import { firstDocument, migrateWorkspace } from "./migrations";
 import { createStarterWorkspace } from "./sample";
 import { loadWorkspace, saveWorkspace, saveWorkspaceFallback, type WorkspaceSaveResult } from "./storage";
+import {
+  loadSyncConfig,
+  loadSyncState,
+  normalizeAutoSyncInterval,
+  normalizeSyncServerUrl,
+  pullWorkspaceFromRemote,
+  pushWorkspaceToRemote,
+  saveSyncConfig,
+  saveSyncState,
+  syncWorkspaceWithRemote,
+  type SyncConfig,
+  type SyncState,
+  type SyncSummary,
+} from "./sync";
 import type { OutlineDocument, OutlineNode, ViewMode, Workspace } from "./types";
 import {
   addChild,
@@ -424,6 +438,18 @@ const formatRecentTime = (iso: string) => {
   return `编辑于 ${formatTime(iso)}`;
 };
 
+const summarizeSyncResult = (summary: SyncSummary) => {
+  const parts = [
+    summary.uploaded ? `上传 ${summary.uploaded}` : "",
+    summary.downloaded ? `下载 ${summary.downloaded}` : "",
+    summary.deleted ? `删除 ${summary.deleted}` : "",
+  ].filter(Boolean);
+  if (summary.conflicts.length) {
+    return `同步遇到 ${summary.conflicts.length} 个冲突：${summary.conflicts[0]}`;
+  }
+  return parts.length ? `同步完成：${parts.join("、")}` : "同步完成：没有新的改动";
+};
+
 const colorOptions = [
   { value: "plain", label: "默认" },
   { value: "blue", label: "蓝" },
@@ -441,6 +467,9 @@ const useEventCallback = <Args extends unknown[], Return>(
   }, [callback]);
   return useCallback((...args: Args) => callbackRef.current(...args), []);
 };
+
+const usesDesktopSyncProxy = () =>
+  Boolean((window.bike ?? window.localOutline)?.invokeSyncRequest);
 
 const nodeMenuColors = [
   { value: "plain", label: "默认", swatch: "#5f6065" },
@@ -543,6 +572,13 @@ function App() {
   const [showAiConfig, setShowAiConfig] = useState(false);
   const [aiBusyKey, setAiBusyKey] = useState<string | null>(null);
   const [isCheckingUpdates, setIsCheckingUpdates] = useState(false);
+  const [syncConfig, setSyncConfig] = useState<SyncConfig>(() => loadSyncConfig());
+  const [syncState, setSyncState] = useState<SyncState>(() => {
+    const config = loadSyncConfig();
+    return loadSyncState(config.serverUrl);
+  });
+  const [showSyncConfig, setShowSyncConfig] = useState(false);
+  const [syncBusy, setSyncBusy] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const inputRefs = useRef(new Map<string, HTMLTextAreaElement>());
   const workspaceRef = useRef<Workspace | null>(null);
@@ -552,6 +588,8 @@ function App() {
   const inspectorNoteDraftRef = useRef<InspectorNoteDraft | null>(null);
   const markdownParseTimerRef = useRef<number | null>(null);
   const flushPendingEditsRef = useRef<() => Workspace | null>(() => null);
+  const autoSyncTimerRef = useRef<number | null>(null);
+  const autoSyncDirtyRef = useRef(false);
 
   const [theme, setTheme] = useState<"light" | "dark">(
     () => (localStorage.getItem("theme") as "light" | "dark") || "light"
@@ -577,6 +615,32 @@ function App() {
     workspaceRef.current = next;
     setWorkspace(next);
     return next;
+  });
+
+  const persistSyncConfig = useEventCallback((next: SyncConfig) => {
+    const normalized = {
+      serverUrl: normalizeSyncServerUrl(next.serverUrl),
+      token: next.token.trim(),
+      autoSync: next.autoSync === true,
+      autoSyncIntervalSeconds: normalizeAutoSyncInterval(next.autoSyncIntervalSeconds),
+    };
+    saveSyncConfig(normalized);
+    setSyncConfig(normalized);
+    const nextState = loadSyncState(normalized.serverUrl);
+    setSyncState(nextState);
+    return { config: normalized, state: nextState };
+  });
+
+  const persistSyncState = useEventCallback((next: SyncState) => {
+    saveSyncState(next);
+    setSyncState(next);
+  });
+
+  const clearAutoSyncTimer = useEventCallback(() => {
+    if (autoSyncTimerRef.current !== null) {
+      window.clearTimeout(autoSyncTimerRef.current);
+      autoSyncTimerRef.current = null;
+    }
   });
 
   const initializeWorkspace = useEventCallback((isMounted: () => boolean = () => true) => {
@@ -1695,6 +1759,179 @@ function App() {
     }
   });
 
+  const applySyncedWorkspace = useEventCallback((next: Workspace) => {
+    replaceWorkspace(next);
+    setActiveNodeId(firstNodeIdInWorkspace(next));
+    setFocusNodeId(null);
+  });
+
+  const syncErrorMessage = (error: unknown) => {
+    const status = typeof error === "object" && error && "status" in error
+      ? (error as { status?: unknown }).status
+      : null;
+    if (status === 401) return "同步认证失败，请检查登录状态或设备密钥";
+    if (status === 404) return "同步服务不可用，请确认 Web 服务已启用同步";
+    return error instanceof Error ? error.message : "同步失败";
+  };
+
+  const syncNow = useEventCallback(async (
+    overrideConfig?: SyncConfig,
+    options: { silent?: boolean } = {},
+  ) => {
+    if (syncBusy) return;
+    const currentWorkspace = flushPendingEdits() ?? workspaceRef.current;
+    if (!currentWorkspace) return;
+    const activeSync = overrideConfig
+      ? persistSyncConfig(overrideConfig)
+      : { config: syncConfig, state: syncState };
+    if (usesDesktopSyncProxy() && !activeSync.config.token.trim()) {
+      if (!options.silent) showNotice("Electron 同步需要设备密钥。");
+      return;
+    }
+    setSyncBusy(true);
+    if (!options.silent) showNotice("正在同步文档...");
+    try {
+      const result = await syncWorkspaceWithRemote(
+        currentWorkspace,
+        activeSync.config,
+        activeSync.state,
+        { onCheckpoint: persistSyncState },
+      );
+      applySyncedWorkspace(result.workspace);
+      persistSyncState(result.state);
+      await saveWorkspace(result.workspace);
+      autoSyncDirtyRef.current = false;
+      const changed =
+        result.summary.uploaded > 0 ||
+        result.summary.downloaded > 0 ||
+        result.summary.deleted > 0 ||
+        result.summary.conflicts.length > 0;
+      if (!options.silent || changed) showNotice(summarizeSyncResult(result.summary));
+    } catch (error) {
+      showNotice(options.silent ? `后台同步失败：${syncErrorMessage(error)}` : syncErrorMessage(error));
+    } finally {
+      setSyncBusy(false);
+    }
+  });
+
+  const canAutoSync = useEventCallback(() => (
+    ready &&
+    !syncBusy &&
+    syncConfig.autoSync &&
+    (!usesDesktopSyncProxy() || Boolean(syncConfig.token.trim())) &&
+    Boolean(normalizeSyncServerUrl(syncConfig.serverUrl))
+  ));
+
+  const scheduleAutoSync = useEventCallback((delayMs: number = 5000) => {
+    clearAutoSyncTimer();
+    if (!canAutoSync()) return;
+    autoSyncTimerRef.current = window.setTimeout(() => {
+      autoSyncTimerRef.current = null;
+      if (!canAutoSync()) return;
+      syncNow(undefined, { silent: true });
+    }, delayMs);
+  });
+
+  useEffect(() => {
+    if (!workspace || !ready || !syncConfig.autoSync) return;
+    autoSyncDirtyRef.current = true;
+    scheduleAutoSync();
+    return () => clearAutoSyncTimer();
+  }, [workspace, ready, syncConfig.autoSync, syncConfig.serverUrl]);
+
+  useEffect(() => {
+    if (!ready || !syncConfig.autoSync) return;
+    const intervalMs = normalizeAutoSyncInterval(syncConfig.autoSyncIntervalSeconds) * 1000;
+    const handle = window.setInterval(() => {
+      syncNow(undefined, { silent: true });
+    }, intervalMs);
+    return () => window.clearInterval(handle);
+  }, [
+    ready,
+    syncConfig.autoSync,
+    syncConfig.autoSyncIntervalSeconds,
+    syncConfig.serverUrl,
+    syncConfig.token,
+  ]);
+
+  const pushLocalWorkspace = useEventCallback(async (overrideConfig?: SyncConfig) => {
+    if (syncBusy) return;
+    const currentWorkspace = flushPendingEdits() ?? workspaceRef.current;
+    if (!currentWorkspace) return;
+    const confirmed = window.confirm(
+      "上传本机文档会用当前本机版本更新服务端同名文档。确定继续？",
+    );
+    if (!confirmed) {
+      showNotice("已取消上传");
+      return;
+    }
+    const activeSync = overrideConfig
+      ? persistSyncConfig(overrideConfig)
+      : { config: syncConfig, state: syncState };
+    if (usesDesktopSyncProxy() && !activeSync.config.token.trim()) {
+      showNotice("Electron 上传需要设备密钥。");
+      return;
+    }
+    setSyncBusy(true);
+    showNotice("正在上传本机文档...");
+    try {
+      const result = await pushWorkspaceToRemote(currentWorkspace, activeSync.config, {
+        onCheckpoint: persistSyncState,
+      });
+      persistSyncState(result.state);
+      showNotice(summarizeSyncResult(result.summary));
+    } catch (error) {
+      showNotice(syncErrorMessage(error));
+    } finally {
+      setSyncBusy(false);
+    }
+  });
+
+  const pullRemoteWorkspace = useEventCallback(async (overrideConfig?: SyncConfig) => {
+    if (syncBusy) return;
+    const currentWorkspace = flushPendingEdits() ?? workspaceRef.current;
+    const confirmed = window.confirm(
+      "从服务端拉取会替换当前本机工作区。继续前会先下载一份本机备份。",
+    );
+    if (!confirmed) {
+      showNotice("已取消拉取");
+      return;
+    }
+    if (currentWorkspace) {
+      const backup = exportWorkspace(currentWorkspace);
+      const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+      downloadText(
+        `bike-workspace-before-sync-pull-${stamp}.json`,
+        backup.content,
+        backup.mime,
+      );
+    }
+    const activeSync = overrideConfig
+      ? persistSyncConfig(overrideConfig)
+      : { config: syncConfig, state: syncState };
+    if (usesDesktopSyncProxy() && !activeSync.config.token.trim()) {
+      showNotice("Electron 拉取需要设备密钥。");
+      return;
+    }
+    setSyncBusy(true);
+    showNotice("正在从服务端拉取...");
+    try {
+      const result = await pullWorkspaceFromRemote(activeSync.config);
+      persistSyncState(result.state);
+      if (!result.workspace) {
+        showNotice("服务端暂无文档");
+        return;
+      }
+      applySyncedWorkspace(result.workspace);
+      await saveWorkspace(result.workspace);
+      showNotice(`已从服务端拉取 ${result.workspace.documents.length} 个文档`);
+    } catch (error) {
+      showNotice(syncErrorMessage(error));
+    } finally {
+      setSyncBusy(false);
+    }
+  });
+
   const checkUpdates = useEventCallback(async () => {
     if (isCheckingUpdates) return;
     setIsCheckingUpdates(true);
@@ -1946,11 +2183,31 @@ function App() {
         </div>
 
         <div className="sync-panel">
-          <Cloud size={17} />
-          <div>
-            <strong>本地保存</strong>
-            <span>{notice}</span>
-          </div>
+          <button
+            className={classNames("sync-status-button", syncBusy && "spinning")}
+            onClick={() => syncNow()}
+            disabled={syncBusy}
+            title="立即同步"
+          >
+            {syncBusy ? <RefreshCw size={17} /> : <Cloud size={17} />}
+            <div>
+              <strong>{syncState.lastSyncedAt ? "文档同步" : "本地保存"}</strong>
+              <span>
+                {syncBusy
+                  ? "正在同步..."
+                  : syncState.lastSyncedAt
+                    ? `${formatRecentTime(syncState.lastSyncedAt)}${syncConfig.autoSync ? " · 自动" : ""}`
+                    : notice}
+              </span>
+            </div>
+          </button>
+          <button
+            className="sync-settings-button"
+            onClick={() => setShowSyncConfig(true)}
+            title="同步设置"
+          >
+            <Link2 size={15} />
+          </button>
         </div>
       </aside>
 
@@ -2253,6 +2510,22 @@ function App() {
         />
       )}
 
+      {showSyncConfig && (
+        <SyncConfigDialog
+          config={syncConfig}
+          busy={syncBusy}
+          lastSyncedAt={syncState.lastSyncedAt}
+          onClose={() => setShowSyncConfig(false)}
+          onSave={(next) => {
+            persistSyncConfig(next);
+            showNotice("同步设置已保存");
+          }}
+          onSyncNow={syncNow}
+          onPushLocal={pushLocalWorkspace}
+          onPullRemote={pullRemoteWorkspace}
+        />
+      )}
+
       {showConfirmDelete && (
         <div className="confirm-overlay" onClick={() => setShowConfirmDelete(false)}>
           <div className="confirm-dialog" onClick={(e) => e.stopPropagation()}>
@@ -2448,6 +2721,164 @@ function AiConfigDialog({
           </button>
           <button type="submit" className="primary">
             保存
+          </button>
+        </footer>
+      </form>
+    </div>
+  );
+}
+
+function SyncConfigDialog({
+  config,
+  busy,
+  lastSyncedAt,
+  onSave,
+  onSyncNow,
+  onPushLocal,
+  onPullRemote,
+  onClose,
+}: {
+  config: SyncConfig;
+  busy: boolean;
+  lastSyncedAt: string | null;
+  onSave: (config: SyncConfig) => void;
+  onSyncNow: (config: SyncConfig) => void;
+  onPushLocal: (config: SyncConfig) => void;
+  onPullRemote: (config: SyncConfig) => void;
+  onClose: () => void;
+}) {
+  const [draft, setDraft] = useState<SyncConfig>(() => ({ ...config }));
+  const [showToken, setShowToken] = useState(false);
+  const normalizedDraft = () => ({
+    serverUrl: normalizeSyncServerUrl(draft.serverUrl),
+    token: draft.token.trim(),
+    autoSync: draft.autoSync === true,
+    autoSyncIntervalSeconds: normalizeAutoSyncInterval(draft.autoSyncIntervalSeconds),
+  });
+  const saveDraft = () => {
+    const next = normalizedDraft();
+    setDraft(next);
+    onSave(next);
+    return next;
+  };
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <form
+        className="api-config-dialog sync-config-dialog"
+        onSubmit={(event) => {
+          event.preventDefault();
+          saveDraft();
+        }}
+        onClick={(event) => event.stopPropagation()}
+      >
+        <header>
+          <div>
+            <h3>文档同步</h3>
+            <p>
+              {lastSyncedAt
+                ? `上次同步：${formatTime(lastSyncedAt)}`
+                : "Electron 需填写设备密钥；密钥会明文保存在本机配置。"}
+            </p>
+          </div>
+          <button type="button" className="dialog-close" onClick={onClose} title="关闭">
+            <X size={16} />
+          </button>
+        </header>
+
+        <label className="config-field">
+          <span>服务地址</span>
+          <input
+            value={draft.serverUrl}
+            onChange={(event) => setDraft((current) => ({
+              ...current,
+              serverUrl: event.target.value,
+            }))}
+            placeholder={window.location.origin}
+            spellCheck={false}
+          />
+        </label>
+
+        <label className="config-field">
+          <span>设备密钥</span>
+          <div className="api-key-input">
+            <input
+              value={draft.token}
+              type={showToken ? "text" : "password"}
+              onChange={(event) => setDraft((current) => ({
+                ...current,
+                token: event.target.value,
+              }))}
+              placeholder="Electron 填设备密钥；本机明文保存"
+              spellCheck={false}
+              autoComplete="current-password"
+            />
+            <button type="button" onClick={() => setShowToken((value) => !value)}>
+              {showToken ? "隐藏" : "显示"}
+            </button>
+          </div>
+        </label>
+
+        <label className="sync-toggle-row">
+          <input
+            type="checkbox"
+            checked={draft.autoSync}
+            onChange={(event) => setDraft((current) => ({
+              ...current,
+              autoSync: event.target.checked,
+            }))}
+          />
+          <span>
+            <strong>后台自动同步</strong>
+            <small>保存本机修改后延迟同步，并按固定间隔拉取远端更新。</small>
+          </span>
+        </label>
+
+        <label className="config-field">
+          <span>同步间隔</span>
+          <input
+            value={String(draft.autoSyncIntervalSeconds)}
+            type="number"
+            min={15}
+            step={15}
+            onChange={(event) => setDraft((current) => ({
+              ...current,
+              autoSyncIntervalSeconds: normalizeAutoSyncInterval(event.target.value),
+            }))}
+            disabled={!draft.autoSync}
+          />
+        </label>
+
+        <footer className="sync-dialog-actions">
+          <button
+            type="button"
+            className="secondary"
+            disabled={busy}
+            onClick={() => onPullRemote(saveDraft())}
+          >
+            <Download size={15} />
+            拉取
+          </button>
+          <button
+            type="button"
+            className="secondary"
+            disabled={busy}
+            onClick={() => onPushLocal(saveDraft())}
+          >
+            <Upload size={15} />
+            上传
+          </button>
+          <button type="submit" className="secondary" disabled={busy}>
+            保存
+          </button>
+          <button
+            type="button"
+            className="primary"
+            disabled={busy}
+            onClick={() => onSyncNow(saveDraft())}
+          >
+            {busy ? <RefreshCw size={15} /> : <Cloud size={15} />}
+            同步
           </button>
         </footer>
       </form>

@@ -36,6 +36,10 @@ struct ContentView: View {
             AiConfigDialog(config: store.aiConfig)
                 .environmentObject(store)
         }
+        .sheet(isPresented: $store.showSyncConfigDialog) {
+            SyncConfigDialog(config: store.syncConfig)
+                .environmentObject(store)
+        }
     }
 }
 
@@ -242,6 +246,13 @@ struct SettingsView: View {
                 Text("AI")
                 Spacer()
                 Button("配置 API 密钥") { store.openAiConfig() }
+            }
+            HStack {
+                Text("Web Sync")
+                Spacer()
+                Button(store.isSyncing ? "同步中..." : "同步") { store.syncNow() }
+                    .disabled(store.isSyncing)
+                Button("配置") { store.openSyncConfig() }
             }
             HStack {
                 Text("检查更新")

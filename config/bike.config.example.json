@@ -8,5 +8,11 @@
     "sessionMaxAgeHours": 168,
     "secureCookies": false,
     "trustProxyHeaders": false
+  },
+  "sync": {
+    "enabled": true,
+    "databasePath": "data/bike-sync.sqlite",
+    "deviceTokenHashes": [],
+    "maxBodyBytes": 10485760
   }
 }

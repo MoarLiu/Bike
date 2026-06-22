@@ -8,6 +8,12 @@ private struct WorkspaceUndoSnapshot {
     var focusNodeId: String?
 }
 
+private enum WorkspaceSyncMode {
+    case merge
+    case push
+    case pull
+}
+
 enum WorkspaceLoadState: Equatable {
     case loading
     case loaded
@@ -37,15 +43,23 @@ final class AppStore: ObservableObject {
     @Published var showAiConfigDialog = false
     @Published var aiBusyTargetIds: Set<String> = []
     @Published var isCheckingUpdates = false
+    @Published var syncConfig: SyncConfig
+    @Published var syncState: SyncState
+    @Published var showSyncConfigDialog = false
+    @Published var isSyncing = false
 
     let repository: WorkspaceRepository
     private var saveTask: Task<Void, Never>?
     private var noticeTask: Task<Void, Never>?
+    private var autoSyncTask: Task<Void, Never>?
     private var undoStack: [WorkspaceUndoSnapshot] = []
     private var lastUndoCoalescingKey: String?
 
     init(repository: WorkspaceRepository) {
         self.repository = repository
+        let initialSyncConfig = SyncPreferences.loadConfig()
+        syncConfig = initialSyncConfig
+        syncState = SyncPreferences.loadState(serverUrl: initialSyncConfig.serverUrl)
     }
 
     convenience init() {
@@ -126,6 +140,7 @@ final class AppStore: ObservableObject {
 
     func load() {
         saveTask?.cancel()
+        autoSyncTask?.cancel()
         loadState = .loading
         do {
             workspace = try repository.loadWorkspace()
@@ -134,6 +149,7 @@ final class AppStore: ObservableObject {
             clearUndoHistory()
             applyAppearance()
             loadState = .loaded
+            restartAutoSyncIfNeeded()
         } catch {
             loadState = .failed(error.localizedDescription)
             show("载入失败：\(error.localizedDescription)")
@@ -173,6 +189,7 @@ final class AppStore: ObservableObject {
             if Task.isCancelled { return }
             do {
                 try await MainActor.run { try repository.saveWorkspace(current) }
+                await MainActor.run { self.scheduleAutoSyncAfterLocalChange() }
             } catch {
                 await MainActor.run { self.show("保存失败：\(error.localizedDescription)") }
             }
@@ -516,6 +533,43 @@ final class AppStore: ObservableObject {
         }
     }
 
+    func openSyncConfig() {
+        syncConfig = SyncPreferences.loadConfig()
+        syncState = SyncPreferences.loadState(serverUrl: syncConfig.serverUrl)
+        showSyncConfigDialog = true
+    }
+
+    func saveSyncConfig(_ config: SyncConfig) {
+        _ = persistSyncConfig(config, closesDialog: true)
+    }
+
+    func saveSyncConfigAndSync(_ config: SyncConfig) {
+        guard persistSyncConfig(config, closesDialog: true) else { return }
+        syncNow()
+    }
+
+    func saveSyncConfigAndPush(_ config: SyncConfig) {
+        guard persistSyncConfig(config, closesDialog: true) else { return }
+        pushLocalWorkspace()
+    }
+
+    func saveSyncConfigAndPull(_ config: SyncConfig) {
+        guard persistSyncConfig(config, closesDialog: true) else { return }
+        pullRemoteWorkspace()
+    }
+
+    func syncNow() {
+        Task { await runSync(.merge) }
+    }
+
+    func pushLocalWorkspace() {
+        Task { await runSync(.push) }
+    }
+
+    func pullRemoteWorkspace() {
+        Task { await runSync(.pull) }
+    }
+
     func exportActive(format: ExportFormat) {
         guard isWorkspaceReady else {
             show("工作区尚未载入，无法导出")
@@ -716,7 +770,137 @@ final class AppStore: ObservableObject {
             show("工作区尚未载入，无法编辑")
             return false
         }
+        guard !isSyncing else {
+            show("正在同步，请稍后再编辑")
+            return false
+        }
         return true
+    }
+
+    private func persistSyncConfig(_ config: SyncConfig, closesDialog: Bool) -> Bool {
+        let normalized = config.normalized
+        if let message = SyncConfig.validationMessage(for: normalized) {
+            show(message)
+            return false
+        }
+        SyncPreferences.saveConfig(normalized)
+        syncConfig = normalized
+        syncState = SyncPreferences.loadState(serverUrl: normalized.serverUrl)
+        restartAutoSyncIfNeeded()
+        if closesDialog {
+            showSyncConfigDialog = false
+        }
+        show("Web Sync 设置已保存")
+        return true
+    }
+
+    private func runSync(_ mode: WorkspaceSyncMode, automatic: Bool = false) async {
+        guard isWorkspaceReady else {
+            show("工作区尚未载入，无法同步")
+            return
+        }
+        guard !isSyncing else { return }
+        let normalizedConfig = syncConfig.normalized
+        if let message = SyncConfig.validationMessage(for: normalizedConfig) {
+            show(message)
+            showSyncConfigDialog = true
+            return
+        }
+
+        isSyncing = true
+        if !automatic {
+            show(syncStartingMessage(for: mode))
+        }
+        saveTask?.cancel()
+        do {
+            try repository.saveWorkspace(workspace)
+            let service = SyncService(config: normalizedConfig)
+            let currentState = syncState.serverUrl == normalizedConfig.serverUrl
+                ? syncState
+                : .empty(serverUrl: normalizedConfig.serverUrl)
+
+            switch mode {
+            case .merge:
+                let result = try await service.syncWorkspace(workspace, previousState: currentState)
+                if result.workspace != workspace {
+                    try replaceWorkspaceFromSync(result.workspace, snapshotReason: "before-web-sync")
+                }
+                persistSyncState(result.state)
+                if !automatic || result.summary.hasVisibleChange {
+                    show(syncCompletionMessage(result.summary))
+                }
+            case .push:
+                let result = try await service.pushWorkspace(workspace)
+                persistSyncState(result.state)
+                show(syncCompletionMessage(result.summary))
+            case .pull:
+                let result = try await service.pullWorkspace()
+                persistSyncState(result.state)
+                guard let remoteWorkspace = result.workspace else {
+                    show("远端还没有可同步的文档")
+                    isSyncing = false
+                    return
+                }
+                try replaceWorkspaceFromSync(remoteWorkspace, snapshotReason: "before-web-sync-pull")
+                show("已从 Web 同步 \(remoteWorkspace.documents.count) 篇文档")
+            }
+        } catch {
+            show(automatic ? "后台同步失败：\(error.localizedDescription)" : "同步失败：\(error.localizedDescription)")
+        }
+        isSyncing = false
+    }
+
+    private func restartAutoSyncIfNeeded() {
+        autoSyncTask?.cancel()
+        autoSyncTask = nil
+        let normalized = syncConfig.normalized
+        guard isWorkspaceReady, normalized.autoSync, normalized.isConfigured else { return }
+        autoSyncTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(normalized.autoSyncIntervalSeconds))
+                if Task.isCancelled { return }
+                await self?.runSync(.merge, automatic: true)
+            }
+        }
+    }
+
+    private func scheduleAutoSyncAfterLocalChange() {
+        let normalized = syncConfig.normalized
+        guard normalized.autoSync, normalized.isConfigured else { return }
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(5))
+            await self?.runSync(.merge, automatic: true)
+        }
+    }
+
+    private func persistSyncState(_ state: SyncState) {
+        syncState = state
+        SyncPreferences.saveState(state)
+    }
+
+    private func replaceWorkspaceFromSync(_ next: WorkspaceV1DTO, snapshotReason: String) throws {
+        try repository.createSnapshot(reason: snapshotReason, workspace: workspace)
+        recordUndoSnapshot()
+        workspace = TreeOperations.normalizeWorkspace(next)
+        activeNodeId = TreeOperations.firstNodeId(activeDocument?.nodes ?? [])
+        focusNodeId = nil
+        finishCoalescedUndo()
+        try repository.saveWorkspace(workspace)
+    }
+
+    private func syncStartingMessage(for mode: WorkspaceSyncMode) -> String {
+        switch mode {
+        case .merge: "正在同步 Web 文档..."
+        case .push: "正在上传到 Web..."
+        case .pull: "正在从 Web 拉取..."
+        }
+    }
+
+    private func syncCompletionMessage(_ summary: SyncSummary) -> String {
+        guard summary.conflicts.isEmpty else {
+            return "\(summary.message)：\(summary.conflicts.prefix(2).joined(separator: "；"))"
+        }
+        return summary.message
     }
 
     private func rekey(_ nodes: [OutlineNodeDTO]) -> [OutlineNodeDTO] {

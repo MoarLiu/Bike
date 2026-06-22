@@ -5,6 +5,7 @@ const bikeBridge = {
   loadICloudBackup: () => ipcRenderer.invoke("load-icloud-backup"),
   checkForUpdates: () => ipcRenderer.invoke("check-for-updates"),
   invokeAiProvider: (payload) => ipcRenderer.invoke("invoke-ai-provider", payload),
+  invokeSyncRequest: (payload) => ipcRenderer.invoke("invoke-sync-request", payload),
   onOpenApiConfig: (callback) => {
     const handler = () => callback();
     ipcRenderer.on("open-api-config", handler);

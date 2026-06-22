@@ -3,6 +3,7 @@ dist/
 release/
 build/win-icon-png/
 config/bike.config.json
+data/
 .DS_Store
 npm-debug.log*
 *.local

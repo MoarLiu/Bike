@@ -71,6 +71,10 @@ const isRecord = (value) => typeof value === "object" && value !== null;
 
 const hashContent = (value) => crypto.createHash("sha256").update(value).digest("hex");
 
+const removeLegacySyncSecret = async () => {
+  await fs.rm(path.join(app.getPath("userData"), "sync-secret.json"), { force: true });
+};
+
 const providerErrorMessage = (data) => {
   if (!isRecord(data)) return undefined;
   if (isRecord(data.error) && typeof data.error.message === "string") return data.error.message;
@@ -310,6 +314,46 @@ const createAiEndpointUrl = (baseUrl, endpoint) => {
   return url.toString();
 };
 
+const allowedSyncMethodForPath = (pathname, method) => {
+  if (pathname === "/api/sync/manifest") return method === "GET" || method === "PATCH";
+  if (pathname === "/api/documents") return method === "GET";
+  if (/^\/api\/documents\/[^/]+\/operations$/.test(pathname)) {
+    return method === "GET" || method === "POST";
+  }
+  if (/^\/api\/documents\/[^/]+$/.test(pathname)) {
+    return method === "GET" || method === "PUT" || method === "DELETE";
+  }
+  return false;
+};
+
+const createSyncRequestUrl = (payload) => {
+  if (!isRecord(payload)) throw new Error("同步请求参数无效");
+  const rawServerUrl = typeof payload.serverUrl === "string" ? payload.serverUrl.trim() : "";
+  const rawPathname = typeof payload.pathname === "string" ? payload.pathname.trim() : "";
+  const method = typeof payload.method === "string" ? payload.method.toUpperCase() : "GET";
+  const baseUrl = new URL(rawServerUrl.replace(/\/+$/, ""));
+  if (baseUrl.protocol !== "http:" && baseUrl.protocol !== "https:") {
+    throw new Error("同步服务地址需要以 http:// 或 https:// 开头");
+  }
+  if (baseUrl.username || baseUrl.password || baseUrl.search || baseUrl.hash) {
+    throw new Error("同步服务地址不应包含用户名、密码、查询参数或锚点");
+  }
+  const parsedPath = new URL(rawPathname, "http://bike.local");
+  if (parsedPath.origin !== "http://bike.local" || parsedPath.search || parsedPath.hash) {
+    throw new Error("同步 API 路径无效");
+  }
+  const pathname = parsedPath.pathname;
+  if (!allowedSyncMethodForPath(pathname, method)) {
+    throw new Error("同步 API 路径或方法不在允许范围内");
+  }
+  return {
+    method,
+    token: typeof payload.token === "string" ? payload.token.trim() : "",
+    body: "body" in payload ? payload.body : undefined,
+    url: `${baseUrl.toString().replace(/\/+$/, "")}${pathname}`,
+  };
+};
+
 const isExternalUrl = (value) => {
   try {
     const url = new URL(value);
@@ -363,6 +407,9 @@ const pruneStampedBackups = async (directory, prefix = stampedBackupPrefix) => {
 };
 
 app.whenReady().then(() => {
+  removeLegacySyncSecret().catch((error) => {
+    console.warn("Failed to remove legacy sync secret:", error);
+  });
   installContentSecurityPolicy();
   installApplicationMenu();
   createWindow();
@@ -439,6 +486,57 @@ ipcMain.handle("load-icloud-backup", async () => {
 
 ipcMain.handle("check-for-updates", async () => checkForUpdates());
 
+ipcMain.handle("invoke-sync-request", async (_event, payload) => {
+  try {
+    const request = createSyncRequestUrl(payload);
+    const headers = {
+      Accept: "application/json",
+      ...(request.body === undefined ? {} : { "Content-Type": "application/json" }),
+      ...(request.token ? { Authorization: `Bearer ${request.token}` } : {}),
+    };
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 60_000);
+    const response = await fetch(request.url, {
+      method: request.method,
+      headers,
+      body: request.body === undefined ? undefined : JSON.stringify(request.body),
+      signal: controller.signal,
+    }).finally(() => clearTimeout(timeout));
+    const text = await response.text();
+    let data = null;
+    if (text) {
+      try {
+        data = JSON.parse(text);
+      } catch {
+        data = { message: text.slice(0, 500) };
+        if (response.ok) {
+          return {
+            ok: false,
+            status: response.status,
+            data,
+            error: "同步服务返回了无效 JSON",
+          };
+        }
+      }
+    }
+    if (!response.ok) {
+      return {
+        ok: false,
+        status: response.status,
+        data,
+        error: providerErrorMessage(data) || `同步请求失败：HTTP ${response.status}`,
+      };
+    }
+    return { ok: true, status: response.status, data };
+  } catch (error) {
+    return {
+      ok: false,
+      status: 0,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+});
+
 ipcMain.handle("invoke-ai-provider", async (_event, payload) => {
   try {
     if (!isRecord(payload)) throw new Error("AI 请求参数无效");
@@ -469,7 +567,7 @@ ipcMain.handle("invoke-ai-provider", async (_event, payload) => {
           }
         })()
       : null;
-    if (response.ok && /^text\/html\\b/i.test(contentType)) {
+    if (response.ok && /^text\/html\b/i.test(contentType)) {
       throw new Error("AI 端点返回了 HTML 页面，请检查 API baseurl 和协议端点是否匹配");
     }
     if (!response.ok) {

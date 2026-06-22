@@ -15,7 +15,7 @@ enum UpdateChecker {
     static let releasesPageURL = URL(string: "https://github.com/MoarLiu/Bike/releases")!
 
     static func currentVersion() -> String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.4.0"
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.4.1"
     }
 
     static func compareVersions(_ lhs: String, _ rhs: String) -> Int {

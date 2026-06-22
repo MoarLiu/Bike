@@ -98,6 +98,11 @@
   background: #28282c;
 }
 
+[data-theme="dark"] .sync-status-button:hover,
+[data-theme="dark"] .sync-settings-button:hover {
+  background: #28282c;
+}
+
 [data-theme="dark"] .topbar {
   background: rgba(20, 20, 22, 0.96);
 }
@@ -676,9 +681,9 @@ button:disabled {
 
 .sync-panel {
   display: grid;
-  grid-template-columns: 20px minmax(0, 1fr);
-  gap: 9px;
-  align-items: start;
+  grid-template-columns: minmax(0, 1fr) 32px;
+  gap: 6px;
+  align-items: stretch;
   padding: 8px 4px;
   border: 0;
   border-top: 1px solid var(--border);
@@ -686,28 +691,69 @@ button:disabled {
   background: transparent;
 }
 
-.sync-panel svg {
+.sync-status-button,
+.sync-settings-button {
+  min-width: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  background: transparent;
+  cursor: pointer;
+}
+
+.sync-status-button {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr);
+  gap: 9px;
+  align-items: start;
+  padding: 4px 0;
+  text-align: left;
+}
+
+.sync-settings-button {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  color: #69686d;
+}
+
+.sync-status-button:hover,
+.sync-settings-button:hover {
+  background: var(--surface-subtle);
+}
+
+.sync-status-button:disabled {
+  cursor: progress;
+}
+
+.sync-status-button svg,
+.sync-settings-button svg {
   color: #6f6f74;
 }
 
-.sync-panel div {
+.sync-status-button div {
   display: grid;
   min-width: 0;
   gap: 3px;
 }
 
-.sync-panel strong {
+.sync-status-button strong {
   font-size: 12px;
   line-height: 1.3;
 }
 
-.sync-panel span {
+.sync-status-button span {
   overflow: hidden;
   color: var(--text-muted);
   font-size: 11px;
   line-height: 1.4;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.sync-status-button.spinning svg {
+  animation: ai-spin 1s linear infinite;
 }
 
 .sidebar-dock {
@@ -3090,9 +3136,48 @@ svg.ai-button-glyph {
 
 .api-config-dialog footer {
   display: flex;
+  flex-wrap: wrap;
   justify-content: flex-end;
   gap: 10px;
   padding-top: 4px;
+}
+
+.sync-dialog-actions {
+  align-items: center;
+}
+
+.sync-toggle-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.sync-toggle-row input {
+  margin-top: 3px;
+}
+
+.sync-toggle-row span {
+  display: grid;
+  gap: 3px;
+}
+
+.sync-toggle-row small {
+  color: var(--muted);
+  line-height: 1.4;
+}
+
+.sync-dialog-actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+}
+
+.sync-dialog-actions button:disabled {
+  opacity: 0.65;
+  cursor: progress;
 }
 
 .api-config-dialog footer button.primary {

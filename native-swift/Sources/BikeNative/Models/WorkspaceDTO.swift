@@ -65,7 +65,7 @@ enum OutlineColor: String, Codable, CaseIterable, Identifiable {
     }
 }
 
-struct WorkspaceV1DTO: Codable, Equatable {
+struct WorkspaceV1DTO: Codable, Equatable, Sendable {
     var version: Int
     var activeDocumentId: String
     var documents: [OutlineDocumentDTO]
@@ -77,7 +77,7 @@ struct WorkspaceV1DTO: Codable, Equatable {
     }
 }
 
-struct OutlineDocumentDTO: Codable, Equatable, Identifiable {
+struct OutlineDocumentDTO: Codable, Equatable, Identifiable, Sendable {
     var id: String
     var title: String
     var createdAt: String
@@ -105,7 +105,7 @@ struct OutlineDocumentDTO: Codable, Equatable, Identifiable {
     }
 }
 
-struct OutlineNodeDTO: Codable, Equatable, Identifiable, Hashable {
+struct OutlineNodeDTO: Codable, Equatable, Identifiable, Hashable, Sendable {
     var id: String
     var text: String
     var note: String

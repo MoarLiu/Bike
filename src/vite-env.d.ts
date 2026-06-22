@@ -37,6 +37,18 @@ interface BikeDesktopBridge {
     data?: unknown;
     error?: string;
   }>;
+  invokeSyncRequest?: (payload: {
+    serverUrl: string;
+    pathname: string;
+    method?: string;
+    token?: string;
+    body?: unknown;
+  }) => Promise<{
+    ok: boolean;
+    status: number;
+    data?: unknown;
+    error?: string;
+  }>;
   onOpenApiConfig?: (callback: () => void) => () => void;
 }
 

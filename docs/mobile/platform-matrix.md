@@ -23,7 +23,8 @@ Bike mobile clients are companion apps for the desktop product. They should keep
 | Chat Completions endpoint | Yes | Yes | Yes | Yes |
 | Mind map view | Yes | Yes | Deferred | Deferred |
 | MCP | Yes | Planned / partial | Deferred | Deferred |
-| Automatic sync | No | iCloud backup path | Deferred | Deferred |
+| Document sync | Manual / Auto Web Sync | Manual / Auto Web Sync | Manual / Auto Web Sync | Manual / Auto Web Sync |
+| Automatic sync | Configurable | Configurable | Configurable | Configurable |
 | Drag sorting | Yes | Yes | Deferred | Deferred |
 | Multi-node outline batch ops | Yes | Yes | Deferred | Deferred |
 | Full rich-text field editing | Yes | Yes | Deferred | Deferred |
@@ -42,7 +43,6 @@ Mobile apps should not block beta release on:
 
 - Mind map editing.
 - MCP integration.
-- Automatic sync.
 - Drag sorting.
 - Full rich-text controls.
 
@@ -51,7 +51,7 @@ Mobile apps should not block beta release on:
 - Keep mobile source under `apps/android` and `apps/ios`.
 - Keep generated build outputs out of git: APK, IPA, dSYM, zip, build directories, local SDK paths, and local signing files.
 - Publish installable artifacts through GitHub Releases with release notes and SHA-256 checksums.
-- Use platform-specific tags for release artifacts, for example `android-v0.1.13` and `ios-v0.1.13`.
+- Use platform-specific tags for release artifacts, for example `android-v0.1.14` and `ios-v0.1.14`.
 - Do not store API keys, local workspace files, provisioning profiles, keystores, or signing certificates in the repository.
 
 ## Signing Notes

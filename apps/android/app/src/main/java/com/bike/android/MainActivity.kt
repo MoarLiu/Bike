@@ -10,6 +10,7 @@ import androidx.compose.runtime.setValue
 import com.bike.android.ai.AiService
 import com.bike.android.ai.AiSettingsRepository
 import com.bike.android.data.WorkspaceRepository
+import com.bike.android.sync.SyncSettingsRepository
 import com.bike.android.ui.BikeAndroidApp
 
 class MainActivity : ComponentActivity() {
@@ -20,11 +21,13 @@ class MainActivity : ComponentActivity() {
         sharedText = extractSharedText(intent)
         val repository = WorkspaceRepository(this)
         val aiSettingsRepository = AiSettingsRepository(this)
+        val syncSettingsRepository = SyncSettingsRepository(this)
         val aiService = AiService()
         setContent {
             BikeAndroidApp(
                 repository = repository,
                 aiSettingsRepository = aiSettingsRepository,
+                syncSettingsRepository = syncSettingsRepository,
                 aiService = aiService,
                 sharedText = sharedText,
                 onSharedTextConsumed = { markSharedTextConsumed() },

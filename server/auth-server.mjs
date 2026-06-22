@@ -5,10 +5,17 @@ import { createServer } from "node:http";
 import path from "node:path";
 import { pipeline } from "node:stream";
 import { fileURLToPath } from "node:url";
+import {
+  SyncConflictError,
+  SyncNotFoundError,
+  SyncValidationError,
+  createSyncStore,
+} from "./sync-store.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(__dirname, "..");
 const distDir = path.join(projectRoot, "dist");
+const defaultSyncDatabasePath = path.join(projectRoot, "data", "bike-sync.sqlite");
 const defaultConfigPath = path.join(
   projectRoot,
   "config",
@@ -85,6 +92,22 @@ const readConfig = async () => {
     throw new Error("auth.sessionSecret 太短，请使用 npm run auth:hash 生成");
   }
 
+  const sync = parsed.sync ?? {};
+  const deviceTokenHashes = Array.isArray(sync.deviceTokenHashes)
+    ? sync.deviceTokenHashes.flatMap((entry) => {
+        if (typeof entry === "string") return [entry];
+        if (entry && typeof entry === "object" && typeof entry.hash === "string") {
+          return [entry.hash];
+        }
+        return [];
+      })
+    : [];
+  for (const hash of deviceTokenHashes) {
+    if (!String(hash).startsWith("pbkdf2$")) {
+      throw new Error("sync.deviceTokenHashes 必须由 npm run auth:hash 生成");
+    }
+  }
+
   return {
     host: parsed.host || "127.0.0.1",
     port: Number(parsed.port || process.env.PORT || 4173),
@@ -95,6 +118,14 @@ const readConfig = async () => {
       sessionMaxAgeHours: Number(auth.sessionMaxAgeHours || 168),
       secureCookies: Boolean(auth.secureCookies),
       trustProxyHeaders: Boolean(auth.trustProxyHeaders),
+    },
+    sync: {
+      enabled: sync.enabled === true,
+      databasePath: sync.databasePath
+        ? path.resolve(projectRoot, String(sync.databasePath))
+        : defaultSyncDatabasePath,
+      deviceTokenHashes,
+      maxBodyBytes: Number(sync.maxBodyBytes || 10 * 1024 * 1024),
     },
   };
 };
@@ -180,6 +211,13 @@ const send = (response, statusCode, body, headers = {}) => {
   response.end(body);
 };
 
+const sendJson = (response, statusCode, payload, headers = {}) => {
+  send(response, statusCode, JSON.stringify(payload), {
+    "Content-Type": "application/json; charset=utf-8",
+    ...headers,
+  });
+};
+
 const redirect = (response, location) => {
   response.writeHead(302, {
     ...securityHeaders,
@@ -187,6 +225,13 @@ const redirect = (response, location) => {
     "Cache-Control": "no-store",
   });
   response.end();
+};
+
+const methodNotAllowed = (response, allow) => {
+  send(response, 405, "Method Not Allowed", {
+    "Content-Type": "text/plain; charset=utf-8",
+    Allow: allow,
+  });
 };
 
 const parseCookies = (request) =>
@@ -363,6 +408,30 @@ const readRequestBody = (request) =>
     request.on("error", reject);
   });
 
+const readJsonRequestBody = (request, maxBytes) =>
+  new Promise((resolve, reject) => {
+    let body = "";
+    request.on("data", (chunk) => {
+      body += chunk;
+      if (body.length > maxBytes) {
+        request.destroy();
+        reject(new SyncValidationError("请求体过大"));
+      }
+    });
+    request.on("end", () => {
+      if (!body.trim()) {
+        resolve({});
+        return;
+      }
+      try {
+        resolve(JSON.parse(body));
+      } catch {
+        reject(new SyncValidationError("请求体不是有效 JSON"));
+      }
+    });
+    request.on("error", reject);
+  });
+
 const loginPage = (error = "") =>
   html(`<main>
   <h1>Bike</h1>
@@ -383,6 +452,163 @@ const loginPage = (error = "") =>
 
 const isAuthenticated = (request, config) =>
   verifySessionToken(parseCookies(request)[cookieName], config);
+
+const isApiAuthenticated = async (request, config) => {
+  if (isAuthenticated(request, config)) return true;
+  const authorization = String(request.headers.authorization || "");
+  const match = authorization.match(/^Bearer\s+(.+)$/i);
+  if (!match || !config.sync.deviceTokenHashes.length) return false;
+  for (const hash of config.sync.deviceTokenHashes) {
+    if (await verifyPassword(match[1], hash)) return true;
+  }
+  return false;
+};
+
+const handleSyncError = (response, error) => {
+  if (error instanceof SyncConflictError) {
+    sendJson(response, 409, {
+      error: "revision_conflict",
+      message: error.message,
+      currentRevision: error.currentRevision,
+    });
+    return;
+  }
+  if (error instanceof SyncValidationError) {
+    sendJson(response, 400, {
+      error: "invalid_request",
+      message: error.message,
+    });
+    return;
+  }
+  if (error instanceof SyncNotFoundError) {
+    sendJson(response, 404, {
+      error: "not_found",
+      message: error.message,
+    });
+    return;
+  }
+  throw error;
+};
+
+const handleSyncApi = async (request, response, config, syncStore) => {
+  const url = new URL(request.url, "http://localhost");
+  const pathname = decodeURIComponent(url.pathname);
+
+  if (request.method === "GET" && pathname === "/api/sync/manifest") {
+    sendJson(response, 200, syncStore.getManifest());
+    return;
+  }
+
+  if (pathname === "/api/sync/manifest") {
+    if (request.method !== "PATCH") {
+      methodNotAllowed(response, "GET, PATCH");
+      return;
+    }
+    try {
+      const body = await readJsonRequestBody(request, config.sync.maxBodyBytes);
+      sendJson(response, 200, syncStore.patchManifest({
+        expectedRevision: body.expectedRevision,
+        activeDocumentId: body.activeDocumentId,
+        documentOrder: body.documentOrder,
+      }));
+    } catch (error) {
+      handleSyncError(response, error);
+    }
+    return;
+  }
+
+  if (request.method === "GET" && pathname === "/api/documents") {
+    sendJson(response, 200, { documents: syncStore.getManifest().documents });
+    return;
+  }
+
+  const operationsMatch = pathname.match(/^\/api\/documents\/([^/]+)\/operations$/);
+  if (operationsMatch) {
+    const id = operationsMatch[1];
+    try {
+      if (request.method === "GET") {
+        sendJson(response, 200, syncStore.getDocumentOperations({
+          id,
+          after: url.searchParams.get("after"),
+        }));
+        return;
+      }
+      if (request.method === "POST") {
+        const body = await readJsonRequestBody(request, config.sync.maxBodyBytes);
+        sendJson(response, 200, syncStore.appendDocumentOperations({
+          id,
+          baseRevision: body.baseRevision,
+          actorId: body.actorId,
+          operations: body.operations,
+        }));
+        return;
+      }
+    } catch (error) {
+      handleSyncError(response, error);
+      return;
+    }
+    methodNotAllowed(response, "GET, POST");
+    return;
+  }
+
+  const documentMatch = pathname.match(/^\/api\/documents\/([^/]+)$/);
+  if (!documentMatch) {
+    sendJson(response, 404, { error: "not_found", message: "API route not found" });
+    return;
+  }
+
+  const id = documentMatch[1];
+  try {
+    if (request.method === "GET") {
+      const result = syncStore.getDocument(id);
+      if (!result) {
+        sendJson(response, 404, { error: "not_found", message: "Document not found" });
+        return;
+      }
+      if (result.deletedAt) {
+        sendJson(response, 410, {
+          error: "document_deleted",
+          revision: result.revision,
+          deletedAt: result.deletedAt,
+        });
+        return;
+      }
+      sendJson(response, 200, {
+        revision: result.revision,
+        document: result.document,
+      });
+      return;
+    }
+
+    if (request.method === "PUT") {
+      const body = await readJsonRequestBody(request, config.sync.maxBodyBytes);
+      const result = syncStore.putDocument({
+        id,
+        expectedRevision: body.expectedRevision,
+        document: body.document,
+      });
+      sendJson(response, 200, {
+        revision: result.revision,
+        document: result.document,
+      });
+      return;
+    }
+
+    if (request.method === "DELETE") {
+      const body = await readJsonRequestBody(request, config.sync.maxBodyBytes);
+      sendJson(response, 200, syncStore.deleteDocument({
+        id,
+        expectedRevision: body.expectedRevision,
+      }));
+      return;
+    }
+  } catch (error) {
+    handleSyncError(response, error);
+    return;
+  }
+
+  methodNotAllowed(response, "GET, PUT, DELETE");
+};
 
 const serveStatic = async (request, response) => {
   const url = new URL(request.url, "http://localhost");
@@ -421,7 +647,7 @@ const serveStatic = async (request, response) => {
   });
 };
 
-const handleRequest = async (request, response, config) => {
+const handleRequest = async (request, response, config, syncStore) => {
   const url = new URL(request.url, "http://localhost");
   const authed = isAuthenticated(request, config);
 
@@ -498,12 +724,26 @@ const handleRequest = async (request, response, config) => {
   }
 
   if (request.method === "GET" && url.pathname === "/auth/status") {
-    send(
-      response,
-      authed ? 200 : 401,
-      JSON.stringify({ authenticated: authed }),
-      { "Content-Type": "application/json; charset=utf-8" },
-    );
+    sendJson(response, authed ? 200 : 401, { authenticated: authed });
+    return;
+  }
+
+  if (url.pathname.startsWith("/api/")) {
+    if (!config.sync.enabled || !syncStore) {
+      sendJson(response, 404, {
+        error: "sync_disabled",
+        message: "Sync API is disabled",
+      });
+      return;
+    }
+    if (!(await isApiAuthenticated(request, config))) {
+      sendJson(response, 401, {
+        error: "unauthorized",
+        message: "Unauthorized",
+      });
+      return;
+    }
+    await handleSyncApi(request, response, config, syncStore);
     return;
   }
 
@@ -519,10 +759,7 @@ const handleRequest = async (request, response, config) => {
   }
 
   if (request.method !== "GET" && request.method !== "HEAD") {
-    send(response, 405, "Method Not Allowed", {
-      "Content-Type": "text/plain; charset=utf-8",
-      Allow: "GET, HEAD",
-    });
+    methodNotAllowed(response, "GET, HEAD");
     return;
   }
 
@@ -530,9 +767,12 @@ const handleRequest = async (request, response, config) => {
 };
 
 const config = await readConfig();
+const syncStore = config.sync.enabled
+  ? await createSyncStore(config.sync.databasePath)
+  : null;
 
 createServer((request, response) => {
-  handleRequest(request, response, config).catch((error) => {
+  handleRequest(request, response, config, syncStore).catch((error) => {
     console.error(error);
     send(response, 500, "Internal Server Error", {
       "Content-Type": "text/plain; charset=utf-8",
@@ -541,4 +781,5 @@ createServer((request, response) => {
 }).listen(config.port, config.host, () => {
   console.log(`Bike 已启动：http://${config.host}:${config.port}`);
   console.log(`认证配置：${configPath}`);
+  if (syncStore) console.log(`同步数据库：${config.sync.databasePath}`);
 });

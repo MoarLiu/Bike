@@ -93,6 +93,7 @@ import com.bike.android.ai.generatedNodesToOutlineNodes
 import com.bike.android.data.OutlineDocument
 import com.bike.android.data.OutlineNode
 import com.bike.android.data.WorkspacePayload
+import com.bike.android.data.WorkspaceJson
 import com.bike.android.data.WorkspaceRepository
 import com.bike.android.data.activeDocument
 import com.bike.android.data.createStarterWorkspace
@@ -118,6 +119,11 @@ import com.bike.android.data.withNodeText
 import com.bike.android.data.withNodeTextAndNote
 import com.bike.android.data.withRootNode
 import com.bike.android.data.withSiblingAfter
+import com.bike.android.sync.SyncConfig
+import com.bike.android.sync.SyncService
+import com.bike.android.sync.SyncSettingsRepository
+import com.bike.android.sync.SyncState
+import com.bike.android.sync.SyncSummary
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -148,6 +154,7 @@ private val BikeGold = Color(0xFFF5C252)
 fun BikeAndroidApp(
     repository: WorkspaceRepository,
     aiSettingsRepository: AiSettingsRepository,
+    syncSettingsRepository: SyncSettingsRepository,
     aiService: AiService,
     sharedText: String? = null,
     onSharedTextConsumed: () -> Unit = {},
@@ -162,6 +169,11 @@ fun BikeAndroidApp(
         var aiBusyNodeId by remember { mutableStateOf<String?>(null) }
         var aiJob by remember { mutableStateOf<Job?>(null) }
         var aiRequestId by remember { mutableStateOf(0) }
+        var syncConfig by remember { mutableStateOf(syncSettingsRepository.loadConfig()) }
+        var syncState by remember { mutableStateOf(syncSettingsRepository.loadState(syncConfig.serverUrl)) }
+        var showSyncSettings by remember { mutableStateOf(false) }
+        var syncBusy by remember { mutableStateOf(false) }
+        var autoSyncJob by remember { mutableStateOf<Job?>(null) }
         val scope = rememberCoroutineScope()
 
         fun cancelPendingSave() {
@@ -172,6 +184,107 @@ fun BikeAndroidApp(
         fun invalidatePendingSave() {
             saveRequestId += 1
             cancelPendingSave()
+        }
+
+        fun persistSyncState(next: SyncState) {
+            syncState = next
+            syncSettingsRepository.saveState(next)
+        }
+
+        fun syncMessage(summary: SyncSummary): String =
+            if (summary.conflicts.isEmpty()) {
+                summary.message
+            } else {
+                "${summary.message}：${summary.conflicts.take(2).joinToString("；")}"
+            }
+
+        fun runSync(mode: SyncMode, automatic: Boolean = false) {
+            val currentPayload = payload ?: return
+            if (syncBusy) return
+            val normalized = syncConfig.normalized
+            SyncConfig.validationMessage(normalized)?.let { message ->
+                status = message
+                showSyncSettings = true
+                return
+            }
+            syncBusy = true
+            if (!automatic) status = "正在同步 Web 文档..."
+            scope.launch {
+                runCatching {
+                    repository.save(currentPayload)
+                    val service = SyncService(normalized)
+                    val currentState = if (syncState.serverUrl == normalized.serverUrl) {
+                        syncState
+                    } else {
+                        SyncState.empty(normalized.serverUrl)
+                    }
+                    when (mode) {
+                        SyncMode.Merge -> {
+                            val result = service.syncWorkspace(currentPayload.workspace, currentState)
+                            val nextPayload = WorkspacePayload(
+                                workspace = result.workspace,
+                                raw = WorkspaceJson.json.encodeToJsonElement(result.workspace).jsonObject,
+                            )
+                            repository.save(nextPayload)
+                            payload = nextPayload
+                            persistSyncState(result.state)
+                            if (!automatic || result.summary.hasVisibleChange) {
+                                status = syncMessage(result.summary)
+                            }
+                        }
+                        SyncMode.Push -> {
+                            val result = service.pushWorkspace(currentPayload.workspace)
+                            persistSyncState(result.state)
+                            status = syncMessage(result.summary)
+                        }
+                        SyncMode.Pull -> {
+                            val result = service.pullWorkspace()
+                            persistSyncState(result.state)
+                            val remoteWorkspace = result.workspace
+                            if (remoteWorkspace == null) {
+                                status = "远端还没有可同步的文档"
+                            } else {
+                                val nextPayload = WorkspacePayload(
+                                    workspace = remoteWorkspace,
+                                    raw = WorkspaceJson.json.encodeToJsonElement(remoteWorkspace).jsonObject,
+                                )
+                                repository.save(nextPayload)
+                                payload = nextPayload
+                                status = "已从 Web 同步 ${remoteWorkspace.documents.size} 篇文档"
+                            }
+                        }
+                    }
+                }.onFailure {
+                    status = if (automatic) {
+                        "后台同步失败：${it.message ?: "同步失败"}"
+                    } else {
+                        it.message ?: "同步失败"
+                    }
+                }
+                syncBusy = false
+            }
+        }
+
+        fun restartAutoSync() {
+            autoSyncJob?.cancel()
+            autoSyncJob = null
+            val normalized = syncConfig.normalized
+            if (payload == null || !normalized.autoSync || !normalized.isConfigured) return
+            autoSyncJob = scope.launch {
+                while (true) {
+                    delay(normalized.autoSyncIntervalSeconds * 1000L)
+                    runSync(SyncMode.Merge, automatic = true)
+                }
+            }
+        }
+
+        fun scheduleAutoSyncAfterLocalChange() {
+            val normalized = syncConfig.normalized
+            if (!normalized.autoSync || !normalized.isConfigured) return
+            scope.launch {
+                delay(5_000)
+                runSync(SyncMode.Merge, automatic = true)
+            }
         }
 
         fun replacePayload(next: WorkspacePayload, persist: Boolean = true) {
@@ -187,6 +300,7 @@ fun BikeAndroidApp(
                     runCatching { repository.save(next) }
                         .onSuccess {
                             if (requestId == saveRequestId) status = "已保存到本机"
+                            if (requestId == saveRequestId) scheduleAutoSyncAfterLocalChange()
                         }
                         .onFailure {
                             if (requestId == saveRequestId) status = it.message ?: "保存失败"
@@ -198,6 +312,21 @@ fun BikeAndroidApp(
         fun updatePayload(transform: (WorkspacePayload) -> WorkspacePayload) {
             val current = payload ?: return
             replacePayload(transform(current))
+        }
+
+        fun persistSyncConfig(next: SyncConfig): Boolean {
+            val normalized = next.normalized
+            SyncConfig.validationMessage(normalized)?.let { message ->
+                status = message
+                return false
+            }
+            syncSettingsRepository.saveConfig(normalized)
+            syncConfig = normalized
+            syncState = syncSettingsRepository.loadState(normalized.serverUrl)
+            showSyncSettings = false
+            status = "Web Sync 设置已保存"
+            restartAutoSync()
+            return true
         }
 
         fun cancelAiTask(message: String? = null) {
@@ -322,6 +451,7 @@ fun BikeAndroidApp(
         DisposableEffect(Unit) {
             onDispose {
                 cancelAiTask()
+                autoSyncJob?.cancel()
             }
         }
 
@@ -369,6 +499,7 @@ fun BikeAndroidApp(
                     status = it.recovery?.let { recovery ->
                         "工作区文件损坏，已备份为 ${recovery.backupFileName}，并创建新工作区"
                     } ?: "已载入本地工作区"
+                    restartAutoSync()
                 }
                 .onFailure { status = it.message ?: "载入失败" }
         }
@@ -401,9 +532,18 @@ fun BikeAndroidApp(
                     aiSettings = aiSettings,
                     showAiSettings = showAiSettings,
                     aiBusyNodeId = aiBusyNodeId,
+                    syncConfig = syncConfig,
+                    syncState = syncState,
+                    showSyncSettings = showSyncSettings,
+                    syncBusy = syncBusy,
                     onImport = { importLauncher.launch(arrayOf("application/json", "text/*", "*/*")) },
                     onExport = { exportLauncher.launch("bike-workspace.json") },
                     onToggleAiSettings = { showAiSettings = !showAiSettings },
+                    onToggleSyncSettings = { showSyncSettings = !showSyncSettings },
+                    onSaveSyncSettings = { persistSyncConfig(it) },
+                    onSyncNow = { runSync(SyncMode.Merge) },
+                    onPushLocal = { runSync(SyncMode.Push) },
+                    onPullRemote = { runSync(SyncMode.Pull) },
                     onSaveAiSettings = { settings ->
                         runCatching {
                             aiSettingsRepository.save(settings)
@@ -600,9 +740,18 @@ private fun WorkspaceScreen(
     aiSettings: AiSettings,
     showAiSettings: Boolean,
     aiBusyNodeId: String?,
+    syncConfig: SyncConfig,
+    syncState: SyncState,
+    showSyncSettings: Boolean,
+    syncBusy: Boolean,
     onImport: () -> Unit,
     onExport: () -> Unit,
     onToggleAiSettings: () -> Unit,
+    onToggleSyncSettings: () -> Unit,
+    onSaveSyncSettings: (SyncConfig) -> Boolean,
+    onSyncNow: () -> Unit,
+    onPushLocal: () -> Unit,
+    onPullRemote: () -> Unit,
     onSaveAiSettings: (AiSettings) -> Unit,
     onNewDocument: () -> Unit,
     onSelectDocument: (String) -> Unit,
@@ -644,7 +793,12 @@ private fun WorkspaceScreen(
             aiConfigured = aiSettings.isConfigured,
             showAiSettings = showAiSettings,
             aiSettings = aiSettings,
+            syncConfig = syncConfig,
+            syncState = syncState,
+            showSyncSettings = showSyncSettings,
+            syncBusy = syncBusy,
             onSaveAiSettings = onSaveAiSettings,
+            onSaveSyncSettings = onSaveSyncSettings,
             onOpenDocument = { documentId ->
                 onSelectDocument(documentId)
                 mode = WorkspaceMode.Editor
@@ -663,6 +817,10 @@ private fun WorkspaceScreen(
             onImport = onImport,
             onExport = onExport,
             onToggleAiSettings = onToggleAiSettings,
+            onToggleSyncSettings = onToggleSyncSettings,
+            onSyncNow = onSyncNow,
+            onPushLocal = onPushLocal,
+            onPullRemote = onPullRemote,
         )
 
         WorkspaceMode.Editor -> EditorScreen(
@@ -702,6 +860,12 @@ private enum class WorkspaceMode {
     Editor,
 }
 
+private enum class SyncMode {
+    Merge,
+    Push,
+    Pull,
+}
+
 private enum class LibraryFilter {
     All,
     Shortcuts,
@@ -715,7 +879,12 @@ private fun LibraryScreen(
     aiConfigured: Boolean,
     showAiSettings: Boolean,
     aiSettings: AiSettings,
+    syncConfig: SyncConfig,
+    syncState: SyncState,
+    showSyncSettings: Boolean,
+    syncBusy: Boolean,
     onSaveAiSettings: (AiSettings) -> Unit,
+    onSaveSyncSettings: (SyncConfig) -> Boolean,
     onOpenDocument: (String) -> Unit,
     onNewDocument: () -> Unit,
     onRenameDocument: (String, String) -> Unit,
@@ -728,6 +897,10 @@ private fun LibraryScreen(
     onImport: () -> Unit,
     onExport: () -> Unit,
     onToggleAiSettings: () -> Unit,
+    onToggleSyncSettings: () -> Unit,
+    onSyncNow: () -> Unit,
+    onPushLocal: () -> Unit,
+    onPullRemote: () -> Unit,
 ) {
     val context = LocalContext.current
     var filter by remember { mutableStateOf(LibraryFilter.All) }
@@ -813,7 +986,10 @@ private fun LibraryScreen(
                 } else {
                     LibraryTopBar(
                         aiConfigured = aiConfigured,
+                        syncConfigured = syncConfig.isConfigured,
+                        syncBusy = syncBusy,
                         onToggleAiSettings = onToggleAiSettings,
+                        onToggleSyncSettings = onToggleSyncSettings,
                         onNewDocument = onNewDocument,
                         onMenuClick = { menuExpanded = true },
                     )
@@ -848,6 +1024,19 @@ private fun LibraryScreen(
                         AiSettingsPanel(
                             settings = aiSettings,
                             onSave = onSaveAiSettings,
+                        )
+                    }
+                }
+                if (showSyncSettings) {
+                    item(span = { GridItemSpan(maxLineSpan) }) {
+                        SyncSettingsPanel(
+                            config = syncConfig,
+                            state = syncState,
+                            busy = syncBusy,
+                            onSave = onSaveSyncSettings,
+                            onSyncNow = onSyncNow,
+                            onPushLocal = onPushLocal,
+                            onPullRemote = onPullRemote,
                         )
                     }
                 }
@@ -930,6 +1119,13 @@ private fun LibraryScreen(
                     onClick = {
                         menuExpanded = false
                         onToggleAiSettings()
+                    },
+                )
+                DropdownMenuItem(
+                    text = { Text("Web Sync") },
+                    onClick = {
+                        menuExpanded = false
+                        onToggleSyncSettings()
                     },
                 )
             }
@@ -1229,7 +1425,10 @@ private fun SelectionTopBar(
 @Composable
 private fun LibraryTopBar(
     aiConfigured: Boolean,
+    syncConfigured: Boolean,
+    syncBusy: Boolean,
     onToggleAiSettings: () -> Unit,
+    onToggleSyncSettings: () -> Unit,
     onNewDocument: () -> Unit,
     onMenuClick: () -> Unit,
 ) {
@@ -1260,6 +1459,23 @@ private fun LibraryTopBar(
                         .size(7.dp)
                         .clip(RoundedCornerShape(4.dp))
                         .background(BikeAccentHot),
+                )
+            }
+        }
+        Box {
+            PlainIconButton(
+                symbol = if (syncBusy) "↻" else "⇄",
+                onClick = onToggleSyncSettings,
+                tint = if (syncConfigured) BikeInk else BikeMuted,
+            )
+            if (!syncConfigured) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(top = 9.dp, end = 8.dp)
+                        .size(7.dp)
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(BikeGold),
                 )
             }
         }
@@ -2290,6 +2506,113 @@ private fun AiSettingsPanel(
 }
 
 @Composable
+private fun SyncSettingsPanel(
+    config: SyncConfig,
+    state: SyncState,
+    busy: Boolean,
+    onSave: (SyncConfig) -> Boolean,
+    onSyncNow: () -> Unit,
+    onPushLocal: () -> Unit,
+    onPullRemote: () -> Unit,
+) {
+    var serverUrl by remember(config.serverUrl) { mutableStateOf(config.serverUrl) }
+    var token by remember(config.token) { mutableStateOf(config.token) }
+    var autoSync by remember(config.autoSync) { mutableStateOf(config.autoSync) }
+    var intervalText by remember(config.autoSyncIntervalSeconds) {
+        mutableStateOf(config.autoSyncIntervalSeconds.toString())
+    }
+
+    fun draft(): SyncConfig =
+        SyncConfig(
+            serverUrl = serverUrl,
+            token = token,
+            autoSync = autoSync,
+            autoSyncIntervalSeconds = intervalText.toIntOrNull() ?: 60,
+        ).normalized
+
+    fun saveDraft(): Boolean = onSave(draft())
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+    ) {
+        Column(
+            modifier = Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Text(
+                text = "Web Sync",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Text(
+                text = state.lastSyncedAt?.let {
+                    "上次同步：$it${if (config.autoSync) " · 自动" else ""}"
+                } ?: "填写 Web 地址和设备同步密钥",
+                style = MaterialTheme.typography.bodySmall,
+                color = BikeMuted,
+            )
+            OutlinedTextField(
+                value = serverUrl,
+                onValueChange = { serverUrl = it },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                label = { Text("Web 地址") },
+            )
+            OutlinedTextField(
+                value = token,
+                onValueChange = { token = it },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                visualTransformation = PasswordVisualTransformation(),
+                label = { Text("设备同步密钥") },
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (autoSync) {
+                    Button(onClick = { autoSync = false }) { Text("后台自动同步") }
+                } else {
+                    OutlinedButton(onClick = { autoSync = true }) { Text("后台自动同步") }
+                }
+                OutlinedTextField(
+                    value = intervalText,
+                    onValueChange = { intervalText = it.filter { character -> character.isDigit() }.take(4) },
+                    modifier = Modifier.width(96.dp),
+                    enabled = autoSync,
+                    singleLine = true,
+                    label = { Text("秒") },
+                )
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(
+                    enabled = !busy,
+                    onClick = {
+                        if (saveDraft()) onPullRemote()
+                    },
+                ) { Text("拉取") }
+                OutlinedButton(
+                    enabled = !busy,
+                    onClick = {
+                        if (saveDraft()) onPushLocal()
+                    },
+                ) { Text("上传") }
+                Button(
+                    enabled = !busy,
+                    onClick = {
+                        if (saveDraft()) onSyncNow()
+                    },
+                ) { Text(if (busy) "同步中..." else "同步") }
+            }
+            OutlinedButton(
+                enabled = !busy,
+                onClick = { saveDraft() },
+            ) {
+                Text("保存 Web Sync 设置")
+            }
+        }
+    }
+}
+
+@Composable
 private fun LoadingState(status: String) {
     Column(
         modifier = Modifier
@@ -2411,9 +2734,18 @@ private fun BikeAndroidAppPreview() {
             aiSettings = AiSettings(),
             showAiSettings = true,
             aiBusyNodeId = null,
+            syncConfig = SyncConfig(),
+            syncState = SyncState.empty(""),
+            showSyncSettings = false,
+            syncBusy = false,
             onImport = {},
             onExport = {},
             onToggleAiSettings = {},
+            onToggleSyncSettings = {},
+            onSaveSyncSettings = { true },
+            onSyncNow = {},
+            onPushLocal = {},
+            onPullRemote = {},
             onSaveAiSettings = {},
             onNewDocument = {},
             onSelectDocument = {},

@@ -8,6 +8,10 @@ final class BikeAppStore: ObservableObject {
     @Published var aiSettings: AiSettings
     @Published var showAISettings = false
     @Published var aiBusyNodeId: String?
+    @Published var syncConfig: SyncConfig
+    @Published var syncState: SyncState
+    @Published var showSyncSettings = false
+    @Published var isSyncing = false
 
     private let repository: WorkspaceRepository
     private let aiSettingsStore: AiSettingsStore
@@ -15,6 +19,7 @@ final class BikeAppStore: ObservableObject {
     private var saveRequestId = 0
     private var aiTask: Task<Void, Never>?
     private var aiRequestId = 0
+    private var autoSyncTask: Task<Void, Never>?
 
     init(
         repository: WorkspaceRepository = WorkspaceRepository(),
@@ -23,6 +28,9 @@ final class BikeAppStore: ObservableObject {
         self.repository = repository
         self.aiSettingsStore = aiSettingsStore
         self.aiSettings = aiSettingsStore.load()
+        let initialSyncConfig = SyncPreferences.loadConfig()
+        self.syncConfig = initialSyncConfig
+        self.syncState = SyncPreferences.loadState(serverUrl: initialSyncConfig.serverUrl)
     }
 
     func load() {
@@ -32,6 +40,7 @@ final class BikeAppStore: ObservableObject {
                 status = payload?.recovery.map {
                     "工作区文件损坏，已备份为 \($0.backupFileName)，并创建新工作区"
                 } ?? "已载入本地工作区"
+                restartAutoSyncIfNeeded()
             } catch {
                 status = error.localizedDescription
             }
@@ -75,6 +84,7 @@ final class BikeAppStore: ObservableObject {
                 _ = try await repository.save(next)
                 guard requestId == saveRequestId else { return }
                 status = "已保存到本机"
+                scheduleAutoSyncAfterLocalChange()
             } catch {
                 guard requestId == saveRequestId else { return }
                 status = error.localizedDescription
@@ -104,6 +114,34 @@ final class BikeAppStore: ObservableObject {
             status = error.localizedDescription
             return nil
         }
+    }
+
+    @discardableResult
+    func saveSyncConfig(_ config: SyncConfig) -> Bool {
+        let normalized = config.normalized
+        if let message = SyncConfig.validationMessage(for: normalized) {
+            status = message
+            return false
+        }
+        SyncPreferences.saveConfig(normalized)
+        syncConfig = normalized
+        syncState = SyncPreferences.loadState(serverUrl: normalized.serverUrl)
+        showSyncSettings = false
+        restartAutoSyncIfNeeded()
+        status = "Web Sync 设置已保存"
+        return true
+    }
+
+    func syncNow() {
+        Task { await runSync(.merge) }
+    }
+
+    func pushLocalWorkspace() {
+        Task { await runSync(.push) }
+    }
+
+    func pullRemoteWorkspace() {
+        Task { await runSync(.pull) }
     }
 
     func cancelAI(message: String? = nil) {
@@ -224,5 +262,94 @@ final class BikeAppStore: ObservableObject {
         guard requestId == aiRequestId else { return }
         aiBusyNodeId = nil
         aiTask = nil
+    }
+
+    private enum SyncMode {
+        case merge
+        case push
+        case pull
+    }
+
+    private func runSync(_ mode: SyncMode, automatic: Bool = false) async {
+        guard let currentPayload = payload else { return }
+        guard !isSyncing else { return }
+        let normalized = syncConfig.normalized
+        if let message = SyncConfig.validationMessage(for: normalized) {
+            status = message
+            showSyncSettings = true
+            return
+        }
+        isSyncing = true
+        if !automatic { status = "正在同步 Web 文档..." }
+        do {
+            _ = try await repository.save(currentPayload)
+            let service = SyncService(config: normalized)
+            let currentState = syncState.serverUrl == normalized.serverUrl
+                ? syncState
+                : .empty(serverUrl: normalized.serverUrl)
+            switch mode {
+            case .merge:
+                let result = try await service.syncWorkspace(currentPayload.workspace, previousState: currentState)
+                let nextPayload = try WorkspaceJSON.payload(for: result.workspace)
+                payload = try await repository.save(nextPayload)
+                persistSyncState(result.state)
+                if !automatic || result.summary.hasVisibleChange {
+                    status = syncMessage(result.summary)
+                }
+            case .push:
+                let result = try await service.pushWorkspace(currentPayload.workspace)
+                persistSyncState(result.state)
+                status = syncMessage(result.summary)
+            case .pull:
+                let result = try await service.pullWorkspace()
+                persistSyncState(result.state)
+                guard let workspace = result.workspace else {
+                    status = "远端还没有可同步的文档"
+                    isSyncing = false
+                    return
+                }
+                let nextPayload = try WorkspaceJSON.payload(for: workspace)
+                payload = try await repository.save(nextPayload)
+                status = "已从 Web 同步 \(workspace.documents.count) 篇文档"
+            }
+        } catch {
+            status = automatic ? "后台同步失败：\(error.localizedDescription)" : "同步失败：\(error.localizedDescription)"
+        }
+        isSyncing = false
+    }
+
+    private func persistSyncState(_ state: SyncState) {
+        syncState = state
+        SyncPreferences.saveState(state)
+    }
+
+    private func restartAutoSyncIfNeeded() {
+        autoSyncTask?.cancel()
+        autoSyncTask = nil
+        let normalized = syncConfig.normalized
+        guard payload != nil, normalized.autoSync, normalized.isConfigured else { return }
+        autoSyncTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(normalized.autoSyncIntervalSeconds))
+                if Task.isCancelled { return }
+                await self?.runSync(.merge, automatic: true)
+            }
+        }
+    }
+
+    private func scheduleAutoSyncAfterLocalChange() {
+        let normalized = syncConfig.normalized
+        guard normalized.autoSync, normalized.isConfigured else { return }
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(5))
+            await self?.runSync(.merge, automatic: true)
+        }
+    }
+
+    private func syncMessage(_ summary: SyncSummary) -> String {
+        guard summary.conflicts.isEmpty else {
+            return "\(summary.message)：\(summary.conflicts.prefix(2).joined(separator: "；"))"
+        }
+        return summary.message
     }
 }

@@ -1,0 +1,240 @@
+# Bike 文档级同步服务
+
+Bike Web 公网部署现在可以作为个人同步服务。同步服务仍保持本地优先：Web 前端继续保存 IndexedDB，本地数据可离线使用；服务端 SQLite 作为多设备交换文档的中间层。
+
+## MVP 范围
+
+- 同步粒度：单篇 `OutlineDocument`。
+- 工作区清单：保存 `activeDocumentId`、文档顺序和每篇文档的 revision。
+- 冲突策略：所有写入都携带 `expectedRevision`，revision 不匹配返回 `409 Conflict`。
+- 删除策略：服务端使用 `deletedAt` tombstone，避免旧设备把已删除文档重新上传。
+- 数据库：默认 `data/bike-sync.sqlite`，可在配置中修改。
+- 鉴权：Web 同源访问使用已有登录 Cookie；移动端/其他客户端可使用 Bearer 设备密钥。
+
+不在 MVP 范围内：
+
+- 多用户账号体系。
+- 实时协同编辑。
+- 节点级操作日志。
+- CRDT 自动合并。
+- 附件同步。
+
+## 配置
+
+同步服务使用 Node 内置 `node:sqlite`，部署环境需要 Node.js 22.5.0 或更新版本。
+
+`config/bike.config.json` 可增加：
+
+```json
+{
+  "sync": {
+    "enabled": true,
+    "databasePath": "data/bike-sync.sqlite",
+    "deviceTokenHashes": [],
+    "maxBodyBytes": 10485760
+  }
+}
+```
+
+`enabled` 必须显式设置为 `true` 才会启动同步服务。旧配置没有 `sync` 字段时，同步 API 会保持关闭，避免部署环境 Node 版本不足时影响原有 Web 登录服务。`databasePath` 是相对项目根目录的 SQLite 文件路径，也可以写绝对路径。
+
+如需给移动端使用设备密钥：
+
+```bash
+npm run auth:hash -- "你的设备同步密钥"
+```
+
+把输出的 `passwordHash` 放入：
+
+```json
+{
+  "sync": {
+    "deviceTokenHashes": [
+      {
+        "name": "my-phone",
+        "hash": "pbkdf2$..."
+      }
+    ]
+  }
+}
+```
+
+客户端请求时使用：
+
+```http
+Authorization: Bearer 你的设备同步密钥
+```
+
+## API
+
+### `GET /api/sync/manifest`
+
+返回工作区清单：
+
+```json
+{
+  "workspaceRevision": 2,
+  "activeDocumentId": "doc-a",
+  "documentOrder": ["doc-a"],
+  "documents": [
+    {
+      "id": "doc-a",
+      "title": "项目计划",
+      "revision": 7,
+      "updatedAt": "2026-06-21T10:00:00.000Z",
+      "deletedAt": null
+    }
+  ]
+}
+```
+
+### `PATCH /api/sync/manifest`
+
+更新当前文档和文档顺序：
+
+```json
+{
+  "expectedRevision": 2,
+  "activeDocumentId": "doc-a",
+  "documentOrder": ["doc-a", "doc-b"]
+}
+```
+
+### `GET /api/documents`
+
+返回文档摘要列表。内容与 manifest 的 `documents` 字段一致。
+
+### `GET /api/documents/:id`
+
+返回单篇文档：
+
+```json
+{
+  "revision": 7,
+  "document": {
+    "id": "doc-a",
+    "title": "项目计划",
+    "createdAt": "...",
+    "updatedAt": "...",
+    "nodes": []
+  }
+}
+```
+
+已删除文档返回 `410 Gone`，包含 tombstone revision。
+
+### `PUT /api/documents/:id`
+
+创建或更新单篇文档：
+
+```json
+{
+  "expectedRevision": 7,
+  "document": {
+    "id": "doc-a",
+    "title": "项目计划",
+    "createdAt": "...",
+    "updatedAt": "...",
+    "nodes": []
+  }
+}
+```
+
+新建文档使用 `"expectedRevision": null`。更新已有文档必须传当前 revision。
+
+### `DELETE /api/documents/:id`
+
+删除单篇文档：
+
+```json
+{
+  "expectedRevision": 7
+}
+```
+
+服务端会写入 tombstone，并递增文档 revision。
+
+### `GET /api/documents/:id/operations?after=0`
+
+返回指定文档的协作操作日志。`after` 是客户端已经处理过的最后一个 operation sequence：
+
+```json
+{
+  "documentId": "doc-a",
+  "currentRevision": 7,
+  "operations": [
+    {
+      "sequence": 1,
+      "baseRevision": 7,
+      "actorId": "macbook",
+      "operation": {
+        "type": "node.update_text",
+        "nodeId": "node-a",
+        "text": "新的主题"
+      },
+      "createdAt": "2026-06-22T10:00:00.000Z"
+    }
+  ]
+}
+```
+
+### `POST /api/documents/:id/operations`
+
+追加协作操作日志：
+
+```json
+{
+  "baseRevision": 7,
+  "actorId": "macbook",
+  "operations": [
+    {
+      "type": "node.update_text",
+      "nodeId": "node-a",
+      "text": "新的主题"
+    }
+  ]
+}
+```
+
+`baseRevision` 必须匹配当前文档 revision，否则返回 `409 Conflict`。当前版本只持久化并分发操作日志，不在服务端自动应用任意操作；客户端要把它作为节点级/CRDT 协同编辑的底座，而不是绕过现有 `PUT /api/documents/:id` 的文档快照同步。
+
+## Web 前端行为
+
+侧栏底部的同步状态块可直接执行双向同步，旁边的设置按钮可配置服务地址和设备密钥。
+Web 同源部署优先使用登录后的 HttpOnly Cookie。同步设置里的设备密钥会明文保存在本机应用配置中，便于用户理解、迁移和删除；不会读取系统密钥串。
+
+当前提供三种手动动作：
+
+- 同步：根据本地保存的文档 revision 和 fingerprint 做双向交换。
+- 拉取：从服务端替换本机工作区，执行前下载本机 JSON 备份。
+- 上传：把本机文档上传到服务端，适合第一次初始化服务器。
+
+可在同步设置中开启后台自动同步。自动同步会在本机保存后延迟触发一次，并按配置的间隔轮询远端更新；无变化时不提示，有上传、下载、删除、冲突或错误时提示。
+
+双向同步规则：
+
+- 本机新文档：上传。
+- 远端新文档：下载。
+- 本机删除且远端未变：删除远端。
+- 远端删除且本机未变：删除本机。
+- 两边都改：报告冲突，不覆盖任一边。
+
+## Electron、Swift Native、Android 和 iOS
+
+Electron 本地版复用 Web 前端的同步界面。打包后的 Electron 渲染进程不会直接跨域请求 Web 服务，而是通过 preload 暴露的主进程代理访问同步 API。代理只允许 `/api/sync/manifest`、`/api/documents`、`/api/documents/:id` 和文档 operation log 路径，并把设备密钥作为 Bearer token 发送。Electron 不读取系统密钥串，设备密钥会明文保存在本机应用配置中。
+
+Swift Native 版在设置或侧栏齿轮中配置 Web 地址和设备密钥。Web 地址、设备密钥和同步 revision 状态保存在 UserDefaults。本地仍以 iCloud Drive/Bike 下的 Markdown 文件和 sidecar metadata 作为主存储；同步拉取或双向同步下载远端更新后，会先创建本地快照再写回 Markdown 存储。
+
+Android 和 iOS Companion 也复用同一套文档级 API。Android 使用 SharedPreferences 明文保存设备密钥；iOS 使用 UserDefaults 明文保存设备密钥。两端都支持手动同步、上传、拉取和可配置后台自动同步。
+
+部署好 Web 版后，本地客户端连接流程：
+
+1. 在服务端 `config/bike.config.json` 中开启 `sync.enabled`，并配置 `deviceTokenHashes`。
+2. 启动 Web 服务，确认浏览器可访问 `https://你的域名`。
+3. 在 Electron、Swift Native、Android 或 iOS 中打开 Web Sync 配置，填写 Web 地址和设备同步密钥。
+4. 第一次初始化可选择“上传”把本机文档推到 Web，或选择“拉取”把 Web 文档替换到本机。
+5. 后续使用“同步”进行文档级双向交换；发生 revision 冲突时会提示，不会静默覆盖。
+
+## 后续演进
+
+服务端已经提供文档 operation log 底座。要达到真正多人同文档实时编辑，还需要把各端编辑器里的标题、节点文本、插入、删除、移动等 UI 事件映射为稳定操作，并实现客户端操作应用/回放、冲突变换或 CRDT 合并策略。

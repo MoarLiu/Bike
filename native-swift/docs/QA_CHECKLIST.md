@@ -35,7 +35,7 @@
 
 - `./scripts/test_all.sh` 通过。
 - `./scripts/build_and_run.sh --verify` 能构建并启动 `Bike Native.app`。
-- `./scripts/package_dmg.sh` 输出 `release/Bike-Native-1.4.0.dmg`。
+- `VERSION=1.4.1 ./scripts/package_dmg.sh` 输出 `release/Bike-Native-1.4.1.dmg`。
 - 挂载 DMG 后可看到 `.app`，复制到 `/Applications` 后可启动。
 
 ## Regression Boundaries

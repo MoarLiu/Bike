@@ -55,6 +55,7 @@ struct BikeNativeApp: App {
                     .keyboardShortcut("s", modifiers: [.command])
                 Divider()
                 Button("配置API密钥") { store.openAiConfig() }
+                Button("配置 Web Sync") { store.openSyncConfig() }
                 Button("检查更新") { store.checkForUpdates() }
                 Button("创建快照") { store.createManualSnapshot() }
                     .keyboardShortcut("s", modifiers: [.command, .shift])
@@ -65,6 +66,8 @@ struct BikeNativeApp: App {
                 Divider()
                 Button("创建 JSON 备份") { store.backupToICloud() }
                 Button("载入 iCloud 备份") { store.loadICloudBackup() }
+                Button("同步 Web 文档") { store.syncNow() }
+                    .keyboardShortcut("r", modifiers: [.command, .shift])
                 Button("打开 Markdown 目录") { BikeStorage.openDocumentsDirectoryInFinder() }
             }
             CommandMenu("大纲") {

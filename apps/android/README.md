@@ -11,7 +11,7 @@ outline editing rather than full desktop parity.
 - Wide-read and preserve desktop fields that Android does not edit yet.
 - Start with document list, search, import/export, outline light editing, and
   Markdown reading/editing.
-- Defer full mind map editing, MCP, automatic sync, and advanced exporters.
+- Defer full mind map editing, MCP, and advanced exporters.
 
 ## Current State
 
@@ -50,6 +50,10 @@ This repository currently contains a first usable vertical slice:
   from Android Auto Backup because their encryption key is device-local.
 - AI network and HTTP errors are mapped to user-facing messages for common
   configuration, timeout, auth, rate-limit, and service-unavailable cases.
+- Web Sync settings are available from the library toolbar/menu. The app can
+  sync, upload, pull, and run configurable background auto sync against a
+  deployed Bike Web sync service. The device sync key is stored plainly in
+  SharedPreferences, not Android Keystore.
 
 ## Build
 
