@@ -10,7 +10,7 @@ Bike iOS is the native SwiftUI companion aligned with Bike Android `0.1.14-web-s
 - Document library with two-column layout, All / Shortcuts filters, search, long-press actions, rename, duplicate, shortcut toggle, and delete.
 - Outline detail view with nested indentation, inline editing, checkbox, collapse/expand, sibling/child creation, outdent, deletion, keyboard accessory controls, and system back navigation.
 - AI settings and AI node actions using the same Responses / Chat Completions parsing behavior inherited from desktop Bike and Android `0.1.12`.
-- Web Sync settings, manual sync/upload/pull, and configurable background auto sync through a deployed Bike Web sync service. The device sync key is stored plainly in UserDefaults, not Keychain.
+- Web Sync settings, manual sync/upload/pull, and configurable background auto sync through a deployed Bike Sync Server. The device sync key is stored plainly in UserDefaults, not Keychain.
 
 Deferred from this beta, matching the Android plan:
 

@@ -1,5 +1,6 @@
 import type { PDFFont, PDFPage, RGB } from "pdf-lib";
 import type { OutlineDocument, OutlineNode, Workspace } from "./types";
+import { uuid } from "./id";
 import { migrateDocument, migrateWorkspace } from "./migrations";
 import { createNode, normalizeColor } from "./tree";
 import {
@@ -487,7 +488,7 @@ export const importDocument = (content: string, filename: string): OutlineDocume
     if ("documents" in parsed) return migrateWorkspace(parsed);
     return migrateDocument({
       ...parsed,
-      id: crypto.randomUUID(),
+      id: uuid(),
       updatedAt: now,
     });
   }
@@ -510,7 +511,7 @@ export const importDocument = (content: string, filename: string): OutlineDocume
           .map(parseFreeMindElement)
       : [createNode("未命名主题")];
     return {
-      id: crypto.randomUUID(),
+      id: uuid(),
       title,
       createdAt: now,
       updatedAt: now,
@@ -529,7 +530,7 @@ export const importDocument = (content: string, filename: string): OutlineDocume
     : [createNode("未命名主题")];
 
   return {
-    id: crypto.randomUUID(),
+    id: uuid(),
     title,
     createdAt: now,
     updatedAt: now,

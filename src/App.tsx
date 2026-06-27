@@ -101,6 +101,7 @@ import {
   type SyncSummary,
 } from "./sync";
 import type { OutlineDocument, OutlineNode, ViewMode, Workspace } from "./types";
+import { uuid } from "./id";
 import {
   addChild,
   cloneNodes,
@@ -1102,7 +1103,7 @@ function App() {
 
   const createDocument = useEventCallback(() => {
     flushPendingEdits();
-    const id = crypto.randomUUID();
+    const id = uuid();
     const document: OutlineDocument = {
       id,
       title: "未命名文档",
@@ -1126,7 +1127,7 @@ function App() {
       (document) => document.id === currentWorkspace.activeDocumentId,
     ) as MarkdownDocument | undefined;
     if (!sourceDocument) return;
-    const id = crypto.randomUUID();
+    const id = uuid();
     const document = clearDocumentMarkdown({
       ...sourceDocument,
       id,

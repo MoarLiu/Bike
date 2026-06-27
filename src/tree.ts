@@ -1,7 +1,8 @@
 import type { FlatNode, OutlineNode } from "./types";
+import { uuid } from "./id";
 
 export const uid = () =>
-  `node_${crypto.randomUUID()}`;
+  `node_${uuid()}`;
 
 export const createNode = (text = ""): OutlineNode => ({
   id: uid(),

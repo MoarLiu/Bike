@@ -1,5 +1,5 @@
-import { pbkdf2Sync, randomBytes } from "node:crypto";
 import process from "node:process";
+import { createSecretHash, createSessionSecret } from "../server/password.mjs";
 
 const readPasswordFromStdin = async () => {
   if (!process.stdin.isTTY) {
@@ -51,18 +51,11 @@ if (!password) {
   process.exit(1);
 }
 
-const iterations = 310000;
-const salt = randomBytes(18).toString("base64url");
-const hash = pbkdf2Sync(password, salt, iterations, 32, "sha256").toString(
-  "base64url",
-);
-const sessionSecret = randomBytes(32).toString("base64url");
-
 console.log(
   JSON.stringify(
     {
-      passwordHash: `pbkdf2$${iterations}$${salt}$${hash}`,
-      sessionSecret,
+      passwordHash: createSecretHash(password),
+      sessionSecret: createSessionSecret(),
     },
     null,
     2,

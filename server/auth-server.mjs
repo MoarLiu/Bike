@@ -1,16 +1,13 @@
-import { createHmac, pbkdf2, timingSafeEqual } from "node:crypto";
+import { createHmac, timingSafeEqual } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
 import { createServer } from "node:http";
 import path from "node:path";
 import { pipeline } from "node:stream";
 import { fileURLToPath } from "node:url";
-import {
-  SyncConflictError,
-  SyncNotFoundError,
-  SyncValidationError,
-  createSyncStore,
-} from "./sync-store.mjs";
+import { isPbkdf2Hash, verifyPassword } from "./password.mjs";
+import { handleSyncApi } from "./sync-api.mjs";
+import { createSyncStore } from "./sync-store.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(__dirname, "..");
@@ -37,7 +34,7 @@ const contentSecurityPolicy = [
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data:",
   "font-src 'self' data:",
-  "connect-src 'self'",
+  "connect-src 'self' http: https:",
   "object-src 'none'",
   "base-uri 'self'",
   "form-action 'self'",
@@ -85,7 +82,7 @@ const readConfig = async () => {
   if (missing.length) {
     throw new Error(`认证配置缺少字段：${missing.join(", ")}`);
   }
-  if (!String(auth.passwordHash).startsWith("pbkdf2$")) {
+  if (!isPbkdf2Hash(String(auth.passwordHash))) {
     throw new Error("auth.passwordHash 必须由 npm run auth:hash 生成");
   }
   if (String(auth.sessionSecret).length < 32) {
@@ -103,7 +100,7 @@ const readConfig = async () => {
       })
     : [];
   for (const hash of deviceTokenHashes) {
-    if (!String(hash).startsWith("pbkdf2$")) {
+    if (!isPbkdf2Hash(String(hash))) {
       throw new Error("sync.deviceTokenHashes 必须由 npm run auth:hash 生成");
     }
   }
@@ -118,6 +115,14 @@ const readConfig = async () => {
       sessionMaxAgeHours: Number(auth.sessionMaxAgeHours || 168),
       secureCookies: Boolean(auth.secureCookies),
       trustProxyHeaders: Boolean(auth.trustProxyHeaders),
+    },
+    web: {
+      defaultSyncServerUrl: String(
+        parsed.web?.defaultSyncServerUrl ||
+          process.env.BIKE_DEFAULT_SYNC_SERVER_URL ||
+          process.env.BIKE_DEFAULT_SYNC_URL ||
+          "",
+      ).trim(),
     },
     sync: {
       enabled: sync.enabled === true,
@@ -300,27 +305,6 @@ const verifySessionToken = (token, config) => {
   }
 };
 
-const verifyPassword = (password, passwordHash) => {
-  const [scheme, iterationText, salt, expectedHash] = passwordHash.split("$");
-  if (scheme !== "pbkdf2" || !iterationText || !salt || !expectedHash) return false;
-  const iterations = Number(iterationText);
-  if (!Number.isFinite(iterations) || iterations < 100000) return false;
-  return new Promise((resolve) => {
-    pbkdf2(password, salt, iterations, 32, "sha256", (error, derivedKey) => {
-      if (error) {
-        resolve(false);
-        return;
-      }
-      const actualBuffer = Buffer.from(derivedKey.toString("base64url"));
-      const expectedBuffer = Buffer.from(expectedHash);
-      resolve(
-        actualBuffer.length === expectedBuffer.length &&
-          timingSafeEqual(actualBuffer, expectedBuffer),
-      );
-    });
-  });
-};
-
 const clientIp = (request, config) => {
   const source = config.auth.trustProxyHeaders
     ? request.headers["x-forwarded-for"]
@@ -408,30 +392,6 @@ const readRequestBody = (request) =>
     request.on("error", reject);
   });
 
-const readJsonRequestBody = (request, maxBytes) =>
-  new Promise((resolve, reject) => {
-    let body = "";
-    request.on("data", (chunk) => {
-      body += chunk;
-      if (body.length > maxBytes) {
-        request.destroy();
-        reject(new SyncValidationError("请求体过大"));
-      }
-    });
-    request.on("end", () => {
-      if (!body.trim()) {
-        resolve({});
-        return;
-      }
-      try {
-        resolve(JSON.parse(body));
-      } catch {
-        reject(new SyncValidationError("请求体不是有效 JSON"));
-      }
-    });
-    request.on("error", reject);
-  });
-
 const loginPage = (error = "") =>
   html(`<main>
   <h1>Bike</h1>
@@ -464,153 +424,18 @@ const isApiAuthenticated = async (request, config) => {
   return false;
 };
 
-const handleSyncError = (response, error) => {
-  if (error instanceof SyncConflictError) {
-    sendJson(response, 409, {
-      error: "revision_conflict",
-      message: error.message,
-      currentRevision: error.currentRevision,
-    });
-    return;
-  }
-  if (error instanceof SyncValidationError) {
-    sendJson(response, 400, {
-      error: "invalid_request",
-      message: error.message,
-    });
-    return;
-  }
-  if (error instanceof SyncNotFoundError) {
-    sendJson(response, 404, {
-      error: "not_found",
-      message: error.message,
-    });
-    return;
-  }
-  throw error;
-};
+const runtimeConfigMeta = (config) =>
+  `<meta name="bike-default-sync-server-url" content="${escapeHtml(config.web.defaultSyncServerUrl)}" />`;
 
-const handleSyncApi = async (request, response, config, syncStore) => {
-  const url = new URL(request.url, "http://localhost");
-  const pathname = decodeURIComponent(url.pathname);
+const prepareIndexHtml = (html, config) =>
+  html
+    .replace(
+      /<meta name="bike-default-sync-server-url" content="[^"]*"\s*\/?>/,
+      runtimeConfigMeta(config),
+    )
+    .replace(/\s+crossorigin(?:=(?:"[^"]*"|'[^']*'|[^\s>]+))?/g, "");
 
-  if (request.method === "GET" && pathname === "/api/sync/manifest") {
-    sendJson(response, 200, syncStore.getManifest());
-    return;
-  }
-
-  if (pathname === "/api/sync/manifest") {
-    if (request.method !== "PATCH") {
-      methodNotAllowed(response, "GET, PATCH");
-      return;
-    }
-    try {
-      const body = await readJsonRequestBody(request, config.sync.maxBodyBytes);
-      sendJson(response, 200, syncStore.patchManifest({
-        expectedRevision: body.expectedRevision,
-        activeDocumentId: body.activeDocumentId,
-        documentOrder: body.documentOrder,
-      }));
-    } catch (error) {
-      handleSyncError(response, error);
-    }
-    return;
-  }
-
-  if (request.method === "GET" && pathname === "/api/documents") {
-    sendJson(response, 200, { documents: syncStore.getManifest().documents });
-    return;
-  }
-
-  const operationsMatch = pathname.match(/^\/api\/documents\/([^/]+)\/operations$/);
-  if (operationsMatch) {
-    const id = operationsMatch[1];
-    try {
-      if (request.method === "GET") {
-        sendJson(response, 200, syncStore.getDocumentOperations({
-          id,
-          after: url.searchParams.get("after"),
-        }));
-        return;
-      }
-      if (request.method === "POST") {
-        const body = await readJsonRequestBody(request, config.sync.maxBodyBytes);
-        sendJson(response, 200, syncStore.appendDocumentOperations({
-          id,
-          baseRevision: body.baseRevision,
-          actorId: body.actorId,
-          operations: body.operations,
-        }));
-        return;
-      }
-    } catch (error) {
-      handleSyncError(response, error);
-      return;
-    }
-    methodNotAllowed(response, "GET, POST");
-    return;
-  }
-
-  const documentMatch = pathname.match(/^\/api\/documents\/([^/]+)$/);
-  if (!documentMatch) {
-    sendJson(response, 404, { error: "not_found", message: "API route not found" });
-    return;
-  }
-
-  const id = documentMatch[1];
-  try {
-    if (request.method === "GET") {
-      const result = syncStore.getDocument(id);
-      if (!result) {
-        sendJson(response, 404, { error: "not_found", message: "Document not found" });
-        return;
-      }
-      if (result.deletedAt) {
-        sendJson(response, 410, {
-          error: "document_deleted",
-          revision: result.revision,
-          deletedAt: result.deletedAt,
-        });
-        return;
-      }
-      sendJson(response, 200, {
-        revision: result.revision,
-        document: result.document,
-      });
-      return;
-    }
-
-    if (request.method === "PUT") {
-      const body = await readJsonRequestBody(request, config.sync.maxBodyBytes);
-      const result = syncStore.putDocument({
-        id,
-        expectedRevision: body.expectedRevision,
-        document: body.document,
-      });
-      sendJson(response, 200, {
-        revision: result.revision,
-        document: result.document,
-      });
-      return;
-    }
-
-    if (request.method === "DELETE") {
-      const body = await readJsonRequestBody(request, config.sync.maxBodyBytes);
-      sendJson(response, 200, syncStore.deleteDocument({
-        id,
-        expectedRevision: body.expectedRevision,
-      }));
-      return;
-    }
-  } catch (error) {
-    handleSyncError(response, error);
-    return;
-  }
-
-  methodNotAllowed(response, "GET, PUT, DELETE");
-};
-
-const serveStatic = async (request, response) => {
+const serveStatic = async (request, response, config) => {
   const url = new URL(request.url, "http://localhost");
   const rawPathname = decodeURIComponent(url.pathname);
   const pathname = rawPathname === "/" ? "/index.html" : rawPathname;
@@ -630,6 +455,21 @@ const serveStatic = async (request, response) => {
   }
 
   const extension = path.extname(target).toLowerCase();
+  if (extension === ".html") {
+    const body = prepareIndexHtml(await readFile(target, "utf8"), config);
+    response.writeHead(200, {
+      ...securityHeaders,
+      "Content-Type": contentTypes[extension],
+      "Cache-Control": "no-store",
+    });
+    if (request.method === "HEAD") {
+      response.end();
+      return;
+    }
+    response.end(body);
+    return;
+  }
+
   response.writeHead(200, {
     ...securityHeaders,
     "Content-Type": contentTypes[extension] || "application/octet-stream",
@@ -763,7 +603,7 @@ const handleRequest = async (request, response, config, syncStore) => {
     return;
   }
 
-  await serveStatic(request, response);
+  await serveStatic(request, response, config);
 };
 
 const config = await readConfig();

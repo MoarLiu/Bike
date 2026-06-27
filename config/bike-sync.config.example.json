@@ -1,0 +1,17 @@
+{
+  "host": "127.0.0.1",
+  "port": 4174,
+  "owner": {
+    "username": "me"
+  },
+  "databasePath": "data/bike-sync.sqlite",
+  "deviceTokenHashes": [],
+  "maxBodyBytes": 10485760,
+  "cors": {
+    "enabled": true,
+    "allowedOrigins": [
+      "http://127.0.0.1:4173",
+      "http://localhost:4173"
+    ]
+  }
+}

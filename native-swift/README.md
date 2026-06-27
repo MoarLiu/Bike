@@ -10,7 +10,7 @@
 - Compatibility format: current `Workspace version: 1` JSON
 - Markdown storage path: `~/Library/Mobile Documents/com~apple~CloudDocs/Bike/`
 - JSON backup path: `~/Library/Mobile Documents/com~apple~CloudDocs/Bike/.backups/`
-- Web Sync: manual document-level sync through a deployed Bike Web service
+- Web Sync: manual document-level sync through a deployed Bike Sync Server
 
 ## 1.4.x parity
 
@@ -33,7 +33,7 @@ This workspace currently uses SwiftPM. `scripts/build_and_run.sh` builds a nativ
 
 ## Web Sync
 
-After deploying Bike Web with `sync.enabled: true`, open Web Sync from the sidebar gear, Settings, or the Bike menu. Enter the deployed Web URL and the device sync key configured in `sync.deviceTokenHashes`.
+After deploying Bike Sync Server, open Web Sync from the sidebar gear, Settings, or the Bike menu. Enter the deployed sync service URL and the device sync key configured in `config/bike-sync.config.json`.
 
 - `保存并同步` runs document-level bidirectional sync.
 - `上传` initializes or replaces remote documents from this Mac, guarded by expected revisions.
@@ -55,7 +55,7 @@ Useful variants:
 ```bash
 ./scripts/build_and_run.sh --verify
 ./scripts/build_and_run.sh --logs
-VERSION=1.4.1 ./scripts/package_dmg.sh
+VERSION=1.4.2 ./scripts/package_dmg.sh
 CODE_SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" ./scripts/package_dmg.sh
 ```
 

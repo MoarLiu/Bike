@@ -52,7 +52,7 @@ This repository currently contains a first usable vertical slice:
   configuration, timeout, auth, rate-limit, and service-unavailable cases.
 - Web Sync settings are available from the library toolbar/menu. The app can
   sync, upload, pull, and run configurable background auto sync against a
-  deployed Bike Web sync service. The device sync key is stored plainly in
+  deployed Bike Sync Server. The device sync key is stored plainly in
   SharedPreferences, not Android Keystore.
 
 ## Build

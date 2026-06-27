@@ -49,6 +49,11 @@ const LEGACY_TOKEN_KEY = "bike-sync-token";
 const DEFAULT_AUTO_SYNC_INTERVAL_SECONDS = 60;
 const MIN_AUTO_SYNC_INTERVAL_SECONDS = 15;
 
+const defaultSyncServerUrl = () =>
+  document
+    .querySelector<HTMLMetaElement>('meta[name="bike-default-sync-server-url"]')
+    ?.content.trim() || window.location.origin;
+
 export class SyncApiError extends Error {
   status: number;
   payload: unknown;
@@ -66,14 +71,14 @@ export class SyncApiError extends Error {
 }
 
 export const defaultSyncConfig = (): SyncConfig => ({
-  serverUrl: window.location.origin,
+  serverUrl: defaultSyncServerUrl(),
   token: "",
   autoSync: false,
   autoSyncIntervalSeconds: DEFAULT_AUTO_SYNC_INTERVAL_SECONDS,
 });
 
 export const normalizeSyncServerUrl = (value: string) => {
-  const trimmed = value.trim() || window.location.origin;
+  const trimmed = value.trim() || defaultSyncServerUrl();
   return trimmed.replace(/\/+$/, "");
 };
 
@@ -94,7 +99,7 @@ export const loadSyncConfig = (): SyncConfig => {
     const parsed = JSON.parse(raw) as Partial<SyncConfig>;
     const token = typeof parsed.token === "string" ? parsed.token : legacyToken;
     return {
-      serverUrl: normalizeSyncServerUrl(parsed.serverUrl || window.location.origin),
+      serverUrl: normalizeSyncServerUrl(parsed.serverUrl || defaultSyncServerUrl()),
       token: token.trim(),
       autoSync: parsed.autoSync === true,
       autoSyncIntervalSeconds: normalizeAutoSyncInterval(parsed.autoSyncIntervalSeconds),
@@ -164,6 +169,51 @@ export const saveSyncState = (state: SyncState) => {
 const apiUrl = (config: SyncConfig, pathname: string) =>
   `${normalizeSyncServerUrl(config.serverUrl)}${pathname}`;
 
+const isLoopbackHost = (host: string) =>
+  host === "localhost" || host === "127.0.0.1" || host === "::1";
+
+const syncFetchFailurePayload = (config: SyncConfig, error: unknown) => {
+  const serverUrl = normalizeSyncServerUrl(config.serverUrl);
+  const fallbackMessage =
+    error instanceof Error && error.message
+      ? error.message
+      : "Failed to fetch";
+
+  try {
+    const url = new URL(serverUrl);
+    const currentHost = window.location.hostname;
+    const configuredHostIsLoopback = isLoopbackHost(url.hostname);
+    const pageHostIsLoopback = isLoopbackHost(currentHost);
+    const defaultServerUrl = defaultSyncServerUrl();
+
+    if (configuredHostIsLoopback && !pageHostIsLoopback) {
+      return {
+        message:
+          `同步服务地址 ${serverUrl} 指向当前浏览器所在设备，不是服务器。` +
+          `请改成 ${defaultServerUrl} 或其他可从浏览器访问的同步服务地址。`,
+      };
+    }
+
+    if (window.location.protocol === "https:" && url.protocol === "http:") {
+      return {
+        message:
+          `当前页面是 HTTPS，浏览器会拦截 HTTP 同步服务 ${serverUrl}。` +
+          "请把同步服务也放到 HTTPS，或使用同源反向代理。",
+      };
+    }
+  } catch {
+    return {
+      message: `同步服务地址无效：${serverUrl}`,
+    };
+  }
+
+  return {
+    message:
+      `无法连接同步服务 ${serverUrl}。请检查地址、端口、防火墙和 CORS。` +
+      `浏览器原始错误：${fallbackMessage}`,
+  };
+};
+
 const bridgePayload = (result: {
   status?: number;
   data?: unknown;
@@ -196,12 +246,17 @@ const apiRequest = async <T>(
   const headers: Record<string, string> = {};
   if (config.token.trim()) headers.Authorization = `Bearer ${config.token.trim()}`;
   if (options.body !== undefined) headers["Content-Type"] = "application/json";
-  const response = await fetch(apiUrl(config, pathname), {
-    method: options.method || "GET",
-    headers,
-    credentials: "include",
-    body: options.body === undefined ? undefined : JSON.stringify(options.body),
-  });
+  let response: Response;
+  try {
+    response = await fetch(apiUrl(config, pathname), {
+      method: options.method || "GET",
+      headers,
+      credentials: config.token.trim() ? "same-origin" : "include",
+      body: options.body === undefined ? undefined : JSON.stringify(options.body),
+    });
+  } catch (error) {
+    throw new SyncApiError(0, syncFetchFailurePayload(config, error));
+  }
   const text = await response.text();
   let payload: unknown = null;
   if (text) {

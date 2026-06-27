@@ -9,8 +9,11 @@
     "secureCookies": false,
     "trustProxyHeaders": false
   },
+  "web": {
+    "defaultSyncServerUrl": ""
+  },
   "sync": {
-    "enabled": true,
+    "enabled": false,
     "databasePath": "data/bike-sync.sqlite",
     "deviceTokenHashes": [],
     "maxBodyBytes": 10485760
