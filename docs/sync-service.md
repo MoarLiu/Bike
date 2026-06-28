@@ -28,12 +28,26 @@ Bike Sync Server 是可单独部署的个人同步服务。同步仍保持本地
 推荐使用引导脚本：
 
 ```bash
+curl -fsSL https://raw.githubusercontent.com/MoarLiu/Bike/main/scripts/install-sync-server.sh | bash
+```
+
+安装指定版本或目录：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/MoarLiu/Bike/main/scripts/install-sync-server.sh \
+  | BIKE_VERSION=v1.4.2 BIKE_INSTALL_DIR=/opt/bike-sync-server bash
+```
+
+已经 clone 仓库时，也可以在项目目录里运行：
+
+```bash
 ./scripts/setup-sync-server.sh install
 ```
 
-脚本会逐步配置同步端口、用户名、SQLite 路径、CORS 来源和同步密钥；在 systemd 环境下会安装并启动 `bike-sync-server.service`。后续管理命令：
+curl 安装器会下载 GitHub Release 里的 Web/Sync Server 部署包，校验 SHA-256，解压到 `/opt/bike-sync-server`，然后进入引导安装。脚本会逐步配置同步端口、用户名、SQLite 路径、CORS 来源和同步密钥；在 systemd 环境下会安装并启动 `bike-sync-server.service`。后续管理命令：
 
 ```bash
+cd /opt/bike-sync-server
 ./scripts/setup-sync-server.sh status
 ./scripts/setup-sync-server.sh logs
 ./scripts/setup-sync-server.sh restart

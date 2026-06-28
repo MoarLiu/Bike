@@ -93,6 +93,10 @@ run_node_setup() {
 }
 
 default_service_user() {
+  if [[ -n "${BIKE_SYNC_SERVICE_USER:-}" ]]; then
+    printf '%s' "${BIKE_SYNC_SERVICE_USER}"
+    return
+  fi
   if id bikeweb >/dev/null 2>&1; then
     printf 'bikeweb'
   else
@@ -302,6 +306,7 @@ usage() {
 环境变量：
   BIKE_SYNC_CONFIG=/path/to/bike-sync.config.json
   BIKE_SYNC_SERVICE_NAME=bike-sync-server
+  BIKE_SYNC_SERVICE_USER=bike-sync
   NODE_BIN=/path/to/node
 EOF
 }

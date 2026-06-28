@@ -60,12 +60,19 @@ npm run start:web
 同步服务已经拆成独立入口。Web-only 部署不会启动同步 API；Web 前端仍然保留同步设置，可以填写任意兼容的同步服务地址。只部署同步服务时运行：
 
 ```bash
+curl -fsSL https://raw.githubusercontent.com/MoarLiu/Bike/main/scripts/install-sync-server.sh | bash
+```
+
+已经 clone 仓库时，也可以在项目目录里运行：
+
+```bash
 ./scripts/setup-sync-server.sh install
 ```
 
-引导脚本会配置端口、用户名、SQLite 路径、CORS 来源、同步密钥；在 systemd 环境下会安装并启动 `bike-sync-server.service`。后续用同一个脚本管理：
+curl 安装器会下载 GitHub Release 里的 Web/Sync Server 部署包，校验 SHA-256，解压到 `/opt/bike-sync-server`，然后进入引导安装。引导脚本会配置端口、用户名、SQLite 路径、CORS 来源、同步密钥；在 systemd 环境下会安装并启动 `bike-sync-server.service`。后续用同一个脚本管理：
 
 ```bash
+cd /opt/bike-sync-server
 ./scripts/setup-sync-server.sh status
 ./scripts/setup-sync-server.sh logs
 ./scripts/setup-sync-server.sh restart
