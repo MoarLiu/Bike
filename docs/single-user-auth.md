@@ -69,7 +69,7 @@ curl -fsSL https://raw.githubusercontent.com/MoarLiu/Bike/main/scripts/install-s
 ./scripts/setup-sync-server.sh install
 ```
 
-curl 安装器会下载 GitHub Release 里的 Web/Sync Server 部署包，校验 SHA-256，解压到 `/opt/bike-sync-server`，然后进入引导安装。引导脚本会配置端口、用户名、SQLite 路径、CORS 来源、同步密钥；在 systemd 环境下会安装并启动 `bike-sync-server.service`。后续用同一个脚本管理：
+curl 安装器会下载 GitHub Release 里的 Web/Sync Server 部署包，校验 SHA-256，解压到 `/opt/bike-sync-server`，然后进入引导安装。如果系统 Node.js 缺失或低于 `22.5.0`，安装器会自动下载官方 Node.js 22 到 `/opt/bike-sync-server/.node/` 并让同步服务使用它，不覆盖系统自带 Node。引导脚本会配置端口、用户名、SQLite 路径、CORS 来源、同步密钥；在 systemd 环境下会安装并启动 `bike-sync-server.service`。后续用同一个脚本管理：
 
 ```bash
 cd /opt/bike-sync-server

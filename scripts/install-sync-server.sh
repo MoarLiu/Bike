@@ -11,6 +11,10 @@ INSTALL_DIR="${BIKE_INSTALL_DIR:-/opt/bike-sync-server}"
 SERVICE_NAME="${BIKE_SYNC_SERVICE_NAME:-bike-sync-server}"
 SERVICE_USER="${BIKE_SYNC_SERVICE_USER:-bike-sync}"
 RUN_INSTALL="${BIKE_RUN_INSTALL:-1}"
+NODE_BIN="${NODE_BIN:-$(command -v node || true)}"
+NODE_MAJOR="${BIKE_NODE_MAJOR:-22}"
+MIN_NODE_VERSION="22.5.0"
+NODE_DIST_BASE="${BIKE_NODE_DIST_BASE:-https://nodejs.org/dist}"
 
 say() {
   printf '%s\n' "$*"
@@ -32,6 +36,7 @@ usage() {
   BIKE_SYNC_SERVICE_NAME=bike-sync-server
   BIKE_SYNC_SERVICE_USER=bike-sync
   BIKE_RAW_BASE=https://raw.githubusercontent.com/MoarLiu/Bike/main
+  BIKE_NODE_VERSION=v22.x.y           指定内置 Node.js 版本；默认自动选择 Node 22 最新版
   BIKE_RUN_INSTALL=0                  只下载解压，不进入交互安装
 EOF
 }
@@ -61,19 +66,85 @@ run_or_sudo() {
   "$@" 2>/dev/null || sudo_cmd "$@"
 }
 
-need_node() {
-  local node_bin
-  node_bin="$(command -v node || true)"
-  if [[ -z "${node_bin}" ]]; then
-    die "未找到 Node.js。Bike Sync Server 需要 Node.js 22.5.0 或更新版本。"
-  fi
+node_version_ok() {
+  local node_bin="$1"
+  [[ -n "${node_bin}" && -x "${node_bin}" ]] || return 1
   "${node_bin}" -e '
     const [major, minor] = process.versions.node.split(".").map(Number);
     if (major < 22 || (major === 22 && minor < 5)) {
-      console.error(`当前 Node.js 是 ${process.versions.node}，需要 22.5.0 或更新版本。`);
       process.exit(1);
     }
-  ' || exit 1
+  ' >/dev/null 2>&1
+}
+
+node_version_text() {
+  local node_bin="$1"
+  if [[ -n "${node_bin}" && -x "${node_bin}" ]]; then
+    "${node_bin}" -v 2>/dev/null || true
+  fi
+}
+
+detect_node_platform() {
+  case "$(uname -s)" in
+    Linux) printf 'linux' ;;
+    Darwin) printf 'darwin' ;;
+    *) die "不支持的系统：$(uname -s)。curl 安装器目前支持 Linux/macOS。" ;;
+  esac
+}
+
+detect_node_arch() {
+  case "$(uname -m)" in
+    x86_64|amd64) printf 'x64' ;;
+    aarch64|arm64) printf 'arm64' ;;
+    *) die "不支持的 CPU 架构：$(uname -m)。curl 安装器目前支持 x64/arm64。" ;;
+  esac
+}
+
+latest_node_version() {
+  curl -fsSL "${NODE_DIST_BASE}/index.json" \
+    | grep -Eo "\"version\":\"v${NODE_MAJOR}\\.[^\"]+\"" \
+    | head -n 1 \
+    | sed 's/"version":"//;s/"//'
+}
+
+install_node_runtime() {
+  local platform arch node_version archive_name node_parent node_dir archive_path node_url
+  platform="$(detect_node_platform)"
+  arch="$(detect_node_arch)"
+  node_version="${BIKE_NODE_VERSION:-$(latest_node_version)}"
+  [[ -n "${node_version}" ]] || die "无法获取 Node.js ${NODE_MAJOR}.x 版本信息。"
+  [[ "${node_version}" == v* ]] || node_version="v${node_version}"
+
+  archive_name="node-${node_version}-${platform}-${arch}.tar.xz"
+  node_parent="${INSTALL_DIR}/.node"
+  node_dir="${node_parent}/node-${node_version}-${platform}-${arch}"
+  archive_path="${TMP_DIR}/${archive_name}"
+  node_url="${NODE_DIST_BASE}/${node_version}/${archive_name}"
+
+  if [[ ! -x "${node_dir}/bin/node" ]]; then
+    say "下载内置 Node.js ${node_version}：${node_url}"
+    curl -fL "${node_url}" -o "${archive_path}"
+    run_or_sudo mkdir -p "${node_parent}"
+    run_or_sudo tar -xJf "${archive_path}" -C "${node_parent}"
+  fi
+
+  NODE_BIN="${node_dir}/bin/node"
+  node_version_ok "${NODE_BIN}" || die "内置 Node.js 不满足 ${MIN_NODE_VERSION}+：${NODE_BIN}"
+  say "使用内置 Node.js：${NODE_BIN} ($("${NODE_BIN}" -v))"
+}
+
+ensure_node() {
+  if node_version_ok "${NODE_BIN}"; then
+    say "使用 Node.js：${NODE_BIN} ($(node_version_text "${NODE_BIN}"))"
+    return
+  fi
+
+  if [[ -n "${NODE_BIN}" ]]; then
+    say "当前 Node.js 是 $(node_version_text "${NODE_BIN}")，需要 ${MIN_NODE_VERSION} 或更新版本；将自动安装内置 Node.js ${NODE_MAJOR}.x。"
+  else
+    say "未找到 Node.js；将自动安装内置 Node.js ${NODE_MAJOR}.x。"
+  fi
+  install_node_runtime
 }
 
 systemd_available() {
@@ -121,7 +192,6 @@ ensure_service_user() {
 
 need_command curl
 need_command tar
-need_node
 
 TAG="${VERSION}"
 if [[ "${TAG}" == "latest" ]]; then
@@ -163,6 +233,7 @@ if curl -fsSL "${RAW_BASE}/scripts/setup-sync-server.sh" -o "${TMP_DIR}/setup-sy
   run_or_sudo chmod +x "${INSTALL_DIR}/scripts/setup-sync-server.sh"
 fi
 
+ensure_node
 ensure_service_user
 
 say "已解压 Bike Sync Server ${TAG}。"
@@ -171,7 +242,7 @@ if [[ "${RUN_INSTALL}" == "0" ]]; then
 
 跳过交互安装。后续可执行：
   cd ${INSTALL_DIR}
-  BIKE_SYNC_SERVICE_USER=${SERVICE_USER} ./scripts/setup-sync-server.sh install
+  NODE_BIN=${NODE_BIN} BIKE_SYNC_SERVICE_USER=${SERVICE_USER} ./scripts/setup-sync-server.sh install
 EOF
   exit 0
 fi
@@ -185,4 +256,5 @@ sudo_cmd env \
   BIKE_SYNC_CONFIG="${INSTALL_DIR}/config/bike-sync.config.json" \
   BIKE_SYNC_SERVICE_NAME="${SERVICE_NAME}" \
   BIKE_SYNC_SERVICE_USER="${SERVICE_USER}" \
+  NODE_BIN="${NODE_BIN}" \
   bash "${INSTALL_DIR}/scripts/setup-sync-server.sh" install < /dev/tty
