@@ -28,20 +28,20 @@ Bike Sync Server 是可单独部署的个人同步服务。同步仍保持本地
 推荐使用 curl 打开管理菜单：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/MoarLiu/Bike/main/scripts/install-sync-server.sh | bash
+curl -fsSL https://raw.githubusercontent.com/MoarLiu/Bike/main/scripts/install.sh | bash
 ```
 
-直接安装最新发布版：
+直接安装同步服务：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/MoarLiu/Bike/main/scripts/install-sync-server.sh | bash -s -- install
+curl -fsSL https://raw.githubusercontent.com/MoarLiu/Bike/main/scripts/install.sh | bash -s -- install-sync
 ```
 
 安装指定版本或目录：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/MoarLiu/Bike/main/scripts/install-sync-server.sh \
-  | BIKE_VERSION=v1.4.2 BIKE_INSTALL_DIR=/opt/bike-sync-server bash -s -- install
+curl -fsSL https://raw.githubusercontent.com/MoarLiu/Bike/main/scripts/install.sh \
+  | BIKE_VERSION=v1.4.2 BIKE_INSTALL_DIR=/opt/bike-sync-server bash -s -- install-sync
 ```
 
 已经 clone 仓库时，也可以在项目目录里运行：
@@ -50,15 +50,15 @@ curl -fsSL https://raw.githubusercontent.com/MoarLiu/Bike/main/scripts/install-s
 ./scripts/setup-sync-server.sh install
 ```
 
-curl 管理脚本会下载 GitHub Release 里的 Web/Sync Server 部署包，校验 SHA-256，解压到 `/opt/bike-sync-server`，然后进入引导安装。如果系统 Node.js 缺失或低于 `22.5.0`，安装器会自动下载官方 Node.js 22 到 `/opt/bike-sync-server/.node/` 并让同步服务使用它，不覆盖系统自带 Node。脚本会逐步配置同步端口、用户名、SQLite 路径、CORS 来源和同步密钥；在 systemd 环境下会安装并启动 `bike-sync-server.service`。后续管理命令：
+curl 管理脚本会下载 GitHub Release 里的 Web/Sync Server 部署包，校验 SHA-256，解压到 `/opt/bike`，然后进入引导安装。如果系统 Node.js 缺失或低于 `22.5.0`，安装器会自动下载官方 Node.js 22 到 `/opt/bike/.node/` 并让服务使用它，不覆盖系统自带 Node。脚本会逐步配置同步端口、用户名、SQLite 路径、CORS 来源和同步密钥；在 systemd 环境下会安装并启动 `bike-sync-server.service`。后续管理命令：
 
 ```bash
-cd /opt/bike-sync-server
-./bike-sync.sh
-./bike-sync.sh status
-./bike-sync.sh logs
-./bike-sync.sh restart
-./bike-sync.sh stop
+cd /opt/bike
+./bike.sh
+./bike.sh status
+./bike.sh logs
+./bike.sh restart
+./bike.sh stop
 ```
 
 也可以打开交互菜单：
