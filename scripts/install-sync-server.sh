@@ -322,6 +322,7 @@ download_release_package() {
 }
 
 install_or_update_files() {
+  local create_service_user="${1:-1}"
   need_command curl
   need_command tar
 
@@ -346,7 +347,9 @@ install_or_update_files() {
   fi
   refresh_manager_script "${MANAGER_PATH}"
   ensure_node
-  ensure_service_user
+  if [[ "${create_service_user}" == "1" ]]; then
+    ensure_service_user
+  fi
   success "Bike Sync Server ${tag} 文件已准备完成。"
 }
 
@@ -454,7 +457,7 @@ trap 'rm -rf "${TMP_DIR}"' EXIT
 
 case "${1:-menu}" in
   install) install_action ;;
-  prepare|install-files) install_or_update_files ;;
+  prepare|install-files) install_or_update_files 0 ;;
   update) update_action ;;
   configure) run_setup configure ;;
   add-key) run_setup add-key ;;
