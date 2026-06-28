@@ -57,8 +57,8 @@ resolve_database_dir() {
   "${NODE_BIN}" -e '
     const fs = require("fs");
     const path = require("path");
-    const root = process.argv[2];
-    const configPath = process.argv[3];
+    const root = process.argv[1];
+    const configPath = process.argv[2];
     const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
     const databasePath = config.databasePath || "data/bike-sync.sqlite";
     console.log(path.dirname(path.resolve(root, databasePath)));
@@ -69,8 +69,8 @@ resolve_database_path() {
   "${NODE_BIN}" -e '
     const fs = require("fs");
     const path = require("path");
-    const root = process.argv[2];
-    const configPath = process.argv[3];
+    const root = process.argv[1];
+    const configPath = process.argv[2];
     const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
     const databasePath = config.databasePath || "data/bike-sync.sqlite";
     console.log(path.resolve(root, databasePath));
