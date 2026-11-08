@@ -116,7 +116,7 @@ export const createSyncStore = async (databasePath) => {
       ({ DatabaseSync } = await import("node:sqlite"));
     } catch (error) {
       throw new Error(
-        `Bike 同步服务需要 Node.js 22.5.0 或更新版本的 node:sqlite 支持：${error instanceof Error ? error.message : String(error)}`,
+        `Bike 同步服务需要 Node.js 22.13.0 或更新版本的 node:sqlite 支持：${error instanceof Error ? error.message : String(error)}`,
       );
     }
   }

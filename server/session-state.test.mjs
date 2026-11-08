@@ -134,4 +134,51 @@ test("the store serializes writes so the latest value wins", async (t) => {
   const store = createSessionStateStore(path.join(directory, "auth-session.json"));
   await Promise.all([store.save(1), store.save(2), store.save(3)]);
   assert.equal(await store.load(), 3);
+  await store.save(2);
+  assert.equal(await loadSessionRevokedBefore(store.path), 3);
+});
+
+test("moving the default state path preserves old revocations and writes new ones in the new directory", async (t) => {
+  const directory = await tempDirectory(t);
+  const legacyStatePath = path.join(directory, "data", "auth-session.json");
+  const statePath = path.join(directory, "systemd-state", "auth-session.json");
+  await saveSessionRevokedBefore(legacyStatePath, 100);
+  const store = createSessionStateStore(statePath, { legacyStatePath });
+  assert.equal(await store.load(), 100);
+  assert.equal(await loadSessionRevokedBefore(statePath), 100);
+  // Cleaning up the old location after upgrade must not revive old sessions.
+  await fs.rm(legacyStatePath);
+  assert.equal(await store.load(), 100);
+  await saveSessionRevokedBefore(legacyStatePath, 100);
+  await store.save(200);
+  assert.equal(await store.load(), 200);
+  assert.equal(await loadSessionRevokedBefore(legacyStatePath), 100);
+  assert.equal(await loadSessionRevokedBefore(statePath), 200);
+});
+
+test("a broken legacy state file fails safe after moving into StateDirectory", async (t) => {
+  const directory = await tempDirectory(t);
+  const legacyStatePath = path.join(directory, "old-state.json");
+  await fs.writeFile(legacyStatePath, "invalid JSON");
+  const logger = recordingLogger();
+  const store = createSessionStateStore(path.join(directory, "new-state.json"), {
+    legacyStatePath, now: () => 500, logger,
+  });
+  assert.equal(await store.load(), 500);
+  assert.match(logger.errors[0], /会话状态文件已损坏/);
+});
+
+test("a migration write failure retains old revocations in memory and reports the problem", async (t) => {
+  const directory = await tempDirectory(t);
+  const legacyStatePath = path.join(directory, "old-state.json");
+  const blocker = path.join(directory, "blocker");
+  await saveSessionRevokedBefore(legacyStatePath, 100);
+  await fs.writeFile(blocker, "");
+  const logger = recordingLogger();
+  const store = createSessionStateStore(path.join(blocker, "state.json"), {
+    legacyStatePath, now: () => 10, logger,
+  });
+  assert.equal(await store.load(), 100);
+  assert.ok(logger.errors.some((message) => message.includes("无法迁移会话状态")));
+  assert.equal(await loadSessionRevokedBefore(legacyStatePath), 100);
 });

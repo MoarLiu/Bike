@@ -11,6 +11,7 @@ const FALLBACK_KEY = "bike-workspace";
 const FALLBACK_META_KEY = "bike-workspace-meta";
 const LEGACY_FALLBACK_KEY = "local-outline-workspace";
 const LEGACY_FALLBACK_META_KEY = "local-outline-workspace-meta";
+const FALLBACK_SNAPSHOT_PREFIX = "bike-workspace-snapshot:";
 const CHANNEL_NAME = "bike-workspace";
 
 export type WorkspaceLoadResult =
@@ -22,19 +23,27 @@ export type WorkspaceSaveResult =
   | { ok: true; target: "indexeddb" | "localstorage" }
   | { ok: false; error: Error; conflict?: boolean };
 
-type StoredMeta = { revision: number; savedAt: number; writer: string | null };
+export type WorkspaceRecoverySnapshot = {
+  id: string;
+  workspace: Workspace;
+  savedAt: number;
+  baseRevision: number | null;
+};
+
+type StoredMeta = { revision: number; savedAt: number; writer: string | null; saveId: string | null };
 
 type DatabaseRead =
   | { status: "loaded"; workspace: Workspace; meta: StoredMeta }
   | { status: "empty"; meta: StoredMeta }
   | { status: "error"; error: Error };
 
-type FallbackSnapshot = {
+type FallbackSnapshot = WorkspaceRecoverySnapshot & {
   status: "loaded";
-  workspace: Workspace;
-  savedAt: number;
-  baseRevision: number | null;
   writer: string | null;
+  raw: string;
+  metaKey?: string;
+  rawMeta?: string | null;
+  pendingSaveIds?: string[];
 };
 
 type FallbackRead = FallbackSnapshot | { status: "empty" } | { status: "error"; error: Error };
@@ -46,6 +55,7 @@ type ReadResult =
       source: "indexeddb" | "localstorage";
       revision: number | null;
       persisted: boolean;
+      snapshot?: FallbackSnapshot;
     }
   | { status: "empty"; revision: number }
   | { status: "error"; error: Error; source: "indexeddb" | "localstorage" };
@@ -70,10 +80,15 @@ const pageId = uuid();
 let knownRevision: number | null = null;
 // The workspace object currently stored at knownRevision, if this page has it.
 let persistedWorkspace: Workspace | null = null;
+let ownFallback: FallbackSnapshot | null = null;
+let saveSequence = 0;
+let ownFallbackSequence = 0;
+let adoptedFallback: FallbackSnapshot | null = null;
 // Bumped whenever the page adopts a stored copy. A save requested before that
 // belongs to the replaced copy and must not be written.
 let adoptEpoch = 0;
 let writeQueue: Promise<unknown> = Promise.resolve();
+const pendingSaveIds = new Set<string>();
 const conflictListeners = new Set<() => void>();
 let channel: BroadcastChannel | null | undefined;
 
@@ -94,6 +109,15 @@ const isRevision = (value: unknown): value is number =>
 const asRecord = (value: unknown): Record<string, unknown> =>
   value && typeof value === "object" ? value as Record<string, unknown> : {};
 
+const workspaceSignature = (workspace: Workspace) =>
+  JSON.stringify(migrateWorkspace(workspace), (_key, value: unknown) =>
+    value && typeof value === "object" && !Array.isArray(value)
+      ? Object.fromEntries(Object.entries(value).sort(([left], [right]) => left.localeCompare(right)))
+      : value);
+
+const sameWorkspace = (left: Workspace, right: Workspace) =>
+  workspaceSignature(left) === workspaceSignature(right);
+
 const parseStoredMeta = (value: unknown): StoredMeta => {
   const meta = asRecord(value);
   return {
@@ -101,6 +125,7 @@ const parseStoredMeta = (value: unknown): StoredMeta => {
     revision: isRevision(meta.revision) ? meta.revision : 0,
     savedAt: typeof meta.savedAt === "string" ? timestamp(meta.savedAt) : 0,
     writer: typeof meta.writer === "string" ? meta.writer : null,
+    saveId: typeof meta.saveId === "string" ? meta.saveId : null,
   };
 };
 
@@ -168,30 +193,94 @@ const readFallbackWorkspace = (workspaceKey: string, metaKey: string): FallbackR
     const raw = localStorage.getItem(workspaceKey);
     if (!raw) return { status: "empty" };
     const workspace = migrateWorkspace(JSON.parse(raw));
+    const rawMeta = localStorage.getItem(metaKey);
     let meta: Record<string, unknown> = {};
     try {
-      meta = asRecord(JSON.parse(localStorage.getItem(metaKey) ?? "null"));
+      meta = asRecord(JSON.parse(rawMeta ?? "null"));
     } catch {}
     return {
       status: "loaded",
+      id: workspaceKey,
       workspace,
       savedAt: typeof meta.savedAt === "string" ? timestamp(meta.savedAt) : 0,
       baseRevision: isRevision(meta.baseRevision) ? meta.baseRevision : null,
       writer: typeof meta.writer === "string" ? meta.writer : null,
+      raw,
+      metaKey,
+      rawMeta,
     };
   } catch (error) {
     return { status: "error", error: toError(error) };
   }
 };
 
-const readBestFallbackWorkspace = (): FallbackRead => {
-  const current = readFallbackWorkspace(FALLBACK_KEY, FALLBACK_META_KEY);
-  const legacy = readFallbackWorkspace(LEGACY_FALLBACK_KEY, LEGACY_FALLBACK_META_KEY);
-  if (current.status === "loaded" && legacy.status === "loaded") {
-    return current.savedAt >= legacy.savedAt ? current : legacy;
+const readFallbackSnapshots = (): { snapshots: FallbackSnapshot[]; error?: Error } => {
+  const snapshots: FallbackSnapshot[] = [];
+  let error: Error | undefined;
+  try {
+    // Snapshot contents and metadata share one immutable key. Each page writes
+    // a new key before removing its previous one, so a failed write retains it.
+    const keys = Array.from({ length: localStorage.length }, (_, index) => localStorage.key(index));
+    for (const id of keys) {
+      if (!id?.startsWith(FALLBACK_SNAPSHOT_PREFIX)) continue;
+      const raw = localStorage.getItem(id);
+      if (!raw) continue;
+      try {
+        const envelope = asRecord(JSON.parse(raw));
+        snapshots.push({
+          status: "loaded", id, raw,
+          workspace: migrateWorkspace(envelope.workspace),
+          savedAt: typeof envelope.savedAt === "string" ? timestamp(envelope.savedAt) : 0,
+          baseRevision: isRevision(envelope.baseRevision) ? envelope.baseRevision : null,
+          writer: typeof envelope.writer === "string" ? envelope.writer : null,
+          pendingSaveIds: Array.isArray(envelope.pendingSaveIds)
+            ? envelope.pendingSaveIds.filter((id): id is string => typeof id === "string")
+            : undefined,
+        });
+      } catch (cause) {
+        error ??= toError(cause);
+      }
+    }
+    // Older copies are read for migration, never overwritten by new snapshots.
+    for (const [key, metaKey] of [
+      [FALLBACK_KEY, FALLBACK_META_KEY],
+      [LEGACY_FALLBACK_KEY, LEGACY_FALLBACK_META_KEY],
+    ]) {
+      const result = readFallbackWorkspace(key, metaKey);
+      if (result.status === "loaded") snapshots.push(result);
+      else if (result.status === "error") error ??= result.error;
+    }
+  } catch (cause) {
+    error ??= toError(cause);
   }
-  if (current.status !== "empty") return current;
-  return legacy;
+  snapshots.sort((left, right) => right.savedAt - left.savedAt);
+  return { snapshots, error };
+};
+
+export const listWorkspaceRecoverySnapshots = (current?: Workspace | null): WorkspaceRecoverySnapshot[] =>
+  readFallbackSnapshots().snapshots
+    .filter((snapshot) => !current || !sameWorkspace(snapshot.workspace, current))
+    .map(({ id, workspace, savedAt, baseRevision }) => ({ id, workspace, savedAt, baseRevision }));
+
+const removeFallbackSnapshot = (snapshot: FallbackSnapshot) => {
+  try {
+    if (localStorage.getItem(snapshot.id) !== snapshot.raw) return false;
+    if (snapshot.metaKey && localStorage.getItem(snapshot.metaKey) !== snapshot.rawMeta) return false;
+    localStorage.removeItem(snapshot.id);
+    if (snapshot.metaKey) localStorage.removeItem(snapshot.metaKey);
+    if (ownFallback?.id === snapshot.id) ownFallback = null;
+    if (adoptedFallback?.id === snapshot.id) adoptedFallback = null;
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+// Used only after the user downloads and confirms deleting this exact copy.
+export const discardWorkspaceRecoverySnapshot = (selected: WorkspaceRecoverySnapshot) => {
+  const snapshot = readFallbackSnapshots().snapshots.find((item) => item.id === selected.id);
+  return Boolean(snapshot && snapshot.savedAt === selected.savedAt &&
+    sameWorkspace(snapshot.workspace, selected.workspace) && removeFallbackSnapshot(snapshot));
 };
 
 // Whether a localStorage snapshot (written when a page closed with unsaved
@@ -205,10 +294,11 @@ const snapshotIsNewer = (
     // The snapshot records the stored revision its page was editing.
     if (snapshot.baseRevision === stored.revision) return true;
     if (snapshot.baseRevision < stored.revision) {
-      // Later revisions are the snapshot's own ancestors only if its page wrote
-      // them (a save still in flight while it closed). Otherwise another tab or
-      // window saved newer data after this snapshot's page last loaded.
-      return snapshot.writer !== null && snapshot.writer === stored.writer;
+      // Only saves already queued when this snapshot was created may be its
+      // ancestors. Newer requests, even from this page, must not be rolled back.
+      return snapshot.writer !== null && snapshot.writer === stored.writer &&
+        (snapshot.pendingSaveIds === undefined ||
+          (stored.saveId !== null && snapshot.pendingSaveIds.includes(stored.saveId)));
     }
     // The database is behind the snapshot's base: it was cleared or replaced,
     // so only timestamps can tell which copy is newer.
@@ -220,21 +310,31 @@ const snapshotIsNewer = (
     (!storedWorkspace || workspaceUpdatedAt(snapshot.workspace) >= workspaceUpdatedAt(storedWorkspace));
 };
 
-const readWorkspace = async (): Promise<ReadResult> => {
+const newerFallback = (snapshots: FallbackSnapshot[], meta: StoredMeta, workspace: Workspace) => {
+  const eligible = snapshots.filter((snapshot) => snapshotIsNewer(snapshot, meta, workspace));
+  // Several distinct pending copies need a user choice, even with the same base.
+  return new Set(eligible.map((snapshot) => workspaceSignature(snapshot.workspace))).size === 1
+    ? eligible[0]
+    : undefined;
+};
+
+const readWorkspace = async ({ includeFallback = true } = {}): Promise<ReadResult> => {
   if (!indexedDbFactory()) {
     // Without IndexedDB the localStorage snapshot is the only copy, so loading
     // it cannot put an older copy on top of a newer database.
-    const fallback = readBestFallbackWorkspace();
-    if (fallback.status === "loaded") {
+    const { snapshots, error } = includeFallback ? readFallbackSnapshots() : { snapshots: [] };
+    const fallback = snapshots[0];
+    if (fallback) {
       return {
         status: "loaded",
         workspace: fallback.workspace,
         source: "localstorage",
         revision: fallback.baseRevision,
         persisted: false,
+        snapshot: fallback,
       };
     }
-    if (fallback.status === "error") return { ...fallback, source: "localstorage" };
+    if (error) return { status: "error", error, source: "localstorage" };
     return { status: "error", source: "indexeddb", error: new Error("当前环境无法使用 IndexedDB") };
   }
 
@@ -245,15 +345,17 @@ const readWorkspace = async (): Promise<ReadResult> => {
     return { status: "error", source: "indexeddb", error: current.error };
   }
 
-  const fallback = readBestFallbackWorkspace();
+  const { snapshots, error } = includeFallback ? readFallbackSnapshots() : { snapshots: [] };
   if (current.status === "loaded") {
-    if (fallback.status === "loaded" && snapshotIsNewer(fallback, current.meta, current.workspace)) {
+    const fallback = newerFallback(snapshots, current.meta, current.workspace);
+    if (fallback) {
       return {
         status: "loaded",
         workspace: fallback.workspace,
         source: "localstorage",
         revision: current.meta.revision,
         persisted: false,
+        snapshot: fallback,
       };
     }
     return {
@@ -269,25 +371,28 @@ const readWorkspace = async (): Promise<ReadResult> => {
   const legacy = await readDatabase(LEGACY_DB_NAME);
   if (legacy.status === "loaded") {
     const legacyMeta = { ...legacy.meta, revision: current.meta.revision };
-    const useSnapshot = fallback.status === "loaded" && snapshotIsNewer(fallback, legacyMeta, legacy.workspace);
+    const fallback = newerFallback(snapshots, legacyMeta, legacy.workspace);
     return {
       status: "loaded",
-      workspace: useSnapshot ? fallback.workspace : legacy.workspace,
-      source: useSnapshot ? "localstorage" : "indexeddb",
+      workspace: fallback ? fallback.workspace : legacy.workspace,
+      source: fallback ? "localstorage" : "indexeddb",
       revision: current.meta.revision,
       persisted: false,
+      snapshot: fallback,
     };
   }
-  if (fallback.status === "loaded") {
+  const fallback = snapshots[0];
+  if (fallback) {
     return {
       status: "loaded",
       workspace: fallback.workspace,
       source: "localstorage",
       revision: current.meta.revision,
       persisted: false,
+      snapshot: fallback,
     };
   }
-  if (fallback.status === "error") return { ...fallback, source: "localstorage" };
+  if (error) return { status: "error", error, source: "localstorage" };
   if (legacy.status === "error") return { status: "error", source: "indexeddb", error: legacy.error };
   return { status: "empty", revision: current.meta.revision };
 };
@@ -300,24 +405,26 @@ const adopt = (result: ReadResult): WorkspaceLoadResult => {
   knownRevision = result.revision;
   if (result.status === "empty") {
     persistedWorkspace = null;
+    adoptedFallback = null;
     return { status: "empty" };
   }
   persistedWorkspace = result.persisted ? result.workspace : null;
+  adoptedFallback = result.snapshot ?? null;
   return { status: "loaded", workspace: result.workspace, source: result.source };
 };
 
 const settledWrites = () => writeQueue.then(() => undefined, () => undefined);
 
-export const loadWorkspace = async (): Promise<WorkspaceLoadResult> => {
+export const loadWorkspace = async (options: { includeFallback?: boolean } = {}): Promise<WorkspaceLoadResult> => {
   await settledWrites();
-  return adopt(await readWorkspace());
+  return adopt(await readWorkspace(options));
 };
 
 // Reloads the stored workspace (after another page saved) if canApply() still
 // allows it once the read finishes, i.e. the page has no unsaved edits by then.
 export const reloadWorkspaceIf = async (canApply: () => boolean): Promise<Workspace | null> => {
   await settledWrites();
-  const result = await readWorkspace();
+  const result = await readWorkspace({ includeFallback: false });
   if (result.status !== "loaded" || !canApply()) return null;
   adopt(result);
   return result.workspace;
@@ -328,13 +435,20 @@ export const reloadWorkspaceIf = async (canApply: () => boolean): Promise<Worksp
 export const isWorkspacePersisted = (workspace: Workspace | null | undefined) =>
   Boolean(workspace) && workspace === persistedWorkspace;
 
-const clearFallback = () => {
-  try {
-    localStorage.removeItem(FALLBACK_KEY);
-    localStorage.removeItem(FALLBACK_META_KEY);
-    localStorage.removeItem(LEGACY_FALLBACK_KEY);
-    localStorage.removeItem(LEGACY_FALLBACK_META_KEY);
-  } catch {}
+const clearSavedFallbacks = (workspace: Workspace) => {
+  if (ownFallback && sameWorkspace(ownFallback.workspace, workspace)) {
+    removeFallbackSnapshot(ownFallback);
+  }
+  if (adoptedFallback && sameWorkspace(adoptedFallback.workspace, workspace)) {
+    removeFallbackSnapshot(adoptedFallback);
+  }
+  // Immutable copies of exactly the committed contents are safe to remove,
+  // including duplicates left when a recovery itself used fallback storage.
+  for (const snapshot of readFallbackSnapshots().snapshots) {
+    if (snapshot.id.startsWith(FALLBACK_SNAPSHOT_PREFIX) && sameWorkspace(snapshot.workspace, workspace)) {
+      removeFallbackSnapshot(snapshot);
+    }
+  }
 };
 
 const workspaceChannel = () => {
@@ -381,6 +495,8 @@ const writeWorkspace = async (
   workspace: Workspace,
   overwrite: boolean,
   epoch: number,
+  sequence: number,
+  saveId: string,
 ): Promise<WorkspaceSaveResult> => {
   let db: IDBDatabase | null = null;
   let outcome: WriteOutcome;
@@ -417,7 +533,7 @@ const writeWorkspace = async (
         const revision = stored.revision + 1;
         try {
           store.put(workspace, WORKSPACE_KEY);
-          store.put({ savedAt: new Date().toISOString(), revision, writer: pageId }, WORKSPACE_META_KEY);
+          store.put({ savedAt: new Date().toISOString(), revision, writer: pageId, saveId }, WORKSPACE_META_KEY);
           result = { status: "saved", revision };
         } catch (error) {
           failure = error;
@@ -434,7 +550,14 @@ const writeWorkspace = async (
       };
     });
   } catch (indexedDbError) {
-    const fallback = saveWorkspaceFallback(workspace);
+    if (epoch !== adoptEpoch) {
+      return { ok: false, conflict: true, error: new Error(SUPERSEDED_MESSAGE) };
+    }
+    // A newer edit was snapshotted while this older save was waiting. Keep it.
+    if (ownFallback && ownFallbackSequence > sequence) {
+      return { ok: false, conflict: true, error: new Error(SUPERSEDED_MESSAGE) };
+    }
+    const fallback = writeFallback(workspace, sequence);
     if (fallback.ok) return fallback;
     return {
       ok: false,
@@ -460,7 +583,7 @@ const writeWorkspace = async (
   if (outcome.status === "saved") {
     knownRevision = outcome.revision;
     persistedWorkspace = workspace;
-    clearFallback();
+    clearSavedFallbacks(workspace);
     broadcastSaved(outcome.revision);
   }
   return { ok: true, target: "indexeddb" };
@@ -475,13 +598,16 @@ export const saveWorkspace = (
   options: { overwrite?: boolean } = {},
 ): Promise<WorkspaceSaveResult> => {
   const epoch = adoptEpoch;
+  const sequence = ++saveSequence;
+  const saveId = uuid();
+  pendingSaveIds.add(saveId);
   const run = (): Promise<WorkspaceSaveResult> => {
     if (epoch !== adoptEpoch) {
       return Promise.resolve({ ok: false, conflict: true, error: new Error(SUPERSEDED_MESSAGE) });
     }
-    return writeWorkspace(workspace, options.overwrite === true, epoch);
+    return writeWorkspace(workspace, options.overwrite === true, epoch, sequence, saveId);
   };
-  const result = writeQueue.then(run, run);
+  const result = writeQueue.then(run, run).finally(() => pendingSaveIds.delete(saveId));
   writeQueue = result;
   return result;
 };
@@ -489,20 +615,17 @@ export const saveWorkspace = (
 // Synchronous last-resort copy, used while the page unloads and when IndexedDB
 // fails. It records which stored revision it is based on, so it can never win
 // over data another page saved later.
-export const saveWorkspaceFallback = (workspace: Workspace): WorkspaceSaveResult => {
+const writeFallback = (workspace: Workspace, sequence: number): WorkspaceSaveResult => {
   try {
     const savedAt = new Date(Math.max(Date.now(), workspaceUpdatedAt(workspace) + 1)).toISOString();
-    localStorage.setItem(FALLBACK_KEY, JSON.stringify(workspace));
-    try {
-      localStorage.setItem(
-        FALLBACK_META_KEY,
-        JSON.stringify({ savedAt, baseRevision: knownRevision, writer: pageId }),
-      );
-    } catch (error) {
-      // Never leave a snapshot paired with another snapshot's metadata.
-      localStorage.removeItem(FALLBACK_KEY);
-      throw error;
-    }
+    const id = `${FALLBACK_SNAPSHOT_PREFIX}${pageId}:${uuid()}`;
+    const pending = [...pendingSaveIds];
+    const raw = JSON.stringify({ workspace, savedAt, baseRevision: knownRevision, writer: pageId, pendingSaveIds: pending });
+    localStorage.setItem(id, raw);
+    const previous = ownFallback;
+    ownFallback = { status: "loaded", id, raw, workspace, savedAt: timestamp(savedAt), baseRevision: knownRevision, writer: pageId, pendingSaveIds: pending };
+    ownFallbackSequence = sequence;
+    if (previous) removeFallbackSnapshot(previous);
     return { ok: true, target: "localstorage" };
   } catch (error) {
     return {
@@ -511,3 +634,6 @@ export const saveWorkspaceFallback = (workspace: Workspace): WorkspaceSaveResult
     };
   }
 };
+
+export const saveWorkspaceFallback = (workspace: Workspace): WorkspaceSaveResult =>
+  writeFallback(workspace, ++saveSequence);

@@ -75,16 +75,39 @@ export const saveSessionRevokedBefore = async (statePath, sessionRevokedBefore) 
   }
 };
 
-export const createSessionStateStore = (statePath, { now = Date.now, logger = console } = {}) => {
+export const createSessionStateStore = (
+  statePath,
+  { now = Date.now, logger = console, legacyStatePath } = {},
+) => {
   let writes = Promise.resolve();
+  let knownRevokedBefore = 0;
+  const save = (sessionRevokedBefore) => {
+    knownRevokedBefore = Math.max(knownRevokedBefore, sessionRevokedBefore);
+    const next = knownRevokedBefore;
+    const write = writes.then(() => saveSessionRevokedBefore(statePath, next));
+    writes = write.catch(() => {});
+    return write;
+  };
   return {
     path: statePath,
-    load: () => loadSessionRevokedBefore(statePath, { now, logger }),
-    // Writes are serialized so a slower, older write can never land last.
-    save(sessionRevokedBefore) {
-      const write = writes.then(() => saveSessionRevokedBefore(statePath, sessionRevokedBefore));
-      writes = write.catch(() => {});
-      return write;
+    async load() {
+      const current = await loadSessionRevokedBefore(statePath, { now, logger });
+      knownRevokedBefore = Math.max(knownRevokedBefore, current);
+      if (!legacyStatePath || legacyStatePath === statePath) return knownRevokedBefore;
+      // Moving the default location into StateDirectory must not revive
+      // sessions revoked while the old service still wrote into data/.
+      const legacy = await loadSessionRevokedBefore(legacyStatePath, { now, logger });
+      knownRevokedBefore = Math.max(knownRevokedBefore, legacy);
+      if (legacy > current) {
+        try {
+          await save(legacy);
+        } catch (error) {
+          logger.error(`无法迁移会话状态到：${statePath}（${errorMessage(error)}）。旧吊销记录仍在本次运行中生效。`);
+        }
+      }
+      return knownRevokedBefore;
     },
+    // Writes are serialized so a slower, older write can never land last.
+    save,
   };
 };

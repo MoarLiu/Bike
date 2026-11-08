@@ -21,13 +21,17 @@ die() {
 
 need_node() {
   if [[ -z "${NODE_BIN}" || ! -x "${NODE_BIN}" ]]; then
-    die "未找到 Node.js。同步服务需要 Node.js 22.5.0 或更新版本。"
+    die "未找到 Node.js。同步服务需要 Node.js 22.13.0 或更新版本。"
   fi
 
   "${NODE_BIN}" -e '
     const [major, minor] = process.versions.node.split(".").map(Number);
-    if (major < 22 || (major === 22 && minor < 5)) {
-      console.error(`当前 Node.js 是 ${process.versions.node}，需要 22.5.0 或更新版本。`);
+    if (major < 22 || (major === 22 && minor < 13)) {
+      console.error(`当前 Node.js 是 ${process.versions.node}，需要 22.13.0 或更新版本。`);
+      process.exit(1);
+    }
+    try { require("node:sqlite"); } catch {
+      console.error("当前 Node.js 无法使用 node:sqlite，请安装 Node.js 22.13.0 或更新的 LTS 版本。");
       process.exit(1);
     }
   ' || exit 1

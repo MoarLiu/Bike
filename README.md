@@ -6,17 +6,17 @@ Bike 是一个本地优先的大纲、思维导图和 Markdown 写作工具。�
 
 | 平台 | 版本 | 状态 | 位置 |
 | --- | --- | --- | --- |
-| Web | `1.4.3` | 浏览器版本 | 根目录 |
-| Electron macOS Apple Silicon | `1.4.3` | 桌面封装版 | 根目录 |
+| Web | `1.4.4` | 浏览器版本 | 根目录 |
+| Electron macOS Apple Silicon | `1.4.4` | 桌面封装版 | 根目录 |
 
-## 1.4.3 重点
+## 1.4.4 重点
 
-- 修复同步中断后的重试可能误删远端文档的问题：下载结果保存到本机后，才提交对应同步基线。
-- 同步期间的新编辑会保留在本机；开启自动同步时会安排再次同步，同一篇文档的并发修改仍会报告冲突。
-- 桌面同步保留快捷标记和未知扩展字段。
-- 统一安装菜单支持 Web 与 Sync Server 的安装、更新和管理，Web 安装不再修改已有 Sync 数据目录的归属。
+- 多标签页保存增加版本保护，备用内容按页面独立保留，支持下载、恢复。
+- 修复分块传输中文损坏、同步删除冲突和文档顺序保护，载入备份前增加确认与下载备份。
+- 加强登录与设备密钥限流、退出登录状态持久化，以及安装器发布包和 Node.js 校验。
+- 节点详情栏默认收起；修复 Electron 普通启动，并更新旧 systemd 服务的会话状态目录。
 
-完整更新说明见 [Bike 1.4.3](docs/release-1.4.3.md)。当前维护 Electron Apple Silicon DMG 与 Web/Sync Server 部署包。
+完整更新说明见 [Bike 1.4.4](docs/release-1.4.4.md)。当前维护 Electron Apple Silicon DMG 与 Web/Sync Server 部署包。
 
 ## 同步服务与 AI
 
@@ -44,6 +44,7 @@ Electron 同样接入 Web Sync。同步设备密钥按用户要求明文保存�
 - 知识组织：全文搜索、标签 `#tag`、文档链接 `[[文档名]]`。
 - 导入导出：JSON 工作区、Markdown、OPML、FreeMind、HTML、PDF。
 - 本地优先：浏览器 IndexedDB 自动保存，桌面版可备份到 iCloud Drive。
+- 节点详情栏默认收起，可通过右上角的“显示节点详情”按钮展开，再次点击收起。
 - 文档级同步：可单独部署 SQLite Sync Server，其他设备可按文档 revision 双向同步。
 - 检查更新：桌面菜单和应用内入口可检查 GitHub Release，并跳转发布页获取新版本。
 - MCP 服务：把本地工作区暴露为可读取、可搜索、可定位、可导出的结构化上下文，并支持受控写入。
@@ -94,6 +95,8 @@ Bike 默认把数据保存在本机。Web/Electron 版使用 IndexedDB，macOS �
 ```
 
 Web Sync 设备密钥明文保存在本机应用配置中，不读取系统密钥串。API key、单用户部署配置、本机工作区文件和签名文件都不应该提交到仓库。项目已经忽略 `config/bike.config.json`、`release/`、`dist/` 和常见临时文件。
+
+IndexedDB 保存失败或页面关闭前仍有未保存编辑时，应用会按标签页独立保留备用副本。另一页保存后，如果本页仍有未保存修改，会暂停保存并提示冲突；关页重开后，可通过侧栏的“备用副本 · 查看与恢复”下载或恢复留下的修改。恢复和删除前均会先下载备份，内容不同的备用副本会保留供恢复。旧版本的 localStorage 备用数据也能读取。
 
 ## MCP 服务
 
@@ -224,7 +227,7 @@ curl -fsSL https://raw.githubusercontent.com/MoarLiu/Bike/main/scripts/install.s
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/MoarLiu/Bike/main/scripts/install.sh \
-  | BIKE_VERSION=v1.4.3 BIKE_INSTALL_DIR=/opt/bike-sync-server bash -s -- install-sync
+  | BIKE_VERSION=v1.4.4 BIKE_INSTALL_DIR=/opt/bike-sync-server bash -s -- install-sync
 ```
 
 已经 clone 仓库时，也可以在项目目录里运行：
@@ -233,7 +236,7 @@ curl -fsSL https://raw.githubusercontent.com/MoarLiu/Bike/main/scripts/install.s
 ./scripts/setup-sync-server.sh install
 ```
 
-curl 管理脚本会下载 GitHub Release 里的 Web/Sync Server 部署包，校验 SHA-256，解压到 `/opt/bike`，然后进入引导安装。如果系统 Node.js 缺失或低于 `22.5.0`，安装器会自动下载官方 Node.js 22 到 `/opt/bike/.node/` 并让服务使用它，不覆盖系统自带 Node。引导脚本会逐步配置监听地址、端口、用户名、SQLite 路径、CORS 来源，并可选择系统生成或自定义同步密钥；在 systemd 环境下会安装并启动 `bike-sync-server.service`。后续管理命令：
+curl 管理脚本会下载 GitHub Release 里的 Web/Sync Server 部署包，校验 SHA-256，解压到 `/opt/bike`，然后进入引导安装。如果系统 Node.js 缺失或低于 `22.13.0`，安装器会自动下载官方 Node.js 22 到 `/opt/bike/.node/` 并让服务使用它，不覆盖系统自带 Node。引导脚本会逐步配置监听地址、端口、用户名、SQLite 路径、CORS 来源，并可选择系统生成或自定义同步密钥；在 systemd 环境下会安装并启动 `bike-sync-server.service`。后续管理命令：
 
 ```bash
 cd /opt/bike

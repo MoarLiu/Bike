@@ -49,7 +49,7 @@ export const resolveClientAddress = (
 export const loginAttemptKeys = ({ deviceId, clientAddress, username }) =>
   deviceId
     ? [`device:${deviceId}`]
-    : [`ip:${clientAddress}:${username}`, `user:${username}`];
+    : [`ip:${clientAddress}`, `user:${username}`];
 
 export const bearerTokenFrom = (request) => {
   const match = String(request.headers.authorization || "").match(/^Bearer\s+(.+)$/i);
@@ -79,12 +79,6 @@ export const createFailureLimiter = ({
     for (const [key, entry] of entries) {
       if (isExpired(entry, at)) entries.delete(key);
     }
-    // Entries are (re)inserted when their window starts, so iteration order is
-    // oldest first.
-    for (const [key, entry] of entries) {
-      if (entries.size < maxEntries) break;
-      if (entry.inFlight === 0) entries.delete(key);
-    }
   };
 
   const current = (key, at) => {
@@ -100,6 +94,7 @@ export const createFailureLimiter = ({
     const existing = current(key, at);
     if (existing) return existing;
     if (entries.size >= maxEntries) prune(at);
+    if (entries.size >= maxEntries) return undefined;
     const entry = { failures: 0, firstAt: at, nextAllowedAt: 0, inFlight: 0 };
     entries.set(key, entry);
     return entry;
@@ -107,6 +102,7 @@ export const createFailureLimiter = ({
 
   const recordAt = (key, at) => {
     const entry = ensure(key, at);
+    if (!entry) return;
     entry.failures += 1;
     entry.nextAllowedAt = at + delayMs(entry.failures);
   };
@@ -126,22 +122,44 @@ export const createFailureLimiter = ({
     return { limited: true, retryAfterMs };
   };
 
+  const checkAt = (keys, at) => {
+    let limited = false;
+    let retryAfterMs = 0;
+    for (const key of keys) {
+      const state = evaluate(key, at);
+      if (!state.limited) continue;
+      limited = true;
+      retryAfterMs = Math.max(retryAfterMs, state.retryAfterMs);
+    }
+    const missingCount = () => keys.filter((key) => !entries.has(key)).length;
+    if (entries.size + missingCount() > maxEntries) {
+      prune(at);
+      if (entries.size + missingCount() > maxEntries) {
+        // Never evict an active window to admit an attacker-chosen identity.
+        // Unknown clients wait for capacity; tracked clients keep their limits.
+        let capacityRetryMs = windowMs;
+        for (const entry of entries.values()) {
+          capacityRetryMs = Math.min(capacityRetryMs, entry.inFlight > 0
+            ? 1000
+            : Math.max(entry.firstAt + windowMs, entry.nextAllowedAt) - at);
+        }
+        limited = true;
+        retryAfterMs = Math.max(retryAfterMs, Math.max(1000, capacityRetryMs));
+      }
+    }
+    return { limited, retryAfterMs };
+  };
+
   return {
     check(keys) {
-      const at = now();
-      let limited = false;
-      let retryAfterMs = 0;
-      for (const key of keys) {
-        const state = evaluate(key, at);
-        if (!state.limited) continue;
-        limited = true;
-        retryAfterMs = Math.max(retryAfterMs, state.retryAfterMs);
-      }
-      return { limited, retryAfterMs };
+      return checkAt([...new Set(keys)], now());
     },
     begin(keys) {
       const at = now();
-      for (const key of keys) ensure(key, at).inFlight += 1;
+      const uniqueKeys = [...new Set(keys)];
+      if (checkAt(uniqueKeys, at).limited) return false;
+      for (const key of uniqueKeys) ensure(key, at).inFlight += 1;
+      return true;
     },
     finish(keys, { failed }) {
       const at = now();

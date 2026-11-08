@@ -370,6 +370,54 @@ test("trusted device failures only throttle that device", async (t) => {
   assert.equal(untrusted.status, 302);
 });
 
+test("username and IP churn cannot evict the owner's limit or block trusted devices", async (t) => {
+  const { baseUrl, password } = await startAuthServer(t);
+  const { device } = await loginCookies(baseUrl, password);
+  assert.equal((await postLogin(baseUrl, { password: "wrong" })).status, 401);
+  assert.equal((await postLogin(baseUrl, { password })).status, 429);
+
+  for (let batch = 0; batch < 26; batch += 1) {
+    await Promise.all(Array.from({ length: 100 }, async (_, offset) => {
+      const id = batch * 100 + offset;
+      const response = await postLogin(baseUrl, {
+        username: `unknown-${id}`,
+        password: "wrong",
+        forwardedFor: `198.18.${Math.floor(id / 256)}.${id % 256}`,
+      });
+      assert.ok(response.status === 401 || response.status === 429);
+      await response.text();
+    }));
+  }
+
+  const ownerRetry = await postLogin(baseUrl, { password });
+  assert.equal(ownerRetry.status, 429);
+  assert.equal(ownerRetry.headers.get("set-cookie"), null);
+  const trusted = await postLogin(baseUrl, { password, cookie: device });
+  assert.equal(trusted.status, 302);
+});
+
+test("login IP limit applies across different usernames", async (t) => {
+  const { baseUrl, password } = await startAuthServer(t);
+  assert.equal((await postLogin(baseUrl, { username: "unknown-a", password: "wrong" })).status, 401);
+  assert.equal((await postLogin(baseUrl, { username: "unknown-b", password: "wrong" })).status, 429);
+  assert.equal((await postLogin(baseUrl, { password })).status, 429);
+});
+
+test("authenticated static GET and HEAD reject malformed URL encoding without a server error", async (t) => {
+  const { baseUrl, password, output } = await startAuthServer(t, { syncEnabled: false });
+  const cookie = await login(baseUrl, password);
+  for (const method of ["GET", "HEAD"]) {
+    for (const pathname of ["/%", "/%E0%A4%A", "/assets/%FF.js"]) {
+      const response = await fetch(`${baseUrl}${pathname}`, { method, headers: { Cookie: cookie } });
+      assert.equal(response.status, 400, `${method} ${pathname}`);
+      assert.equal(response.headers.get("cache-control"), "no-store");
+      assert.equal(await response.text(), method === "HEAD" ? "" : "URL 编码无效");
+    }
+  }
+  assert.equal((await status(baseUrl, cookie)).status, 200);
+  assert.doesNotMatch(output.join(""), /URIError|Internal Server Error/);
+});
+
 test("forged or foreign device cookies are treated as untrusted", async (t) => {
   const { baseUrl, password } = await startAuthServer(t);
   const { session, device } = await loginCookies(baseUrl, password, {

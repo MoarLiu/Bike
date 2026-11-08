@@ -55,8 +55,9 @@ npm run auth:hash -- "你的登录密码"
 
 - 每次成功登录后，除了会话 Cookie `bike_session`，还会下发一个用 `sessionSecret` 签名的设备 Cookie `bike_device`（`HttpOnly`、`SameSite=Strict`、开启 `secureCookies` 时带 `Secure`，有效期约 180 天）。它只用来标记“这台设备以前登录成功过”，本身不能用来访问应用。
 - 带有效设备 Cookie 的登录只按这台设备单独计数，不受账号和 IP 维度的限流影响。这样即使有人持续猜密码，你已经用过的设备仍然能正常登录。
-- 没有设备 Cookie（或 Cookie 无效、属于其他用户名）的登录同时按“IP + 用户名”和“用户名”两个维度计数。任一维度处于限流状态时，服务端会在校验密码之前直接返回 `429`，即使密码正确也一样，避免把 `429` 和登录成功当作判断密码对错的依据。
+- 没有设备 Cookie（或 Cookie 无效、属于其他用户名）的登录同时按“IP”和“用户名”两个维度计数。同一 IP 更换用户名仍会累计失败次数。任一维度处于限流状态时，服务端会在校验密码之前直接返回 `429`，即使密码正确也一样，避免把 `429` 和登录成功当作判断密码对错的依据。
 - 失败会累加本次尝试使用的计数；成功会清除它们。
+- 限流表只清理已过期的记录。表满时，新身份的请求返回 `429`，不能挤掉已有账号的失败记录。受信设备使用独立的限流表，不受陌生客户端填满记录的影响。
 
 退出登录不会清除设备 Cookie。更换 `sessionSecret` 会让所有设备 Cookie 一起失效；之后第一次登录需要在没有被限流时完成。
 
@@ -69,6 +70,8 @@ npm run auth:hash -- "你的登录密码"
 3. 项目根目录下的 `data/auth-session.json`。
 
 文件以临时文件 + 重命名的方式原子写入，权限为 `0600`，父目录不存在时会自动创建。运行服务的用户需要对该目录有写权限。
+
+`update-web` 会给尚未配置 `StateDirectory` 的旧 systemd 服务添加一个独立配置文件，再重新加载并重启服务；原 unit、运行用户、启动命令和管理员配置保持原样。已有自定义 `StateDirectory` 时直接沿用。默认状态位置从 `data/` 移到 systemd 目录后，启动时也会读取旧文件并取较新的吊销时间，避免先前退出的会话恢复有效；新的退出记录写入 systemd 目录。显式设置了 `auth.sessionStatePath` 时仍使用该路径，需要自行保证写权限。
 
 - 文件不存在：视为从未退出登录。
 - 文件无法读取或内容损坏：服务会在日志中报错，并让启动前签发的所有会话失效（需要重新登录），下次退出登录时会重写该文件。
@@ -108,7 +111,7 @@ curl -fsSL https://raw.githubusercontent.com/MoarLiu/Bike/main/scripts/install.s
 ./scripts/setup-sync-server.sh install
 ```
 
-curl 管理脚本会下载 GitHub Release 里的 Web/Sync Server 部署包，校验 SHA-256，解压到 `/opt/bike`，然后进入引导安装。如果系统 Node.js 缺失或低于 `22.5.0`，安装器会自动下载官方 Node.js 22 到 `/opt/bike/.node/` 并让服务使用它，不覆盖系统自带 Node。Web 引导脚本会配置登录用户名、登录密码、端口和默认同步服务地址；同步服务引导脚本会配置端口、用户名、SQLite 路径、CORS 来源、同步密钥。后续用同一个脚本管理：
+curl 管理脚本会下载 GitHub Release 里的 Web/Sync Server 部署包，校验 SHA-256，解压到 `/opt/bike`，然后进入引导安装。如果系统 Node.js 缺失或低于 `22.13.0`，安装器会自动下载官方 Node.js 22 到 `/opt/bike/.node/` 并让服务使用它，不覆盖系统自带 Node。Web 引导脚本会配置登录用户名、登录密码、端口和默认同步服务地址；同步服务引导脚本会配置端口、用户名、SQLite 路径、CORS 来源、同步密钥。后续用同一个脚本管理：
 
 ```bash
 cd /opt/bike

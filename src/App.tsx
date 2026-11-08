@@ -36,6 +36,7 @@ import {
   Maximize2,
   Moon,
   Palette,
+  PanelRight,
   Pause,
   Pencil,
   Play,
@@ -86,13 +87,16 @@ import { documentToMarkdown, parseMarkdownDocument } from "./markdown";
 import { firstDocument, migrateWorkspace } from "./migrations";
 import { createStarterWorkspace } from "./sample";
 import {
+  discardWorkspaceRecoverySnapshot,
   isWorkspacePersisted,
+  listWorkspaceRecoverySnapshots,
   loadWorkspace,
   reloadWorkspaceIf,
   saveWorkspace,
   saveWorkspaceFallback,
   subscribeToWorkspaceChanges,
   subscribeToWorkspaceConflicts,
+  type WorkspaceRecoverySnapshot,
   type WorkspaceSaveResult,
 } from "./storage";
 import { safeMarkdownUrl } from "./safeUrl";
@@ -580,6 +584,7 @@ function App() {
   const [activeNodeId, setActiveNodeId] = useState<string | null>(null);
   const [focusNodeId, setFocusNodeId] = useState<string | null>(null);
   const [selectedTag, setSelectedTag] = useState<string | null>(null);
+  const [showNodeInspector, setShowNodeInspector] = useState(false);
   const [nodeClipboard, setNodeClipboard] = useState<NodeClipboard | null>(null);
   const [notice, setNotice] = useState("本地自动保存已开启");
   const [noticeKey, setNoticeKey] = useState(0);
@@ -601,6 +606,10 @@ function App() {
   // is paused until the user picks which version to keep.
   const [storageConflict, setStorageConflict] = useState(false);
   const storageConflictRef = useRef(false);
+  const [recoverySnapshots, setRecoverySnapshots] = useState<WorkspaceRecoverySnapshot[]>([]);
+  const [showRecoverySnapshots, setShowRecoverySnapshots] = useState(false);
+  const [recoveryBusy, setRecoveryBusy] = useState(false);
+  const recoveryBusyRef = useRef(false);
   // Last workspace reloaded from another page's save (that page syncs it).
   const refreshedWorkspaceRef = useRef<Workspace | null>(null);
   const syncBusyRef = useRef(false);
@@ -626,7 +635,12 @@ function App() {
     setNoticeKey((k) => k + 1);
   });
 
+  const refreshRecoverySnapshots = useEventCallback(() => {
+    setRecoverySnapshots(listWorkspaceRecoverySnapshots(workspaceRef.current));
+  });
+
   const showSaveResult = useEventCallback((result: WorkspaceSaveResult) => {
+    refreshRecoverySnapshots();
     if (!result.ok) {
       // Conflicts are handled by the storage conflict listener.
       if (result.conflict) return;
@@ -670,26 +684,32 @@ function App() {
     }
   });
 
-  const initializeWorkspace = useEventCallback((isMounted: () => boolean = () => true) => {
+  const initializeWorkspace = useEventCallback((
+    isMounted: () => boolean = () => true,
+    options: { includeFallback?: boolean } = {},
+  ) => {
     setLoadError(null);
     setReady(false);
-    return loadWorkspace().then((result) => {
-      if (!isMounted()) return;
+    return loadWorkspace(options).then((result) => {
+      if (!isMounted()) return false;
       if (result.status === "error") {
         const message = `数据加载失败，已暂停自动保存：${result.error.message}`;
         setLoadError(message);
         showNotice(message);
-        return;
+        return false;
       }
       const next = result.status === "loaded" ? result.workspace : createStarterWorkspace();
       replaceWorkspace(next);
+      refreshRecoverySnapshots();
       setActiveNodeId(firstNodeIdInWorkspace(next));
       setReady(true);
+      return true;
     }).catch((error) => {
-      if (!isMounted()) return;
+      if (!isMounted()) return false;
       const message = `数据加载失败，已暂停自动保存：${error instanceof Error ? error.message : String(error)}`;
       setLoadError(message);
       showNotice(message);
+      return false;
     });
   });
 
@@ -732,6 +752,7 @@ function App() {
     // A copy just loaded from (or already written to) IndexedDB has nothing new.
     if (isWorkspacePersisted(workspace)) return;
     const handle = window.setTimeout(() => {
+      if (storageConflictRef.current || recoveryBusyRef.current) return;
       saveWorkspace(workspace).then(showSaveResult);
     }, 250);
     return () => window.clearTimeout(handle);
@@ -1079,30 +1100,28 @@ function App() {
     }
   }, [activeDocument, mode]);
 
-  useEffect(() => {
-    const handleSaveShortcut = async (event: KeyboardEvent) => {
-      if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== "s") return;
-      event.preventDefault();
-      event.stopPropagation();
-      const nextWorkspace = flushPendingEditsRef.current() ?? workspaceRef.current;
-      if (!nextWorkspace) return;
-      const result = await saveWorkspace(nextWorkspace);
-      if (result.ok) {
-        showNotice(result.target === "indexeddb" ? "已保存到本地" : "IndexedDB 不可用，已临时保存到浏览器备用存储");
-      } else {
-        showNotice(`保存失败：${result.error.message}`);
-      }
-    };
+  const handleSaveShortcut = useEventCallback(async (event: KeyboardEvent) => {
+    if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== "s") return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (!ready || storageConflictRef.current || recoveryBusyRef.current) return;
+    const nextWorkspace = flushPendingEditsRef.current() ?? workspaceRef.current;
+    if (!nextWorkspace) return;
+    const result = await saveWorkspace(nextWorkspace);
+    if (result.ok) {
+      showNotice(result.target === "indexeddb" ? "已保存到本地" : "IndexedDB 不可用，已临时保存到浏览器备用存储");
+    } else {
+      showNotice(`保存失败：${result.error.message}`);
+    }
+  });
 
+  useEffect(() => {
     window.addEventListener("keydown", handleSaveShortcut, { capture: true });
     return () => window.removeEventListener("keydown", handleSaveShortcut, { capture: true });
   }, []);
 
   useEffect(() => {
     const flushAndPersistFallback = () => {
-      // During an unresolved conflict this page's copy is already outdated; a
-      // snapshot of it could only replace another page's valid one.
-      if (storageConflictRef.current) return;
       const nextWorkspace = flushPendingEditsRef.current() ?? workspaceRef.current;
       // Only unsaved edits need the synchronous snapshot. Writing a copy that is
       // already in IndexedDB would leave an outdated snapshot behind for the
@@ -1113,13 +1132,14 @@ function App() {
     };
 
     const handleBeforeUnload = (event: BeforeUnloadEvent) => {
+      flushAndPersistFallback();
       if (storageConflictRef.current && !(window.bike ?? window.localOutline)) {
-        // Closing now drops this page's unsaved edits: let the browser ask.
+        // Let the browser confirm leaving an unresolved conflict. The page's
+        // independent snapshot remains available through the recovery screen.
         event.preventDefault();
         event.returnValue = "";
         return;
       }
-      flushAndPersistFallback();
     };
 
     const preventFileDropNavigation = (event: DragEvent) => {
@@ -1831,7 +1851,13 @@ function App() {
   const refreshFromStorage = useEventCallback(async () => {
     if (!ready || storageConflictRef.current || syncBusyRef.current) return;
     const current = flushPendingEdits() ?? workspaceRef.current;
-    if (!current || !isWorkspacePersisted(current)) return;
+    if (!current) return;
+    if (!isWorkspacePersisted(current)) {
+      // A fallback save may have succeeded without scheduling another IDB
+      // write. A newer broadcast must still surface the conflict immediately.
+      handleStorageConflict();
+      return;
+    }
     const next = await reloadWorkspaceIf(() =>
       !storageConflictRef.current &&
       !syncBusyRef.current &&
@@ -1841,6 +1867,7 @@ function App() {
     if (!next) return;
     refreshedWorkspaceRef.current = next;
     replaceWorkspace(next);
+    refreshRecoverySnapshots();
     setSyncState(loadSyncState(syncConfig.serverUrl));
     const activeDocument = next.documents.find((item) => item.id === next.activeDocumentId) ?? next.documents[0];
     const activeId = activeNodeIdRef.current;
@@ -1858,6 +1885,12 @@ function App() {
     }
     storageConflictRef.current = true;
     setStorageConflict(true);
+    clearAutoSyncTimer();
+    if (current) {
+      const snapshot = saveWorkspaceFallback(current);
+      if (!snapshot.ok) showNotice(`备用副本保存失败：${snapshot.error.message}`);
+    }
+    refreshRecoverySnapshots();
   });
 
   useEffect(() => subscribeToWorkspaceConflicts(handleStorageConflict), []);
@@ -1865,44 +1898,117 @@ function App() {
   useEffect(() => {
     if (!ready) return;
     return subscribeToWorkspaceChanges(() => {
+      refreshRecoverySnapshots();
       void refreshFromStorage();
     });
   }, [ready]);
 
+  useEffect(() => {
+    // Other pages adding or clearing snapshots should update the recovery entry
+    // without adopting any of their pending edits.
+    const handleStorage = () => refreshRecoverySnapshots();
+    window.addEventListener("storage", handleStorage);
+    return () => window.removeEventListener("storage", handleStorage);
+  }, []);
+
   const reloadAfterConflict = useEventCallback(async () => {
-    const current = flushPendingEdits() ?? workspaceRef.current;
-    if (current && !isWorkspacePersisted(current)) {
-      downloadWorkspaceBackup(current, "reload");
+    if (recoveryBusyRef.current || syncBusyRef.current) return;
+    recoveryBusyRef.current = true;
+    setRecoveryBusy(true);
+    try {
+      const current = flushPendingEdits() ?? workspaceRef.current;
+      if (current && !isWorkspacePersisted(current)) {
+        downloadWorkspaceBackup(current, "reload");
+      }
+      const loaded = await initializeWorkspace(() => true, { includeFallback: false });
+      if (!loaded) return;
+      storageConflictRef.current = false;
+      setStorageConflict(false);
+      showNotice("已载入最新内容，本页未保存的修改已下载为备份文件");
+    } finally {
+      recoveryBusyRef.current = false;
+      setRecoveryBusy(false);
     }
-    storageConflictRef.current = false;
-    setStorageConflict(false);
-    showNotice("已载入最新内容，本页未保存的修改已下载为备份文件");
-    await initializeWorkspace();
   });
 
   const overwriteAfterConflict = useEventCallback(async () => {
+    if (recoveryBusyRef.current || syncBusyRef.current) return;
     const current = flushPendingEdits() ?? workspaceRef.current;
     if (!current) return;
     const confirmed = window.confirm(
       "用本页内容覆盖会替换其他标签页或窗口已保存的修改。继续前会先下载一份已保存版本的备份。",
     );
     if (!confirmed) return;
-    const latest = await loadWorkspace();
-    if (latest.status === "error") {
-      showNotice(`读取已保存版本失败：${latest.error.message}`);
-      return;
+    recoveryBusyRef.current = true;
+    setRecoveryBusy(true);
+    try {
+      const latest = await loadWorkspace({ includeFallback: false });
+      if (latest.status === "error") {
+        showNotice(`读取已保存版本失败：${latest.error.message}`);
+        return;
+      }
+      if (latest.status === "loaded") downloadWorkspaceBackup(latest.workspace, "overwrite");
+      // Refuse the replacement if another save lands after this backed-up read.
+      const result = await saveWorkspace(current);
+      if (!result.ok) {
+        if (!result.conflict) showNotice(`保存失败：${result.error.message}`);
+        return;
+      }
+      storageConflictRef.current = false;
+      setStorageConflict(false);
+      refreshRecoverySnapshots();
+      showNotice(result.target === "indexeddb"
+        ? "已用本页内容覆盖已保存的工作区"
+        : "IndexedDB 不可用，本页内容仍保存在备用存储中");
+    } finally {
+      recoveryBusyRef.current = false;
+      setRecoveryBusy(false);
     }
-    if (latest.status === "loaded") downloadWorkspaceBackup(latest.workspace, "overwrite");
-    // loadWorkspace adopted the latest stored revision, so this save replaces
-    // exactly that version (and is refused again if yet another save lands).
-    const result = await saveWorkspace(current);
-    if (!result.ok) {
-      if (!result.conflict) showNotice(`保存失败：${result.error.message}`);
-      return;
+  });
+
+  const restoreRecoverySnapshot = useEventCallback(async (snapshot: WorkspaceRecoverySnapshot) => {
+    if (recoveryBusyRef.current || syncBusyRef.current) return;
+    if (!window.confirm("恢复这个备用副本会替换当前工作区。继续前会先下载当前内容和已保存版本的备份。")) return;
+    recoveryBusyRef.current = true;
+    setRecoveryBusy(true);
+    storageConflictRef.current = true;
+    setStorageConflict(true);
+    clearAutoSyncTimer();
+    try {
+      const current = flushPendingEdits() ?? workspaceRef.current;
+      if (current) downloadWorkspaceBackup(current, "recovery-current");
+      const latest = await loadWorkspace({ includeFallback: false });
+      if (latest.status === "error") throw latest.error;
+      if (latest.status === "loaded") downloadWorkspaceBackup(latest.workspace, "recovery-saved");
+      const saved = await saveWorkspace(snapshot.workspace);
+      if (!saved.ok) throw saved.error;
+      replaceWorkspace(snapshot.workspace);
+      setActiveNodeId(firstNodeIdInWorkspace(snapshot.workspace));
+      setFocusNodeId(null);
+      // Keep the selected copy until it is durable in IndexedDB. A temporary
+      // fallback save must not be mistaken for a completed recovery.
+      if (saved.target === "indexeddb") discardWorkspaceRecoverySnapshot(snapshot);
+      storageConflictRef.current = false;
+      setStorageConflict(false);
+      setShowRecoverySnapshots(false);
+      refreshRecoverySnapshots();
+      showNotice(saved.target === "indexeddb"
+        ? "已恢复备用副本，替换前的工作区已下载为备份"
+        : "已恢复备用副本，IndexedDB 不可用，内容仍保存在备用存储中");
+    } catch (error) {
+      showNotice(`恢复备用副本失败：${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      recoveryBusyRef.current = false;
+      setRecoveryBusy(false);
     }
-    storageConflictRef.current = false;
-    setStorageConflict(false);
-    showNotice("已用本页内容覆盖已保存的工作区");
+  });
+
+  const discardRecoverySnapshot = useEventCallback((snapshot: WorkspaceRecoverySnapshot) => {
+    if (!window.confirm("删除这个备用副本前会先下载它的备份文件。继续？")) return;
+    downloadWorkspaceBackup(snapshot.workspace, "discard-recovery");
+    const removed = discardWorkspaceRecoverySnapshot(snapshot);
+    refreshRecoverySnapshots();
+    showNotice(removed ? "备用副本已下载并删除" : "备用副本已有变化或无法删除，请重新查看");
   });
 
   const syncErrorMessage = (error: unknown) => {
@@ -1918,7 +2024,7 @@ function App() {
     overrideConfig?: SyncConfig,
     options: { silent?: boolean } = {},
   ) => {
-    if (syncBusyRef.current) return;
+    if (syncBusyRef.current || storageConflictRef.current || recoveryBusyRef.current) return;
     const currentWorkspace = flushPendingEdits() ?? workspaceRef.current;
     if (!currentWorkspace) return;
     // Read the sync state from storage rather than React state: another tab may
@@ -1971,6 +2077,8 @@ function App() {
 
   const canAutoSync = useEventCallback(() => (
     ready &&
+    !storageConflictRef.current &&
+    !recoveryBusyRef.current &&
     !syncBusyRef.current &&
     syncConfig.autoSync &&
     (!usesDesktopSyncProxy() || Boolean(syncConfig.token.trim())) &&
@@ -1988,13 +2096,13 @@ function App() {
   });
 
   useEffect(() => {
-    if (!workspace || !ready || !syncConfig.autoSync) return;
+    if (!workspace || !ready || storageConflict || !syncConfig.autoSync) return;
     // A copy reloaded from another page's save is that page's to sync.
     if (workspace === refreshedWorkspaceRef.current) return;
     autoSyncDirtyRef.current = true;
     scheduleAutoSync();
     return () => clearAutoSyncTimer();
-  }, [workspace, ready, syncConfig.autoSync, syncConfig.serverUrl]);
+  }, [workspace, ready, storageConflict, syncConfig.autoSync, syncConfig.serverUrl]);
 
   useEffect(() => {
     if (!ready || !syncConfig.autoSync) return;
@@ -2209,6 +2317,31 @@ function App() {
     );
   }
 
+  if (showRecoverySnapshots) {
+    return (
+      <main className="loading loading-error workspace-recovery">
+        <section>
+          <h1>未保存的备用副本</h1>
+          <p>其他标签页保存后留下的修改会保留在这里。可以先下载查看，再决定恢复或删除。</p>
+          {!recoverySnapshots.length && <p>没有其他备用副本。</p>}
+          {recoverySnapshots.map((snapshot) => (
+            <article className="recovery-snapshot" key={snapshot.id}>
+              <strong>{snapshot.workspace.documents[0]?.title || "工作区"}</strong>
+              <p>{snapshot.workspace.documents.length} 个文档 · {snapshot.savedAt ? formatTime(new Date(snapshot.savedAt).toISOString()) : "时间未知"}</p>
+              <div className="loading-error-actions">
+                <button type="button" onClick={() => downloadWorkspaceBackup(snapshot.workspace, "recovery")} disabled={recoveryBusy}>下载副本</button>
+                <button type="button" onClick={() => void restoreRecoverySnapshot(snapshot)} disabled={recoveryBusy || syncBusy}>恢复这个副本</button>
+                <button type="button" onClick={() => discardRecoverySnapshot(snapshot)} disabled={recoveryBusy}>下载并删除</button>
+              </div>
+            </article>
+          ))}
+          <button type="button" onClick={() => setShowRecoverySnapshots(false)} disabled={recoveryBusy}>返回工作区</button>
+          {noticeKey > 0 && <p role="status">{notice}</p>}
+        </section>
+      </main>
+    );
+  }
+
   if (storageConflict) {
     return (
       <main className="loading loading-error">
@@ -2219,13 +2352,17 @@ function App() {
             或用本页内容覆盖已保存的版本（会先下载已保存版本的备份）。
           </p>
           <div className="loading-error-actions">
-            <button type="button" onClick={() => void reloadAfterConflict()}>
+            <button type="button" onClick={() => void reloadAfterConflict()} disabled={recoveryBusy || syncBusy}>
               载入最新内容
             </button>
-            <button type="button" onClick={() => void overwriteAfterConflict()}>
+            <button type="button" onClick={() => void overwriteAfterConflict()} disabled={recoveryBusy || syncBusy}>
               用本页内容覆盖
             </button>
+            {recoverySnapshots.length > 0 && (
+              <button type="button" onClick={() => setShowRecoverySnapshots(true)}>查看备用副本</button>
+            )}
           </div>
+          {noticeKey > 0 && <p role="status">{notice}</p>}
         </section>
       </main>
     );
@@ -2399,6 +2536,14 @@ function App() {
             <Link2 size={15} />
           </button>
         </div>
+        {recoverySnapshots.length > 0 && (
+          <button className="recovery-entry" type="button" onClick={() => {
+            refreshRecoverySnapshots();
+            setShowRecoverySnapshots(true);
+          }}>
+            {recoverySnapshots.length} 份备用副本 · 查看与恢复
+          </button>
+        )}
       </aside>
 
       <section className="workspace">
@@ -2460,6 +2605,22 @@ function App() {
               </button>
             </div>
 
+            {mode !== "markdown" && (
+              <button
+                className="icon-button"
+                type="button"
+                title={showNodeInspector ? "隐藏节点详情" : "显示节点详情"}
+                aria-label={showNodeInspector ? "隐藏节点详情" : "显示节点详情"}
+                aria-expanded={showNodeInspector}
+                aria-controls="node-inspector"
+                onClick={() => {
+                  flushPendingEdits();
+                  setShowNodeInspector((shown) => !shown);
+                }}
+              >
+                <PanelRight size={17} />
+              </button>
+            )}
             <button className="icon-button" onClick={duplicateDocument} title="复制文档">
               <Copy size={17} />
             </button>
@@ -2518,6 +2679,7 @@ function App() {
         <div
           className={classNames(
             "content",
+            !showNodeInspector && "inspector-hidden",
             mode === "markdown" && "markdown-active",
             mode === "markdown" && `markdown-${markdownPaneMode}`,
           )}
@@ -2609,8 +2771,8 @@ function App() {
             )}
           </section>
 
-          {mode !== "markdown" && (
-            <aside className="inspector">
+          {mode !== "markdown" && showNodeInspector && (
+            <aside className="inspector" id="node-inspector" aria-label="节点详情">
               <section>
                 <div className="section-title">节点详情</div>
                 {activeNode ? (

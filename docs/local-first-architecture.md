@@ -133,7 +133,8 @@ export interface Workspace {
 - IndexedDB 数据库名：`bike-db`。
 - object store：`workspace-store`。
 - key：`workspace`。
-- 回退 localStorage key：`bike-workspace`。
+- 版本 metadata key：`workspace-meta`，在写事务内检查 revision。
+- 备用 localStorage key：`bike-workspace-snapshot:<页面 id>:<副本 id>`，内容和 metadata 一次性写入同一 JSON 对象；兼容读取旧的 `bike-workspace` 和 `local-outline-workspace`。
 - 自动保存节流：应用状态变化后约 250ms 写入一次。
 
 ### 保存流程
@@ -141,8 +142,14 @@ export interface Workspace {
 1. React 状态中的 `workspace` 发生变化。
 2. `useEffect` 触发延迟保存。
 3. 优先打开 IndexedDB。
-4. 将完整 `Workspace` 写入固定 key。
-5. 如果 IndexedDB 不可用，则序列化到 localStorage。
+4. 在同一个写事务中检查当前 revision；只有与本页基于的版本一致时，才写入完整 `Workspace` 并增加 revision。
+5. 如果 IndexedDB 写入失败，则保存本页独立的 localStorage 备用副本。新副本成功写入后，才删除本页的旧副本；一次较早的保存完成时，仍保留等待期间写下的新副本。
+6. 其他标签页保存后，没有未保存编辑的页面自动载入最新内容；有未保存编辑的页面暂停保存和同步，保留备用副本并提供载入或覆盖选择。
+7. 版本落后的备用副本留在“备用副本 · 查看与恢复”入口，恢复或删除前先下载备份。正常保存只清理与已保存内容相同的副本；内容不同的副本保留供用户恢复。
+
+启动时当前数据库读取失败会报错并暂停自动保存，不会将旧数据库或备用副本写回。只有当前数据库可正常读取、且副本基于正确 revision 时，才能自动恢复单一备用内容；同一基准上存在多份不同内容时由用户选择。
+
+备用副本会记下创建时仍在等待的保存请求 id。数据库后来增加 revision 时，只有这些较早请求写入的版本才能被该副本自动恢复；副本创建后新发起的保存不会被旧副本自动覆盖。
 
 优点：
 
@@ -156,7 +163,7 @@ export interface Workspace {
 - 当前是整工作区覆盖写入，文档很多时写放大会变明显。
 - localStorage 容量小，只能作为兜底。
 - 没有事务级历史，误删后难恢复。
-- 没有跨标签页并发协调。
+- 跨标签页冲突通过 revision 检查与用户选择处理，目前没有自动合并两页编辑。
 
 ### 建议演进
 

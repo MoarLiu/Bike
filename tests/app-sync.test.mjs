@@ -20,6 +20,8 @@ function fixture() {
   let pendingDraft;
   const bindings = {
     syncBusyRef: { current: false },
+    storageConflictRef: { current: false },
+    recoveryBusyRef: { current: false },
     workspaceRef: { current: initial },
     syncConfig: { serverUrl: "http://fixture.invalid", token: "fixture", autoSync: true },
     syncState: { documentRevisions: {} },
@@ -189,5 +191,14 @@ test("the synchronous busy guard prevents overlapping requests before a render",
   assert.equal(f.saves.length, 1);
   f.remote.resolve(f.result());
   await first;
+  assert.equal(f.bindings.syncBusyRef.current, false);
+});
+
+test("an unresolved storage conflict pauses sync before any save or remote request", async () => {
+  const f = fixture();
+  f.bindings.storageConflictRef.current = true;
+  await f.callback()();
+  assert.equal(f.saves.length, 0);
+  assert.equal(f.states.length, 0);
   assert.equal(f.bindings.syncBusyRef.current, false);
 });

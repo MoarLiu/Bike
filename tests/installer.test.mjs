@@ -32,7 +32,7 @@ GITHUB_BASE=https://github.com
 RAW_BASE=https://raw.githubusercontent.com/MoarLiu/Bike/main
 NODE_DIST_BASE=https://nodejs.org/dist
 NODE_MAJOR=22
-MIN_NODE_VERSION=22.5.0
+MIN_NODE_VERSION=22.13.0
 err() { printf '%s\\n' "$*" >&2; }
 warn() { printf 'WARN %s\\n' "$*" >&2; }
 info() { :; }
@@ -279,6 +279,91 @@ install_web_service
   assert.match(service, /^StateDirectory=bike-web$/m);
   assert.match(service, /^ReadWritePaths=\/fixture\/bike\/data$/m);
   assert.match(service, /^ProtectSystem=full$/m);
+});
+
+function webUpgradeFixture(t, { stateDirectory = "", failReload = false } = {}) {
+  const root = tempDir(t);
+  const systemDir = path.join(root, "systemd");
+  const tmpDir = path.join(root, "tmp");
+  const unit = path.join(systemDir, "custom-bike.service");
+  const dropin = path.join(systemDir, "custom-bike.service.d", "50-bike-session-state.conf");
+  mkdirSync(systemDir);
+  mkdirSync(tmpDir);
+  const original = `[Unit]\nDescription=Custom Bike\n[Service]\nUser=custom-user\nGroup=custom-group\nExecStart=/custom/node /custom/bike/server/auth-server.mjs\nEnvironment=BIKE_CONFIG=/custom/config.json\n${stateDirectory ? `StateDirectory=${stateDirectory}\n` : ""}`;
+  writeFileSync(unit, original);
+  const result = spawnSync("bash", ["-s"], {
+    encoding: "utf8",
+    env: { ...process.env, FIXTURE_SYSTEM_DIR: systemDir, TMP_DIR: tmpDir, FIXTURE_STATE_DIRECTORY: stateDirectory, FAIL_RELOAD: String(failReload) },
+    input: `set -Eeuo pipefail
+WEB_SERVICE_NAME=custom-bike
+systemd_available() { return 0; }
+web_service_installed() { return 0; }
+install_or_update_files() { printf 'files-updated\\n'; }
+restart_web_service() { printf 'service-restarted\\n'; }
+success() { :; }
+die() { printf '%s\\n' "$*" >&2; exit 1; }
+sudo_cmd() {
+  if [[ "$1" == systemctl ]]; then
+    case "$2" in
+      show)
+        if [[ -n "$FIXTURE_STATE_DIRECTORY" ]]; then
+          printf '%s' "$FIXTURE_STATE_DIRECTORY"
+        elif [[ -f "$FIXTURE_SYSTEM_DIR/custom-bike.service.d/50-bike-session-state.conf" ]]; then
+          printf custom-bike
+        fi
+        ;;
+      daemon-reload)
+        printf 'unit-reloaded\\n'
+        [[ "$FAIL_RELOAD" != true ]]
+        ;;
+      *) exit 90 ;;
+    esac
+    return
+  fi
+  local args=() arg
+  for arg in "$@"; do
+    case "$arg" in
+      /etc/systemd/system/*) arg="$FIXTURE_SYSTEM_DIR/\${arg#/etc/systemd/system/}" ;;
+    esac
+    args+=("$arg")
+  done
+  "\${args[@]}"
+}
+${installFunctions("migrate_web_service_state", "start_web_service")}
+${installFunctions("update_web_action", "install_sync_action")}
+update_web_action
+update_web_action
+`,
+  });
+  return { result, unit, dropin, original };
+}
+
+test("update-web adds persistent session storage before restarting an old unit and preserves custom settings", (t) => {
+  const { result, unit, dropin, original } = webUpgradeFixture(t);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(readFileSync(unit, "utf8"), original);
+  assert.equal(readFileSync(dropin, "utf8"), "[Service]\nStateDirectory=custom-bike\n");
+  assert.equal(statSync(dropin).mode & 0o777, 0o644);
+  assert.equal(existsSync(`${dropin}.new`), false);
+  assert.deepEqual(result.stdout.trim().split("\n"), [
+    "files-updated", "unit-reloaded", "service-restarted",
+    "files-updated", "service-restarted",
+  ]);
+});
+
+test("update-web keeps a custom state directory and never replaces the service unit", (t) => {
+  const { result, unit, dropin, original } = webUpgradeFixture(t, { stateDirectory: "custom-state other-state" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(readFileSync(unit, "utf8"), original);
+  assert.equal(existsSync(dropin), false);
+  assert.doesNotMatch(result.stdout, /unit-reloaded/);
+});
+
+test("update-web does not restart when the state directory migration fails", (t) => {
+  const { result, unit, original } = webUpgradeFixture(t, { failReload: true });
+  assert.notEqual(result.status, 0);
+  assert.equal(readFileSync(unit, "utf8"), original);
+  assert.doesNotMatch(result.stdout, /service-restarted/);
 });
 
 test("Legacy sync installer shim never runs an install.sh from the current directory", (t) => {

@@ -21,7 +21,7 @@ Bike Sync Server 是可单独部署的个人同步服务。同步仍保持本地
 
 ## 部署模式
 
-同步服务使用 Node 内置 `node:sqlite`，部署环境需要 Node.js 22.5.0 或更新版本。
+同步服务使用 Node 内置 `node:sqlite`，部署环境需要 Node.js 22.13.0 或更新版本。
 
 ### 只部署 Sync Server
 
@@ -41,7 +41,7 @@ curl -fsSL https://raw.githubusercontent.com/MoarLiu/Bike/main/scripts/install.s
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/MoarLiu/Bike/main/scripts/install.sh \
-  | BIKE_VERSION=v1.4.3 BIKE_INSTALL_DIR=/opt/bike-sync-server bash -s -- install-sync
+  | BIKE_VERSION=v1.4.4 BIKE_INSTALL_DIR=/opt/bike-sync-server bash -s -- install-sync
 ```
 
 已经 clone 仓库时，也可以在项目目录里运行：
@@ -50,7 +50,7 @@ curl -fsSL https://raw.githubusercontent.com/MoarLiu/Bike/main/scripts/install.s
 ./scripts/setup-sync-server.sh install
 ```
 
-curl 管理脚本会下载 GitHub Release 里的 Web/Sync Server 部署包，校验 SHA-256，解压到 `/opt/bike`，然后进入引导安装。如果系统 Node.js 缺失或低于 `22.5.0`，安装器会自动下载官方 Node.js 22 到 `/opt/bike/.node/` 并让服务使用它，不覆盖系统自带 Node。脚本会逐步配置同步端口、用户名、SQLite 路径、CORS 来源和同步密钥；在 systemd 环境下会安装并启动 `bike-sync-server.service`。后续管理命令：
+curl 管理脚本会下载 GitHub Release 里的 Web/Sync Server 部署包，校验 SHA-256，解压到 `/opt/bike`，然后进入引导安装。如果系统 Node.js 缺失或低于 `22.13.0`，安装器会自动下载官方 Node.js 22 到 `/opt/bike/.node/` 并让服务使用它，不覆盖系统自带 Node。脚本会逐步配置同步端口、用户名、SQLite 路径、CORS 来源和同步密钥；在 systemd 环境下会安装并启动 `bike-sync-server.service`。后续管理命令：
 
 ```bash
 cd /opt/bike

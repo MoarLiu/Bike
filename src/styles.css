@@ -320,6 +320,29 @@ button:disabled {
   gap: 8px;
 }
 
+.workspace-recovery section {
+  width: min(680px, 100%);
+}
+
+.recovery-snapshot {
+  display: grid;
+  gap: 8px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+}
+
+.recovery-entry {
+  margin: 8px 0;
+  padding: 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  background: var(--surface-raised);
+  text-align: left;
+}
+
 .shell {
   display: grid;
   grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
@@ -997,9 +1020,13 @@ button:disabled {
   align-items: start;
 }
 
+.content.inspector-hidden,
+.content.markdown-active {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .content.markdown-active {
   align-items: stretch;
-  grid-template-columns: minmax(0, 1fr);
 }
 
 .content.markdown-active .editor-pane {

@@ -14,7 +14,7 @@ SYNC_SERVICE_NAME="${BIKE_SYNC_SERVICE_NAME:-bike-sync-server}"
 SYNC_SERVICE_USER="${BIKE_SYNC_SERVICE_USER:-bike-sync}"
 NODE_BIN="${NODE_BIN:-$(command -v node || true)}"
 NODE_MAJOR="${BIKE_NODE_MAJOR:-22}"
-MIN_NODE_VERSION="22.5.0"
+MIN_NODE_VERSION="22.13.0"
 NODE_DIST_BASE="${BIKE_NODE_DIST_BASE:-https://nodejs.org/dist}"
 MANAGER_PATH="${INSTALL_DIR}/bike.sh"
 
@@ -77,7 +77,7 @@ Bike 部署管理脚本
   menu          打开管理菜单
 
 环境变量：
-  BIKE_VERSION=v1.4.3                 安装指定版本；默认 latest
+  BIKE_VERSION=v1.4.4                 安装指定版本；默认 latest
   BIKE_INSTALL_DIR=/opt/bike
   BIKE_WEB_SERVICE_NAME=bike-web
   BIKE_WEB_SERVICE_USER=bike-web
@@ -175,7 +175,8 @@ node_version_ok() {
   [[ -n "${node_bin}" && -x "${node_bin}" ]] || return 1
   "${node_bin}" -e '
     const [major, minor] = process.versions.node.split(".").map(Number);
-    if (major < 22 || (major === 22 && minor < 5)) process.exit(1);
+    if (major < 22 || (major === 22 && minor < 13)) process.exit(1);
+    try { require("node:sqlite"); } catch { process.exit(1); }
   ' >/dev/null 2>&1
 }
 
@@ -626,6 +627,27 @@ EOF
   success "已安装 Bike Web systemd 服务：${WEB_SERVICE_NAME}.service"
 }
 
+# Upgrade older units without replacing their User, ExecStart or other settings.
+# An existing StateDirectory (including an administrator's drop-in) wins.
+migrate_web_service_state() {
+  systemd_available || die "当前系统没有可用 systemd，无法更新 Bike Web 系统服务。"
+  local state_directory dropin_dir tmp_file
+  state_directory="$(sudo_cmd systemctl show "${WEB_SERVICE_NAME}.service" --property=StateDirectory --value)"
+  [[ -z "${state_directory//[[:space:]]/}" ]] || return 0
+
+  dropin_dir="/etc/systemd/system/${WEB_SERVICE_NAME}.service.d"
+  tmp_file="${TMP_DIR}/bike-web-session-state.conf"
+  cat > "${tmp_file}" <<EOF
+[Service]
+StateDirectory=${WEB_SERVICE_NAME}
+EOF
+  sudo_cmd mkdir -p "${dropin_dir}"
+  sudo_cmd install -m 0644 "${tmp_file}" "${dropin_dir}/50-bike-session-state.conf.new"
+  sudo_cmd mv -f "${dropin_dir}/50-bike-session-state.conf.new" "${dropin_dir}/50-bike-session-state.conf"
+  sudo_cmd systemctl daemon-reload
+  success "已为旧 Web 服务添加会话状态目录，保留原有服务设置。"
+}
+
 start_web_service() {
   if systemd_available && web_service_installed; then
     sudo_cmd systemctl start "${WEB_SERVICE_NAME}.service"
@@ -675,6 +697,7 @@ install_web_action() {
 update_web_action() {
   install_or_update_files 0
   if web_service_installed; then
+    migrate_web_service_state
     restart_web_service
   else
     success "已更新文件。当前没有安装 Bike Web systemd 服务，未执行重启。"

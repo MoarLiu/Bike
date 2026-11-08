@@ -15,7 +15,7 @@ import {
   resolveClientAddress,
   tooManyAuthFailuresPayload,
 } from "./request-guards.mjs";
-import { createSessionStateStore, resolveSessionStatePath } from "./session-state.mjs";
+import { createSessionStateStore, resolveSessionStatePath, sessionStateFileName } from "./session-state.mjs";
 import { handleSyncApi } from "./sync-api.mjs";
 import { createSyncStore } from "./sync-store.mjs";
 
@@ -135,6 +135,9 @@ const readConfig = async () => {
         configuredPath: auth.sessionStatePath,
         projectRoot,
       }),
+      legacySessionStatePath: !String(auth.sessionStatePath ?? "").trim() && process.env.STATE_DIRECTORY
+        ? path.join(projectRoot, "data", sessionStateFileName)
+        : undefined,
     },
     web: {
       defaultSyncServerUrl: String(
@@ -379,12 +382,15 @@ const clientIp = (request, config) => resolveClientAddress(request, config.auth)
 const loginDelayMs = (failures) =>
   Math.min(maxLoginDelayMs, Math.max(0, 2 ** Math.max(0, failures - 3) * 1000));
 
-const loginLimiter = createFailureLimiter({
+const loginLimiterOptions = {
   maxFailures: maxLoginFailures,
   windowMs: loginWindowMs,
   maxEntries: maxLoginAttemptEntries,
   delayMs: loginDelayMs,
-});
+};
+const loginLimiter = createFailureLimiter(loginLimiterOptions);
+// Untrusted identities cannot fill the table used by signed device cookies.
+const trustedLoginLimiter = createFailureLimiter(loginLimiterOptions);
 
 const tooManyLoginAttempts = (response) => {
   send(response, 429, loginPage("登录尝试过多，请稍后再试"), {
@@ -460,7 +466,13 @@ const prepareIndexHtml = (html, config) =>
 
 const serveStatic = async (request, response, config) => {
   const url = new URL(request.url, "http://localhost");
-  const rawPathname = decodeURIComponent(url.pathname);
+  let rawPathname;
+  try {
+    rawPathname = decodeURIComponent(url.pathname);
+  } catch {
+    send(response, 400, "URL 编码无效", { "Content-Type": "text/plain; charset=utf-8" });
+    return;
+  }
   const pathname = rawPathname === "/" ? "/index.html" : rawPathname;
   const filePath = path.normalize(path.join(distDir, pathname));
 
@@ -543,23 +555,23 @@ const handleRequest = async (
       clientAddress: clientIp(request, config),
       username,
     });
+    const limiter = device ? trustedLoginLimiter : loginLimiter;
     // Refuse throttled attempts before looking at the password. Letting a
     // correct password through while throttled would turn 429 into an oracle.
-    if (loginLimiter.check(attemptKeys).limited) {
+    if (limiter.check(attemptKeys).limited || !limiter.begin(attemptKeys)) {
       tooManyLoginAttempts(response);
       return;
     }
-    loginLimiter.begin(attemptKeys);
     let credentialsValid = false;
     try {
       credentialsValid =
         username === config.auth.username &&
         await verifyPassword(password, config.auth.passwordHash);
     } finally {
-      loginLimiter.finish(attemptKeys, { failed: !credentialsValid });
+      limiter.finish(attemptKeys, { failed: !credentialsValid });
     }
     if (credentialsValid) {
-      loginLimiter.clear(attemptKeys);
+      limiter.clear(attemptKeys);
       response.writeHead(302, {
         ...securityHeaders,
         Location: "/",
@@ -655,7 +667,9 @@ const handleRequest = async (
 };
 
 const config = await readConfig();
-const sessionState = createSessionStateStore(config.auth.sessionStatePath);
+const sessionState = createSessionStateStore(config.auth.sessionStatePath, {
+  legacyStatePath: config.auth.legacySessionStatePath,
+});
 sessionRevokedBefore = await sessionState.load();
 const deviceTokenGuard = createDeviceTokenGuard({
   tokenHashes: config.sync.deviceTokenHashes,

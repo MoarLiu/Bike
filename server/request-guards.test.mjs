@@ -60,7 +60,7 @@ test("spoofed X-Forwarded-For prefixes share one login limiter key", () => {
     });
   const first = keysFor("1.2.3.4, 203.0.113.10");
   const second = keysFor("5.6.7.8, 203.0.113.10");
-  assert.deepEqual(first, ["ip:203.0.113.10:owner", "user:owner"]);
+  assert.deepEqual(first, ["ip:203.0.113.10", "user:owner"]);
   assert.deepEqual(second, first);
 
   // Only the IP scope, to show it alone is shared.
@@ -75,6 +75,14 @@ test("devices with a valid device cookie only use their own limiter key", () => 
     loginAttemptKeys({ deviceId: "device-a", clientAddress: "203.0.113.10", username: "owner" }),
     ["device:device-a"],
   );
+});
+
+test("changing usernames does not reset the client's IP limit", () => {
+  const limiter = createFailureLimiter({ maxFailures: 1, windowMs: 60_000, maxEntries: 10 });
+  const keysFor = (username) => loginAttemptKeys({ clientAddress: "203.0.113.10", username });
+  limiter.recordFailure(keysFor("wrong-user-a"));
+  assert.equal(limiter.check(keysFor("wrong-user-b")).limited, true);
+  assert.equal(limiter.check(keysFor("owner")).limited, true);
 });
 
 test("trustedProxyCount must be a positive integer", () => {
@@ -175,7 +183,7 @@ test("clearing a key forgets its failures", () => {
   assert.equal(limiter.size, 0);
 });
 
-test("failure limiter stays within maxEntries by dropping the oldest windows", () => {
+test("failure limiter preserves active windows and refuses new keys at capacity", () => {
   let clock = 0;
   const limiter = createFailureLimiter({
     maxFailures: 1,
@@ -188,14 +196,32 @@ test("failure limiter stays within maxEntries by dropping the oldest windows", (
     clock += 1;
     assert.ok(limiter.size <= 3);
   }
-  assert.equal(limiter.check(["a"]).limited, false);
-  assert.equal(limiter.check(["b"]).limited, false);
-  assert.equal(limiter.check(["e"]).limited, true);
+  assert.equal(limiter.check(["a"]).limited, true);
+  assert.equal(limiter.check(["b"]).limited, true);
+  assert.equal(limiter.check(["unknown"]).limited, true);
+  assert.equal(limiter.begin(["unknown"]), false);
+  assert.equal(limiter.size, 3);
 
-  // Expired windows are reclaimed before live ones are evicted.
+  // Expired windows free capacity without deleting another active window.
   clock = 120_000;
+  assert.equal(limiter.check(["f"]).limited, false);
   limiter.recordFailure(["f"]);
   assert.equal(limiter.size, 1);
+});
+
+test("failure limiter reserves all keys together and stays bounded with pending attempts", () => {
+  const limiter = createFailureLimiter({ maxFailures: 3, windowMs: 60_000, maxEntries: 3 });
+  assert.equal(limiter.begin(["ip:a", "user:owner"]), true);
+  assert.equal(limiter.begin(["ip:b", "user:other"]), false);
+  assert.equal(limiter.size, 2);
+  assert.equal(limiter.begin(["ip:c", "user:owner"]), true);
+  assert.equal(limiter.size, 3);
+  assert.equal(limiter.begin(["ip:d"]), false);
+  limiter.finish(["ip:a", "user:owner"], { failed: true });
+  limiter.finish(["ip:c", "user:owner"], { failed: true });
+  assert.equal(limiter.check(["ip:a", "user:owner"]).limited, false);
+  assert.equal(limiter.begin(["ip:a", "user:owner"]), true);
+  assert.equal(limiter.check(["user:owner"]).limited, true);
 });
 
 const countingVerifier = (validTokens) => {
