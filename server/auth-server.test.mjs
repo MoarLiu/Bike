@@ -6,7 +6,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(__dirname, "..");
@@ -371,7 +371,13 @@ test("trusted device failures only throttle that device", async (t) => {
 });
 
 test("username and IP churn cannot evict the owner's limit or block trusted devices", async (t) => {
-  const { baseUrl, password } = await startAuthServer(t);
+  const fixture = await createAuthFixture(t);
+  const clockPath = path.join(fixture.directory, "test-clock.mjs");
+  await fs.writeFile(clockPath, `Date.now = () => ${Date.now()};\n`);
+  const { baseUrl } = await launchAuthServer(fixture, {
+    env: { NODE_OPTIONS: `--import=${pathToFileURL(clockPath).href}` },
+  });
+  const { password } = fixture;
   const { device } = await loginCookies(baseUrl, password);
   assert.equal((await postLogin(baseUrl, { password: "wrong" })).status, 401);
   assert.equal((await postLogin(baseUrl, { password })).status, 429);

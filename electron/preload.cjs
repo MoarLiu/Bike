@@ -6,6 +6,11 @@ const bikeBridge = {
   checkForUpdates: () => ipcRenderer.invoke("check-for-updates"),
   invokeAiProvider: (payload) => ipcRenderer.invoke("invoke-ai-provider", payload),
   invokeSyncRequest: (payload) => ipcRenderer.invoke("invoke-sync-request", payload),
+  onEditCommand: (callback) => {
+    const handler = (_event, action) => callback(action);
+    ipcRenderer.on("app-edit", handler);
+    return () => ipcRenderer.removeListener("app-edit", handler);
+  },
   onOpenApiConfig: (callback) => {
     const handler = () => callback();
     ipcRenderer.on("open-api-config", handler);

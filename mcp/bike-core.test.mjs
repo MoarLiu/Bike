@@ -232,6 +232,59 @@ test("migrateWorkspace skips malformed documents while preserving valid ones", (
   assert.equal(workspace.documents[0].nodes[0].text, "Keep me");
 });
 
+test("migrateWorkspace preserves valid trash entries", () => {
+  const workspace = migrateWorkspace({
+    version: 1,
+    activeDocumentId: "doc_valid",
+    documents: [{
+      id: "doc_valid",
+      title: "Valid",
+      createdAt: "2026-06-04T08:00:00.000Z",
+      updatedAt: "2026-06-04T09:00:00.000Z",
+      nodes: [{ id: "node_valid", text: "Keep me", children: [] }],
+    }],
+    trash: [{
+      id: "trash_valid",
+      deletedAt: "2026-06-05T08:00:00.000Z",
+      originalIndex: 0,
+      document: {
+        id: "doc_deleted",
+        title: "Deleted",
+        createdAt: "2026-06-04T08:00:00.000Z",
+        updatedAt: "2026-06-04T09:00:00.000Z",
+        nodes: [{ id: "node_deleted", text: "Deleted node", children: [] }],
+      },
+    }],
+  });
+
+  assert.equal(workspace.trash.length, 1);
+  assert.equal(workspace.trash[0].id, "trash_valid");
+  assert.equal(workspace.trash[0].document.id, "doc_deleted");
+});
+
+test("MCP writes preserve trash ids and extension fields used by desktop backups", async () => {
+  const store = await makeStore({ mode: "write" });
+  const workspace = sampleWorkspace();
+  workspace.extension = { keep: true };
+  workspace.documents[0].isShortcut = true;
+  workspace.documents[0].nodes[0].extension = { keep: "node" };
+  workspace.trash = [{
+    id: "trash_same_id", deletedAt: "2026-11-08T00:00:00.000Z", originalIndex: 0,
+    document: structuredClone(workspace.documents[0]),
+  }];
+  await fs.writeFile(store.config.workspacePath, JSON.stringify(workspace), "utf8");
+  const snapshot = await store.load();
+  await updateDocumentTitleForMcp(store, {
+    documentId: "doc_mcp", title: "Updated", dryRun: false, expectedRevision: snapshot.revision,
+  });
+  const saved = JSON.parse(await fs.readFile(store.config.workspacePath, "utf8"));
+  assert.equal(saved.trash[0].document.id, "doc_mcp");
+  assert.equal(saved.trash[0].document.nodes[0].id, "node_background");
+  assert.equal(saved.trash[0].document.isShortcut, true);
+  assert.deepEqual(saved.trash[0].document.nodes[0].extension, { keep: "node" });
+  assert.deepEqual(saved.extension, { keep: true });
+});
+
 test("searches title, node text, and notes with breadcrumbs", async () => {
   const store = await makeStore();
   const snapshot = await store.load();

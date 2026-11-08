@@ -13,6 +13,7 @@ const {
   fetchLatestRelease,
 } = require("./update-checker.cjs");
 const { resolveDevServer } = require("./dev-server.cjs");
+const { editCommandForInput } = require("./edit-shortcuts.cjs");
 
 const devServer = resolveDevServer({ env: process.env, isPackaged: app.isPackaged });
 if (devServer.warning) console.warn(devServer.warning);
@@ -102,6 +103,12 @@ const createWindow = () => {
     },
   });
   mainWindow = window;
+  window.webContents.on("before-input-event", (event, input) => {
+    const command = editCommandForInput(input);
+    if (!command) return;
+    event.preventDefault();
+    window.webContents.send("app-edit", command);
+  });
 
   window.on("closed", () => {
     if (mainWindow === window) mainWindow = null;
@@ -247,8 +254,16 @@ const installApplicationMenu = () => {
     {
       label: "编辑",
       submenu: [
-        { role: "undo", label: "撤销" },
-        { role: "redo", label: "重做" },
+        {
+          label: "撤销",
+          accelerator: "CmdOrCtrl+Z",
+          click: () => mainWindow?.webContents.send("app-edit", "undo"),
+        },
+        {
+          label: "重做",
+          accelerator: "Shift+CmdOrCtrl+Z",
+          click: () => mainWindow?.webContents.send("app-edit", "redo"),
+        },
         { type: "separator" },
         { role: "cut", label: "剪切" },
         { role: "copy", label: "复制" },

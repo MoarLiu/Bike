@@ -47,5 +47,7 @@ export function loadAppCallback(name, bindings) {
   const declaration = app.body.statements
     .flatMap((node) => ts.isVariableStatement(node) ? [...node.declarationList.declarations] : [])
     .find((node) => node.name.getText(ast) === name);
-  return vm.runInNewContext(compile(`(${declaration.initializer.arguments[0].getText(ast)})`), bindings, { filename });
+  const initializer = declaration.initializer;
+  const callback = ts.isCallExpression(initializer) ? initializer.arguments[0] : initializer;
+  return vm.runInNewContext(compile(`(${callback.getText(ast)})`), bindings, { filename });
 }

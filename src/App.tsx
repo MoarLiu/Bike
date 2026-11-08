@@ -25,6 +25,7 @@ import {
   Heading2,
   Heading3,
   Highlighter,
+  History,
   Image,
   Indent,
   Italic,
@@ -44,6 +45,7 @@ import {
   Presentation,
   Quote,
   RefreshCw,
+  Redo2,
   RotateCcw,
   Search,
   Smile,
@@ -56,6 +58,7 @@ import {
   Trash2,
   Type,
   Underline,
+  Undo2,
   Upload,
   WandSparkles,
   X,
@@ -76,6 +79,17 @@ import {
   type AiNodeAction,
 } from "./ai";
 import { saveICloudBackup } from "./backup";
+import { TrashDialog } from "./components/TrashDialog";
+import { VersionHistoryDialog } from "./components/VersionHistoryDialog";
+import { sameDocumentContent } from "./documentSignature";
+import {
+  emptyEditHistory,
+  recordChange,
+  redo,
+  undo,
+  type EditOptions,
+  type EditHistory,
+} from "./editHistory";
 import {
   downloadText,
   exportDocument,
@@ -139,6 +153,19 @@ import {
   uid,
   updateNode,
 } from "./tree";
+import {
+  emptyTrash,
+  moveDocumentToTrash,
+  pruneTrash,
+  removeTrashEntry,
+  retainLocalTrash,
+  restoreTrashEntry,
+} from "./trash";
+import {
+  captureSnapshot,
+  listDocumentSnapshots,
+  type DocumentSnapshot,
+} from "./versionHistory";
 
 type ExportFormat = "json" | "markdown" | "opml" | "freemind" | "html";
 type AppViewMode = ViewMode | "markdown";
@@ -197,6 +224,7 @@ const now = () => new Date().toISOString();
 const ICLOUD_REVISION_KEY = "bike-icloud-revision";
 const LEGACY_ICLOUD_REVISION_KEY = "local-outline-icloud-revision";
 const MINDMAP_ROOT_ID = "__bike_mindmap_root__";
+const AUTO_SNAPSHOT_INTERVAL_MS = 10 * 60 * 1000;
 
 const classNames = (...names: Array<string | false | undefined>) =>
   names.filter(Boolean).join(" ");
@@ -523,7 +551,7 @@ const InspectorNoteField = React.memo(function InspectorNoteField({
     latestRef.current = { nodeId, note, draft, onPatch, onCommit };
   }, [draft, nodeId, note, onPatch, onCommit]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!focusedRef.current) setDraft(note);
   }, [nodeId, note]);
 
@@ -610,6 +638,17 @@ function App() {
   const [showRecoverySnapshots, setShowRecoverySnapshots] = useState(false);
   const [recoveryBusy, setRecoveryBusy] = useState(false);
   const recoveryBusyRef = useRef(false);
+  const historyRef = useRef<EditHistory>(emptyEditHistory());
+  const [, bumpHistoryVersion] = useState(0);
+  const lastAutoSnapshotRef = useRef(new Map<string, number>());
+  const [showTrash, setShowTrash] = useState(false);
+  const [showVersionHistory, setShowVersionHistory] = useState(false);
+  const [historySnapshots, setHistorySnapshots] = useState<DocumentSnapshot[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+  const [historyBusy, setHistoryBusy] = useState(false);
+  const historyBusyRef = useRef(false);
+  const historyRequestRef = useRef(0);
   // Last workspace reloaded from another page's save (that page syncs it).
   const refreshedWorkspaceRef = useRef<Workspace | null>(null);
   const syncBusyRef = useRef(false);
@@ -658,6 +697,41 @@ function App() {
     return next;
   });
 
+  const clearEditHistory = useEventCallback(() => {
+    historyRef.current = emptyEditHistory();
+    bumpHistoryVersion((version) => version + 1);
+  });
+
+  const snapshotFailureNoticeRef = useRef(false);
+  const reportSnapshotFailure = useEventCallback(() => {
+    if (snapshotFailureNoticeRef.current) return;
+    snapshotFailureNoticeRef.current = true;
+    showNotice("版本快照保存失败，编辑不会受影响");
+  });
+
+  const maybeCaptureAutoSnapshots = useEventCallback((before: Workspace, after: Workspace) => {
+    const afterById = new Map(after.documents.map((document) => [document.id, document]));
+    before.documents.forEach((document) => {
+      const next = afterById.get(document.id);
+      if (!next || next === document) return;
+      const at = Date.now();
+      const last = lastAutoSnapshotRef.current.get(document.id);
+      if (last !== undefined && at - last < AUTO_SNAPSHOT_INTERVAL_MS) return;
+      lastAutoSnapshotRef.current.set(document.id, at);
+      captureSnapshot(document, "auto").catch(reportSnapshotFailure);
+    });
+  });
+
+  const captureSyncSnapshots = useEventCallback(async (before: Workspace, after: Workspace) => {
+    const afterById = new Map(after.documents.map((document) => [document.id, document]));
+    await Promise.all(before.documents.map(async (document) => {
+      const next = afterById.get(document.id);
+      if (!next || (next !== document && !sameDocumentContent(document, next))) {
+        await captureSnapshot(document, "sync").catch(reportSnapshotFailure);
+      }
+    }));
+  });
+
   const persistSyncConfig = useEventCallback((next: SyncConfig) => {
     const normalized = {
       serverUrl: normalizeSyncServerUrl(next.serverUrl),
@@ -700,6 +774,8 @@ function App() {
       }
       const next = result.status === "loaded" ? result.workspace : createStarterWorkspace();
       replaceWorkspace(next);
+      clearEditHistory();
+      lastAutoSnapshotRef.current.clear();
       refreshRecoverySnapshots();
       setActiveNodeId(firstNodeIdInWorkspace(next));
       setReady(true);
@@ -844,16 +920,40 @@ function App() {
     return filtered;
   }, [search, selectedTag, workspace, sidebarView, recentTicker]);
 
-  const commitWorkspace = useEventCallback((updater: (workspace: Workspace) => Workspace) => {
+  const commitWorkspace = useEventCallback((
+    updater: (workspace: Workspace) => Workspace,
+    options: EditOptions = {},
+  ) => {
     const current = workspaceRef.current;
     if (!current) return null;
     const next = updater(current);
-    return next === current ? current : replaceWorkspace(next);
+    if (next === current) return current;
+    const history = recordChange({
+      history: historyRef.current,
+      before: current,
+      after: next,
+      selection: {
+        documentId: current.activeDocumentId,
+        nodeId: activeNodeIdRef.current,
+      },
+      afterSelection: {
+        documentId: next.activeDocumentId,
+        nodeId: options.nodeId ?? activeNodeIdRef.current,
+      },
+      label: options.label ?? "调整主题结构",
+      group: options.group,
+    });
+    if (history !== historyRef.current) {
+      historyRef.current = history;
+      bumpHistoryVersion((version) => version + 1);
+    }
+    maybeCaptureAutoSnapshots(current, next);
+    return replaceWorkspace(next);
   });
 
   const patchActiveDocument = (
     updater: (document: MarkdownDocument) => MarkdownDocument,
-    options: { preserveMarkdown?: boolean } = {},
+    options: EditOptions & { preserveMarkdown?: boolean } = {},
   ) => {
     return commitWorkspace((current) => {
       let changed = false;
@@ -870,19 +970,20 @@ function App() {
         return options.preserveMarkdown ? stamped : clearDocumentMarkdown(stamped);
       });
       return changed ? { ...current, documents } : current;
-    });
+    }, options);
   };
   const patchActiveDocumentStable = useEventCallback(patchActiveDocument);
 
   const updateActiveNodes = (
     updater: (nodes: OutlineNode[], document: MarkdownDocument) => OutlineNode[],
+    options: EditOptions = {},
   ) => {
     let nextNodes: OutlineNode[] | null = null;
     patchActiveDocumentStable((document) => {
       const nodes = updater(document.nodes, document);
       nextNodes = nodes;
       return nodes === document.nodes ? document : { ...document, nodes };
-    });
+    }, options);
     return nextNodes;
   };
   const updateActiveNodesStable = useEventCallback(updateActiveNodes);
@@ -890,6 +991,7 @@ function App() {
   const setActiveNodes = useEventCallback((nodes: OutlineNode[]) =>
     patchActiveDocumentStable((document) =>
       nodes === document.nodes ? document : { ...document, nodes },
+      { label: "拖拽主题" },
     ),
   );
 
@@ -932,7 +1034,7 @@ function App() {
           nextDocument = parseMarkdownIntoDocument(document as MarkdownDocument, draft.value);
           return nextDocument;
         }),
-      }));
+      }), { label: "编辑 Markdown", group: `markdown:${draft.documentId}` });
 
       markdownDraftRef.current = { ...draft, dirty: false };
       const nextNodes = nextDocument ? (nextDocument as MarkdownDocument).nodes : null;
@@ -976,7 +1078,7 @@ function App() {
             })
           : document,
       ),
-    }));
+    }), { label: "编辑主题", group: `text:${nodeId}` });
   });
 
   const handleInspectorNoteDraftChange = useEventCallback((
@@ -1037,7 +1139,7 @@ function App() {
             })
           : document,
       ),
-    }));
+    }), { label: "编辑备注", group: `note:${draft.nodeId}` });
     inspectorNoteDraftRef.current = {
       nodeId: draft.nodeId,
       value: draft.value,
@@ -1100,6 +1202,72 @@ function App() {
     }
   }, [activeDocument, mode]);
 
+  const performHistoryStep = useEventCallback((direction: "undo" | "redo") => {
+    if (!ready || storageConflictRef.current || recoveryBusyRef.current || syncBusyRef.current || historyBusyRef.current) return;
+    if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+    flushPendingEdits();
+    const current = workspaceRef.current;
+    if (!current) return;
+    const result = direction === "undo"
+      ? undo({ history: historyRef.current, workspace: current, now: now() })
+      : redo({ history: historyRef.current, workspace: current, now: now() });
+    if (result.status === "empty") {
+      showNotice(direction === "undo" ? "没有可撤销的操作" : "没有可重做的操作");
+      return;
+    }
+    if (result.status === "stale") {
+      clearEditHistory();
+      showNotice("当前内容已被更新，已清空撤销记录以避免覆盖");
+      return;
+    }
+
+    historyRef.current = result.history;
+    const selection = direction === "undo"
+      ? result.entry.beforeSelection
+      : result.entry.afterSelection;
+    const selectedDocument = result.workspace.documents.find((item) => item.id === selection.documentId)
+      ?? result.workspace.documents[0];
+    const nextWorkspace = { ...result.workspace, activeDocumentId: selectedDocument.id };
+    replaceWorkspace(nextWorkspace);
+    bumpHistoryVersion((version) => version + 1);
+
+    if (selectedDocument) {
+      const selectedNode = selection.nodeId
+        ? findNode(selectedDocument.nodes, selection.nodeId)
+        : null;
+      setActiveNodeId(selectedNode?.id ?? firstNodeId(selectedDocument.nodes));
+      if (selectedNode) {
+        setPendingCaretFocus({ id: selectedNode.id, position: selectedNode.text.length });
+      }
+      if (focusNodeId && !findNode(selectedDocument.nodes, focusNodeId)) {
+        setFocusNodeId(null);
+      }
+    }
+    showNotice(direction === "undo" ? `已撤销：${result.entry.label}` : `已重做：${result.entry.label}`);
+  });
+
+  const handleHistoryShortcut = useEventCallback((event: KeyboardEvent) => {
+    if (window.bike ?? window.localOutline) return;
+    if (!(event.metaKey || event.ctrlKey)) return;
+    const key = event.key.toLowerCase();
+    const isUndo = key === "z" && !event.shiftKey;
+    const isRedo = (key === "z" && event.shiftKey) || key === "y";
+    if (!isUndo && !isRedo) return;
+
+    const element = event.target instanceof HTMLElement ? event.target : null;
+    if (element?.closest('[role="dialog"]')) return;
+    const isNodeInput = element instanceof HTMLTextAreaElement
+      && Array.from(inputRefs.current.values()).includes(element);
+    const isNativeEditor = element !== null
+      && (element.tagName === "INPUT" || element.tagName === "TEXTAREA" || element.isContentEditable)
+      && !isNodeInput;
+    if (isNativeEditor) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+    performHistoryStep(isUndo ? "undo" : "redo");
+  });
+
   const handleSaveShortcut = useEventCallback(async (event: KeyboardEvent) => {
     if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== "s") return;
     event.preventDefault();
@@ -1118,6 +1286,31 @@ function App() {
   useEffect(() => {
     window.addEventListener("keydown", handleSaveShortcut, { capture: true });
     return () => window.removeEventListener("keydown", handleSaveShortcut, { capture: true });
+  }, []);
+
+  useEffect(() => {
+    window.addEventListener("keydown", handleHistoryShortcut, { capture: true });
+    return () => window.removeEventListener("keydown", handleHistoryShortcut, { capture: true });
+  }, []);
+
+  const handleEditCommand = useEventCallback((action: "undo" | "redo") => {
+      const element = document.activeElement;
+      const isNodeInput = element instanceof HTMLTextAreaElement
+        && Array.from(inputRefs.current.values()).includes(element);
+      const isNativeEditor = element instanceof HTMLElement
+        && (element.tagName === "INPUT" || element.tagName === "TEXTAREA" || element.isContentEditable)
+        && !isNodeInput;
+      if (isNativeEditor) {
+        document.execCommand(action);
+        return;
+      }
+      if (showTrash || showVersionHistory || showAiConfig || showSyncConfig || showConfirmDelete) return;
+      performHistoryStep(action);
+  });
+
+  useEffect(() => {
+    const bridge = window.bike ?? window.localOutline;
+    return bridge?.onEditCommand?.(handleEditCommand);
   }, []);
 
   useEffect(() => {
@@ -1213,6 +1406,7 @@ function App() {
   });
 
   const deleteDocument = useEventCallback(() => {
+    if (syncBusyRef.current || recoveryBusyRef.current || historyBusyRef.current || storageConflictRef.current) return;
     const currentWorkspace = flushPendingEdits() ?? workspaceRef.current;
     const currentDocument = currentWorkspace?.documents.find(
       (document) => document.id === currentWorkspace.activeDocumentId,
@@ -1221,32 +1415,163 @@ function App() {
       showNotice("至少保留一个文档");
       return;
     }
-    const nextDocuments = currentWorkspace.documents.filter(
-      (document) => document.id !== currentDocument.id,
-    );
-    const nextActive = nextDocuments[0];
+    const result = moveDocumentToTrash(currentWorkspace, currentDocument.id);
+    if (!result) return;
     const deletedTitle = currentDocument.title;
-    setActiveNodeId(firstNodeId(nextActive.nodes));
+    clearEditHistory();
+    setActiveNodeId(firstNodeId(result.workspace.documents[0].nodes));
     setFocusNodeId(null);
-    replaceWorkspace({
-      ...currentWorkspace,
-      activeDocumentId: nextActive.id,
-      documents: nextDocuments,
-    });
-    showNotice(`已删除文档：${deletedTitle}`);
+    replaceWorkspace(result.workspace);
+    showNotice(`已移入回收站：${deletedTitle}`);
   });
 
-  const handleNodeText = useEventCallback((id: string, text: string) => {
+  const openTrashDialog = useEventCallback(() => {
+    const current = flushPendingEdits() ?? workspaceRef.current;
+    if (!current) return;
+    const trash = pruneTrash(current.trash);
+    if (trash.length !== (current.trash?.length ?? 0)) {
+      replaceWorkspace({ ...current, trash });
+    }
+    setShowTrash(true);
+  });
+
+  const restoreFromTrash = useEventCallback((entryId: string) => {
+    if (syncBusyRef.current || recoveryBusyRef.current || historyBusyRef.current || storageConflictRef.current) return;
+    const current = flushPendingEdits() ?? workspaceRef.current;
+    if (!current) return;
+    const result = restoreTrashEntry(current, entryId);
+    if (!result) return;
+    clearEditHistory();
+    setActiveNodeId(firstNodeId(result.document.nodes));
+    setFocusNodeId(null);
+    replaceWorkspace(result.workspace);
+    showNotice(`已恢复文档：${result.document.title}`);
+  });
+
+  const deleteFromTrash = useEventCallback((entryId: string) => {
+    if (syncBusyRef.current || recoveryBusyRef.current || historyBusyRef.current || storageConflictRef.current) return;
+    const current = workspaceRef.current;
+    if (!current) return;
+    if (!window.confirm("彻底删除后无法从回收站恢复。继续？")) return;
+    replaceWorkspace(removeTrashEntry(current, entryId));
+    showNotice("已彻底删除文档");
+  });
+
+  const emptyTrashForever = useEventCallback(() => {
+    if (syncBusyRef.current || recoveryBusyRef.current || historyBusyRef.current || storageConflictRef.current) return;
+    const current = workspaceRef.current;
+    if (!current?.trash?.length) return;
+    if (!window.confirm("清空回收站会先下载一份包含回收站内容的工作区备份。继续？")) return;
+    downloadWorkspaceBackup(current, "empty-trash");
+    replaceWorkspace(emptyTrash(current));
+    showNotice("回收站已下载备份并清空");
+  });
+
+  const openVersionHistory = useEventCallback(async () => {
+    const current = flushPendingEdits() ?? workspaceRef.current;
+    const document = current?.documents.find((item) => item.id === current.activeDocumentId);
+    if (!document) return;
+    const requestId = ++historyRequestRef.current;
+    setShowVersionHistory(true);
+    setHistorySnapshots([]);
+    setHistoryLoading(true);
+    setHistoryError(null);
+    try {
+      const snapshots = await listDocumentSnapshots(document.id);
+      if (requestId !== historyRequestRef.current || workspaceRef.current?.activeDocumentId !== document.id) return;
+      setHistorySnapshots(snapshots);
+    } catch (error) {
+      if (requestId === historyRequestRef.current) {
+        setHistoryError(error instanceof Error ? error.message : String(error));
+        setHistorySnapshots([]);
+      }
+    } finally {
+      if (requestId === historyRequestRef.current) setHistoryLoading(false);
+    }
+  });
+
+  const closeVersionHistory = useEventCallback(() => {
+    if (historyBusyRef.current) return;
+    historyRequestRef.current += 1;
+    setShowVersionHistory(false);
+  });
+
+  const saveCurrentVersion = useEventCallback(async () => {
+    if (historyBusyRef.current || storageConflictRef.current || recoveryBusyRef.current) return;
+    const current = flushPendingEdits() ?? workspaceRef.current;
+    const document = current?.documents.find((item) => item.id === current.activeDocumentId);
+    if (!document) return;
+    const requestId = historyRequestRef.current;
+    historyBusyRef.current = true;
+    setHistoryBusy(true);
+    setHistoryError(null);
+    try {
+      const snapshots = await captureSnapshot(document, "manual");
+      if (requestId === historyRequestRef.current && workspaceRef.current?.activeDocumentId === document.id) {
+        setHistorySnapshots(snapshots);
+      }
+      showNotice("已保存当前版本");
+    } catch (error) {
+      setHistoryError(error instanceof Error ? error.message : String(error));
+    } finally {
+      historyBusyRef.current = false;
+      setHistoryBusy(false);
+    }
+  });
+
+  const restoreVersionSnapshot = useEventCallback(async (snapshot: DocumentSnapshot) => {
+    if (historyBusyRef.current || syncBusyRef.current || storageConflictRef.current || recoveryBusyRef.current) return;
+    const current = flushPendingEdits() ?? workspaceRef.current;
+    const document = current?.documents.find((item) => item.id === current.activeDocumentId);
+    if (!current || !document || snapshot.documentId !== document.id) return;
+    if (!window.confirm(`恢复「${snapshot.title}」会替换当前文档内容。恢复前会先保存当前版本，且恢复后可以撤销。继续？`)) return;
+    historyBusyRef.current = true;
+    setHistoryBusy(true);
+    setHistoryError(null);
+    try {
+      await captureSnapshot(document, "before-restore");
+      if (
+        (flushPendingEdits() ?? workspaceRef.current) !== current ||
+        storageConflictRef.current || syncBusyRef.current || recoveryBusyRef.current
+      ) {
+        showNotice("保存快照期间内容发生变化，已取消恢复，请重新查看版本历史");
+        return;
+      }
+      const restored = {
+        ...snapshot.document,
+        id: document.id,
+        createdAt: document.createdAt,
+        updatedAt: now(),
+      };
+      commitWorkspace((workspace) => ({
+        ...workspace,
+        documents: workspace.documents.map((item) => (item.id === document.id ? restored : item)),
+      }), { label: "恢复历史版本", nodeId: firstNodeId(restored.nodes) });
+      setActiveNodeId(firstNodeId(restored.nodes));
+      setFocusNodeId(null);
+      setHistorySnapshots(await listDocumentSnapshots(document.id));
+      showNotice("已恢复历史版本，可立即撤销");
+    } catch (error) {
+      setHistoryError(error instanceof Error ? error.message : String(error));
+    } finally {
+      historyBusyRef.current = false;
+      setHistoryBusy(false);
+    }
+  });
+
+  const handleNodeText = useEventCallback((id: string, text: string, options?: EditOptions) => {
     updateActiveNodesStable((nodes) => updateNode(nodes, id, (node) => {
       node.text = text;
-    }));
+    }), options ?? { label: "编辑主题", group: `text:${id}` });
   });
 
   const handleNodePatch = useEventCallback((id: string, patch: Partial<OutlineNode>) => {
+    const keys = Object.keys(patch);
+    const isNote = keys.length === 1 && keys[0] === "note";
     updateActiveNodesStable((nodes) => updateNode(nodes, id, (node) => {
       Object.assign(node, patch);
       node.color = normalizeColor(node.color);
-    }));
+    }), { label: isNote ? "编辑备注" : "修改主题", group: isNote ? `note:${id}` : null });
   });
 
   const ensureAiConfig = useEventCallback(() => {
@@ -1303,13 +1628,21 @@ function App() {
       });
       if (!result) return;
 
+      const latestWorkspace = flushPendingEdits() ?? workspaceRef.current;
+      const latestDocument = latestWorkspace?.documents.find((item) => item.id === document.id);
+      if (
+        storageConflictRef.current ||
+        latestWorkspace?.activeDocumentId !== document.id ||
+        !latestDocument || !sameDocumentContent(document, latestDocument)
+      ) throw new Error("AI 请求期间文档发生变化，已保留当前内容，请重新生成");
+
       if (action === "polish") {
         const text = result.text?.trim();
         if (!text) throw new Error("AI 没有返回润色文本");
         if (isDocumentRoot) {
-          updateTitle(text);
+          updateTitle(text, { label: "AI 润色标题", group: null });
         } else {
-          handleNodeText(targetId, text);
+          handleNodeText(targetId, text, { label: "AI 润色主题", group: null });
         }
         showNotice("已润色当前主题");
         return;
@@ -1321,12 +1654,12 @@ function App() {
         patchActiveDocumentStable((active) => ({
           ...active,
           nodes: [...active.nodes, ...generated],
-        }));
+        }), { label: "AI 生成子主题", nodeId: generated[0].id });
       } else {
         updateActiveNodesStable((nodes) => updateNode(nodes, targetId, (target) => {
           target.collapsed = false;
           target.children = [...target.children, ...generated];
-        }));
+        }), { label: "AI 生成子主题", nodeId: generated[0].id });
       }
       setActiveNodeId(generated[0].id);
       showNotice(`已生成 ${generated.length} 个子主题`);
@@ -1343,6 +1676,7 @@ function App() {
     source: string,
   ) => {
     if (!activeDocument) return null;
+    const sourceDocumentId = activeDocument.id;
     const busyKey = `markdown:${action}`;
     setAiBusyKey(busyKey);
     showNotice(action === "generate" ? "AI 正在生成 Markdown 子主题..." : "AI 正在润色 Markdown 主题...");
@@ -1353,6 +1687,16 @@ function App() {
         existingChildren: [],
       });
       if (!result) return null;
+
+      const latestWorkspace = workspaceRef.current;
+      const latestDocument = latestWorkspace?.documents.find((item) => item.id === sourceDocumentId);
+      const latestSource = markdownDraftRef.current.documentId === sourceDocumentId
+        ? markdownDraftRef.current.value
+        : latestDocument ? getDocumentMarkdown(latestDocument) : null;
+      if (
+        storageConflictRef.current ||
+        latestWorkspace?.activeDocumentId !== sourceDocumentId || latestSource !== source
+      ) throw new Error("AI 请求期间 Markdown 发生变化，已保留当前内容，请重新生成");
 
       if (action === "polish") {
         const text = result.text?.trim();
@@ -1713,21 +2057,19 @@ function App() {
     }
   });
 
-  const updateTitle = useEventCallback((title: string) => {
+  const updateTitle = useEventCallback((title: string, options?: EditOptions) => {
     const nextTitle = title || "未命名文档";
     if (modeRef.current === "markdown" && activeDocument) {
       const currentSource = markdownDraftRef.current.documentId === activeDocument.id
         ? markdownDraftRef.current.value
         : getDocumentMarkdown(activeDocument);
       handleMarkdownDraftChange(replaceMarkdownTitle(currentSource, nextTitle));
-      patchActiveDocumentStable(
-        (document) => (document.title === nextTitle ? document : { ...document, title: nextTitle }),
-        { preserveMarkdown: true },
-      );
+      flushMarkdownDraft();
       return;
     }
     patchActiveDocumentStable((document) =>
       document.title === nextTitle ? document : { ...document, title: nextTitle },
+      options ?? { label: "修改标题", group: `title:${workspaceRef.current?.activeDocumentId}` },
     );
   });
 
@@ -1830,6 +2172,7 @@ function App() {
     const currentWorkspace = flushPendingEdits() ?? workspaceRef.current;
     if (currentWorkspace) downloadWorkspaceBackup(currentWorkspace, "load-backup");
     replaceWorkspace(next);
+    clearEditHistory();
     setActiveNodeId(firstNodeIdInWorkspace(next));
     setFocusNodeId(null);
     if (result.revision) {
@@ -1983,6 +2326,7 @@ function App() {
       const saved = await saveWorkspace(snapshot.workspace);
       if (!saved.ok) throw saved.error;
       replaceWorkspace(snapshot.workspace);
+      clearEditHistory();
       setActiveNodeId(firstNodeIdInWorkspace(snapshot.workspace));
       setFocusNodeId(null);
       // Keep the selected copy until it is durable in IndexedDB. A temporary
@@ -2024,7 +2368,7 @@ function App() {
     overrideConfig?: SyncConfig,
     options: { silent?: boolean } = {},
   ) => {
-    if (syncBusyRef.current || storageConflictRef.current || recoveryBusyRef.current) return;
+    if (syncBusyRef.current || storageConflictRef.current || recoveryBusyRef.current || historyBusyRef.current) return;
     const currentWorkspace = flushPendingEdits() ?? workspaceRef.current;
     if (!currentWorkspace) return;
     // Read the sync state from storage rather than React state: another tab may
@@ -2054,11 +2398,18 @@ function App() {
         showNotice("同步期间有新编辑，已保留本机内容，请稍后再次同步");
         return;
       }
-      applySyncedWorkspace(result.workspace);
-      const saved = await saveWorkspace(result.workspace);
+      await captureSyncSnapshots(currentWorkspace, result.workspace);
+      if ((flushPendingEdits() ?? workspaceRef.current) !== currentWorkspace || storageConflictRef.current) {
+        retryAfterEdit = true;
+        showNotice("保存同步前快照期间有新编辑，已保留本机内容，请稍后再次同步");
+        return;
+      }
+      const nextWorkspace = retainLocalTrash(currentWorkspace, result.workspace);
+      applySyncedWorkspace(nextWorkspace);
+      const saved = await saveWorkspace(nextWorkspace);
       if (!saved.ok) throw saved.error;
       persistSyncState(result.state);
-      retryAfterEdit = workspaceRef.current !== result.workspace;
+      retryAfterEdit = workspaceRef.current !== nextWorkspace;
       autoSyncDirtyRef.current = retryAfterEdit;
       const changed =
         result.summary.uploaded > 0 ||
@@ -2157,8 +2508,9 @@ function App() {
   });
 
   const pullRemoteWorkspace = useEventCallback(async (overrideConfig?: SyncConfig) => {
-    if (syncBusyRef.current) return;
+    if (syncBusyRef.current || historyBusyRef.current || recoveryBusyRef.current || storageConflictRef.current) return;
     const currentWorkspace = flushPendingEdits() ?? workspaceRef.current;
+    if (!currentWorkspace) return;
     const confirmed = window.confirm(
       "从服务端拉取会替换当前本机工作区。继续前会先下载一份本机备份。",
     );
@@ -2195,8 +2547,15 @@ function App() {
         showNotice("拉取期间有新编辑，已保留本机内容，未替换工作区");
         return;
       }
-      applySyncedWorkspace(result.workspace);
-      const saved = await saveWorkspace(result.workspace);
+      await captureSyncSnapshots(currentWorkspace, result.workspace);
+      if ((flushPendingEdits() ?? workspaceRef.current) !== currentWorkspace || storageConflictRef.current) {
+        showNotice("保存拉取前快照期间有新编辑，已保留本机内容，未替换工作区");
+        return;
+      }
+      const nextWorkspace = retainLocalTrash(currentWorkspace, result.workspace);
+      applySyncedWorkspace(nextWorkspace);
+      clearEditHistory();
+      const saved = await saveWorkspace(nextWorkspace);
       if (!saved.ok) throw saved.error;
       persistSyncState(result.state);
       showNotice(`已从服务端拉取 ${result.workspace.documents.length} 个文档`);
@@ -2277,6 +2636,7 @@ function App() {
           );
         }
         replaceWorkspace(imported);
+        clearEditHistory();
         setActiveNodeId(firstNodeIdInWorkspace(imported));
         setFocusNodeId(null);
         showNotice(`已导入工作区：${file.name}`);
@@ -2377,6 +2737,8 @@ function App() {
         [...extractTags(row.node.text), ...extractTags(row.node.note)].includes(selectedTag),
       )
     : [];
+  const canUndo = historyRef.current.past.length > 0;
+  const canRedo = historyRef.current.future.length > 0;
 
   return (
     <main className="shell">
@@ -2501,7 +2863,7 @@ function App() {
           >
             <RefreshCw size={16} />
           </button>
-          <button title="回收站" onClick={() => showNotice("回收站功能开发中，敬请期待")}>
+          <button title="回收站" onClick={openTrashDialog}>
             <Trash2 size={16} />
           </button>
           <button title={theme === "light" ? "切换到暗黑模式" : "切换到明亮模式"} onClick={() => setTheme(theme === "light" ? "dark" : "light")}>
@@ -2604,6 +2966,36 @@ function App() {
                 Markdown
               </button>
             </div>
+
+            <button
+              className="icon-button"
+              type="button"
+              onClick={() => performHistoryStep("undo")}
+              disabled={!canUndo}
+              title="撤销 (⌘Z / Ctrl+Z)"
+              aria-label="撤销"
+            >
+              <Undo2 size={17} />
+            </button>
+            <button
+              className="icon-button"
+              type="button"
+              onClick={() => performHistoryStep("redo")}
+              disabled={!canRedo}
+              title="重做 (⇧⌘Z / Ctrl+Shift+Z)"
+              aria-label="重做"
+            >
+              <Redo2 size={17} />
+            </button>
+            <button
+              className="icon-button"
+              type="button"
+              onClick={() => void openVersionHistory()}
+              title="版本历史"
+              aria-label="版本历史"
+            >
+              <History size={17} />
+            </button>
 
             {mode !== "markdown" && (
               <button
@@ -2882,13 +3274,37 @@ function App() {
         <div className="confirm-overlay" onClick={() => setShowConfirmDelete(false)}>
           <div className="confirm-dialog" onClick={(e) => e.stopPropagation()}>
             <h3>确认删除</h3>
-            <p>确定要删除文档「{activeDocument.title}」吗？此操作不可撤销。</p>
+            <p>确定要将文档「{activeDocument.title}」移入回收站吗？回收站会保留 30 天，可随时恢复。</p>
             <div className="confirm-actions">
               <button className="confirm-cancel" onClick={() => setShowConfirmDelete(false)}>取消</button>
               <button className="confirm-delete" onClick={() => { setShowConfirmDelete(false); deleteDocument(); }}>删除</button>
             </div>
           </div>
         </div>
+      )}
+
+      {showTrash && (
+        <TrashDialog
+          entries={workspace.trash ?? []}
+          busy={recoveryBusy || syncBusy}
+          onRestore={restoreFromTrash}
+          onDelete={deleteFromTrash}
+          onEmpty={emptyTrashForever}
+          onClose={() => setShowTrash(false)}
+        />
+      )}
+
+      {showVersionHistory && (
+        <VersionHistoryDialog
+          document={activeDocument}
+          snapshots={historySnapshots}
+          loading={historyLoading}
+          error={historyError}
+          busy={historyBusy || syncBusy}
+          onRestore={(snapshot) => void restoreVersionSnapshot(snapshot)}
+          onSaveNow={() => void saveCurrentVersion()}
+          onClose={closeVersionHistory}
+        />
       )}
     </main>
   );
@@ -3879,6 +4295,7 @@ const OutlineNodeRow = React.memo(function OutlineNodeRow({
   isAiBusy,
 }: OutlineNodeRowProps) {
   const [localText, setLocalText] = useState(node.text);
+  const committedTextRef = useRef(node.text);
   const [textCellWidth, setTextCellWidth] = useState(0);
   const isFocusedRef = useRef(false);
   const debounceTimerRef = useRef<number | null>(null);
@@ -3900,10 +4317,11 @@ const OutlineNodeRow = React.memo(function OutlineNodeRow({
     ));
   }, []);
 
-  useEffect(() => {
-    if (!isFocusedRef.current) {
+  useLayoutEffect(() => {
+    if (!isFocusedRef.current || localText === committedTextRef.current) {
       setLocalText(node.text);
     }
+    committedTextRef.current = node.text;
   }, [node.text]);
 
   useLayoutEffect(() => {

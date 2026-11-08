@@ -42,6 +42,7 @@ async function fixture(t) {
     findNode: (nodes, id) => nodes.find((node) => node.id === id),
     firstNodeIdInWorkspace: (value) => value.documents[0].nodes[0].id,
     clearAutoSyncTimer: () => {},
+    clearEditHistory: () => {},
     refreshRecoverySnapshots: () => {},
     showNotice: (text) => notices.push(text),
     downloadWorkspaceBackup: (value, reason) => backups.push({ workspace: value, reason }),

@@ -6,17 +6,17 @@ Bike 是一个本地优先的大纲、思维导图和 Markdown 写作工具。�
 
 | 平台 | 版本 | 状态 | 位置 |
 | --- | --- | --- | --- |
-| Web | `1.4.4` | 浏览器版本 | 根目录 |
-| Electron macOS Apple Silicon | `1.4.4` | 桌面封装版 | 根目录 |
+| Web | `1.5.0` | 浏览器版本 | 根目录 |
+| Electron macOS Apple Silicon | `1.5.0` | 主要客户端 | 根目录 |
 
-## 1.4.4 重点
+## 1.5.0 重点
 
-- 多标签页保存增加版本保护，备用内容按页面独立保留，支持下载、恢复。
-- 修复分块传输中文损坏、同步删除冲突和文档顺序保护，载入备份前增加确认与下载备份。
-- 加强登录与设备密钥限流、退出登录状态持久化，以及安装器发布包和 Node.js 校验。
-- 节点详情栏默认收起；修复 Electron 普通启动，并更新旧 systemd 服务的会话状态目录。
+- 编辑支持撤销/重做，覆盖输入、层级、拖拽、格式和 AI 写入。
+- 文档删除后进入本机回收站，可恢复、彻底删除或下载备份后清空。
+- 版本历史支持自动与手动快照、预览和恢复，恢复操作也能撤销。
+- 改善 Electron 编辑菜单、最小窗口布局和暗色正文显示；保留 1.4.4 的保存、同步与备用副本保护。
 
-完整更新说明见 [Bike 1.4.4](docs/release-1.4.4.md)。当前维护 Electron Apple Silicon DMG 与 Web/Sync Server 部署包。
+完整更新说明见 [Bike 1.5.0](docs/release-1.5.0.md)。Bike 面向个人知识整理，以 Electron macOS 桌面版为主，继续提供 Web/Sync Server 部署包。
 
 ## 同步服务与 AI
 
@@ -43,6 +43,7 @@ Electron 同样接入 Web Sync。同步设备密钥按用户要求明文保存�
 - AI 辅助：在大纲、思维导图、Markdown 模式中生成子主题或润色当前主题。
 - 知识组织：全文搜索、标签 `#tag`、文档链接 `[[文档名]]`。
 - 导入导出：JSON 工作区、Markdown、OPML、FreeMind、HTML、PDF。
+- 编辑安全：撤销/重做、文档回收站和本地版本历史快照。
 - 本地优先：浏览器 IndexedDB 自动保存，桌面版可备份到 iCloud Drive。
 - 节点详情栏默认收起，可通过右上角的“显示节点详情”按钮展开，再次点击收起。
 - 文档级同步：可单独部署 SQLite Sync Server，其他设备可按文档 revision 双向同步。
@@ -227,7 +228,7 @@ curl -fsSL https://raw.githubusercontent.com/MoarLiu/Bike/main/scripts/install.s
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/MoarLiu/Bike/main/scripts/install.sh \
-  | BIKE_VERSION=v1.4.4 BIKE_INSTALL_DIR=/opt/bike-sync-server bash -s -- install-sync
+  | BIKE_VERSION=v1.5.0 BIKE_INSTALL_DIR=/opt/bike-sync-server bash -s -- install-sync
 ```
 
 已经 clone 仓库时，也可以在项目目录里运行：
@@ -289,6 +290,6 @@ npm run start:full
 
 ## 后续方向
 
-- 增加版本历史、节点级反向链接、附件本地库和更完整的 PDF/图片导出。
+- 增加节点级反向链接、附件本地库和更完整的 PDF/图片导出。
 - 为 MCP 写入增加应用内控制面板、写入审计日志和快照恢复 UI。
 - 完成 macOS 正式代码签名、notarization 和 stapling 流程。

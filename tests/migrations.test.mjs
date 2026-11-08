@@ -3,6 +3,7 @@ import test from "node:test";
 import { loadTypescript } from "./helpers/typescript.mjs";
 
 const { migrateWorkspace } = loadTypescript("src/migrations.ts");
+const OLD = "2026-01-01T00:00:00.000Z";
 
 test("workspace migration retains extensions while validating known fields", () => {
   const workspace = migrateWorkspace({
@@ -22,4 +23,44 @@ test("workspace migration retains extensions while validating known fields", () 
   assert.equal(restored.documents[0].nodes[0].checked, false);
   assert.equal(restored.documents[0].nodes[0].color, "plain");
   assert.deepEqual(restored.documents[0].nodes[0].extension, [1, 2]);
+});
+
+test("workspace migration preserves and validates trash entries", () => {
+  const workspace = migrateWorkspace({
+    version: 1,
+    activeDocumentId: "doc",
+    documents: [{
+      id: "doc", title: "Document", createdAt: OLD, updatedAt: OLD,
+      nodes: [{ id: "node", text: "Text", children: [] }],
+    }],
+    trash: [
+      {
+        id: "trash-1",
+        deletedAt: "2026-01-02T00:00:00.000Z",
+        originalIndex: 1,
+        document: {
+          id: "deleted", title: "Deleted", createdAt: OLD, updatedAt: OLD,
+          nodes: [{ id: "deleted-node", text: "Old", children: [] }],
+        },
+      },
+      { id: "bad", deletedAt: "not-a-date", document: null },
+    ],
+  });
+
+  assert.equal(workspace.trash.length, 1);
+  assert.equal(workspace.trash[0].id, "trash-1");
+  assert.equal(workspace.trash[0].document.id, "deleted");
+  assert.equal(workspace.trash[0].originalIndex, 1);
+});
+
+test("trash migration keeps document and node ids even when a live document has the same ids", () => {
+  const document = { id: "doc", title: "Document", createdAt: OLD, updatedAt: OLD, nodes: [{ id: "node", text: "Text", children: [] }] };
+  const migrated = migrateWorkspace({
+    version: 1, activeDocumentId: "doc", documents: [document],
+    trash: [{ id: "trash", deletedAt: OLD, originalIndex: 0, document }],
+  });
+  assert.equal(migrated.trash[0].document.id, "doc");
+  assert.equal(migrated.trash[0].document.nodes[0].id, "node");
+  const reopened = migrateWorkspace(migrated);
+  assert.deepEqual(reopened.trash, migrated.trash);
 });

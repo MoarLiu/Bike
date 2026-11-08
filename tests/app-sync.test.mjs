@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { loadAppCallback } from "./helpers/typescript.mjs";
+import { loadTypescript } from "./helpers/typescript.mjs";
+
+const { retainLocalTrash } = loadTypescript("src/trash.ts");
 
 const deferred = () => {
   let resolve;
@@ -22,6 +25,7 @@ function fixture() {
     syncBusyRef: { current: false },
     storageConflictRef: { current: false },
     recoveryBusyRef: { current: false },
+    historyBusyRef: { current: false },
     workspaceRef: { current: initial },
     syncConfig: { serverUrl: "http://fixture.invalid", token: "fixture", autoSync: true },
     syncState: { documentRevisions: {} },
@@ -35,6 +39,9 @@ function fixture() {
     setSyncBusy: () => {},
     persistSyncState: (state) => { states.push(state); },
     applySyncedWorkspace: (workspace) => { bindings.workspaceRef.current = workspace; },
+    captureSyncSnapshots: () => {},
+    retainLocalTrash,
+    clearEditHistory: () => {},
     saveWorkspace: async (workspace) => { saves.push(workspace); return { ok: true, target: "indexeddb" }; },
     showNotice: (message) => { notices.push(message); },
     summarizeSyncResult: () => "synced",
@@ -76,6 +83,45 @@ test("sync retains edits made while a request is pending and keeps upload checkp
   assert.deepEqual(f.saves, [f.initial]);
   assert.equal(f.retries(), 1);
   assert.equal(f.bindings.syncBusyRef.current, false);
+});
+
+test("edits made while sync snapshots are being saved are retained", async () => {
+  const f = fixture();
+  const snapshotGate = deferred();
+  const snapshotStarted = deferred();
+  f.bindings.captureSyncSnapshots = async () => {
+    snapshotStarted.resolve();
+    await snapshotGate.promise;
+  };
+  const operation = f.callback()();
+  await f.started.promise;
+  f.remote.resolve(f.result());
+  await snapshotStarted.promise;
+  const edited = { ...f.initial, documents: [{ ...f.initial.documents[0], title: "edited during snapshot" }] };
+  f.bindings.workspaceRef.current = edited;
+  snapshotGate.resolve();
+  await operation;
+  assert.equal(f.bindings.workspaceRef.current, edited);
+  assert.deepEqual(f.states, []);
+  assert.equal(f.retries(), 1);
+});
+
+test("manual pull retains local trash and archives missing documents", async () => {
+  const f = fixture();
+  const deleted = { ...f.initial.documents[0], id: "deleted", title: "Deleted" };
+  f.bindings.workspaceRef.current = {
+    ...f.initial,
+    trash: [{ id: "trash-existing", document: deleted, deletedAt: new Date().toISOString(), originalIndex: 0 }],
+  };
+  const operation = f.callback("pullRemoteWorkspace")();
+  await f.started.promise;
+  const remoteDocument = { ...f.initial.documents[0], id: "remote", title: "Remote" };
+  f.remote.resolve(f.result({ ...f.initial, activeDocumentId: "remote", documents: [remoteDocument] }));
+  await operation;
+  const restored = f.bindings.workspaceRef.current;
+  assert.equal(restored.documents[0].id, "remote");
+  assert.deepEqual(restored.trash.map((entry) => entry.document.id), ["doc", "deleted"]);
+  assert.equal(f.saves[0], restored);
 });
 
 test("sync flushes pending editor drafts before deciding whether to apply downloads", async () => {

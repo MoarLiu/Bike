@@ -79,6 +79,7 @@ const normalizeNodeShallow = (rawNode, usedIds, fallbackText = DEFAULT_NODE_TEXT
   }
 
   const node = {
+    ...rawNode,
     ...createNode(textOr(rawNode.text, fallbackText)),
     id: uniqueId(rawNode.id, usedIds),
     note: textOr(rawNode.note, ""),
@@ -162,10 +163,14 @@ export const migrateDocument = (rawDocument, usedIds = new Set()) => {
     : [];
 
   return {
+    ...rawDocument,
     id: uniqueId(rawDocument.id, usedIds),
     title: textOr(rawDocument.title, "").trim() || DEFAULT_DOCUMENT_TITLE,
     createdAt: textOr(rawDocument.createdAt, now),
     updatedAt,
+    markdownSource,
+    markdownUpdatedAt,
+    isShortcut: typeof rawDocument.isShortcut === "boolean" ? rawDocument.isShortcut : undefined,
     ...(markdownSource !== undefined ? { markdownSource } : {}),
     ...(markdownUpdatedAt !== undefined ? { markdownUpdatedAt } : {}),
     nodes: nodes.length ? nodes : [normalizeNode(null, usedIds)],
@@ -194,11 +199,53 @@ export const migrateWorkspace = (rawWorkspace) => {
     ? requestedActiveId
     : documents[0].id;
 
-  return {
+  const workspace = {
+    ...rawWorkspace,
     version: CURRENT_WORKSPACE_VERSION,
     activeDocumentId,
     documents,
   };
+  if (Array.isArray(rawWorkspace.trash)) {
+    const entryIds = new Set();
+    const trash = rawWorkspace.trash.flatMap((rawEntry) => {
+      if (
+        !isRecord(rawEntry) || Array.isArray(rawEntry) ||
+        typeof rawEntry.deletedAt !== "string" ||
+        !Number.isFinite(Date.parse(rawEntry.deletedAt)) ||
+        !isRecord(rawEntry.document) || Array.isArray(rawEntry.document) ||
+        !textOr(rawEntry.document.id, "").trim() ||
+        !Array.isArray(rawEntry.document.nodes)
+      ) {
+        return [];
+      }
+      let document;
+      try {
+        document = migrateDocument(rawEntry.document);
+      } catch {
+        return [];
+      }
+      const candidate = textOr(rawEntry.id, "").trim();
+      const id = candidate && !entryIds.has(candidate)
+        ? candidate
+        : `trash_${crypto.randomUUID()}`;
+      entryIds.add(id);
+      const index = rawEntry.originalIndex;
+      return [{
+        id,
+        document,
+        deletedAt: rawEntry.deletedAt,
+        originalIndex:
+          typeof index === "number" && Number.isInteger(index) && index >= 0
+            ? index
+            : 0,
+      }];
+    });
+    if (trash.length) workspace.trash = trash;
+    else delete workspace.trash;
+  } else {
+    delete workspace.trash;
+  }
+  return workspace;
 };
 
 export const defaultWorkspacePath = ({

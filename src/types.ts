@@ -34,10 +34,18 @@ export interface OutlineDocument {
   nodes: OutlineNode[];
 }
 
+export interface TrashEntry {
+  id: string;
+  document: OutlineDocument;
+  deletedAt: string;
+  originalIndex: number;
+}
+
 export interface Workspace {
   version: 1;
   activeDocumentId: string;
   documents: OutlineDocument[];
+  trash?: TrashEntry[];
 }
 
 export interface FlatNode {

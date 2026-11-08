@@ -1,5 +1,6 @@
-import type { OutlineDocument, OutlineNode, Workspace } from "./types";
+import type { OutlineDocument, OutlineNode, TrashEntry, Workspace } from "./types";
 import { createNode, normalizeColor, uid } from "./tree";
+import { uuid } from "./id";
 
 export const CURRENT_WORKSPACE_VERSION = 1;
 
@@ -114,6 +115,41 @@ export const migrateDocument = (
   };
 };
 
+const isValidTimestamp = (value: unknown): value is string =>
+  typeof value === "string" && Number.isFinite(Date.parse(value));
+
+export const migrateTrash = (
+  rawTrash: unknown,
+): TrashEntry[] => {
+  if (!Array.isArray(rawTrash)) return [];
+  const entryIds = new Set<string>();
+  return rawTrash.flatMap((rawEntry) => {
+    if (
+      !isRecord(rawEntry) ||
+      !isValidTimestamp(rawEntry.deletedAt) ||
+      !isRecord(rawEntry.document) ||
+      !textOr(rawEntry.document.id, "").trim() ||
+      !Array.isArray(rawEntry.document.nodes)
+    ) return [];
+    let document: OutlineDocument;
+    try {
+      document = migrateDocument(rawEntry.document);
+    } catch {
+      return [];
+    }
+    const candidate = textOr(rawEntry.id, "").trim();
+    const id = candidate && !entryIds.has(candidate) ? candidate : `trash_${uuid()}`;
+    entryIds.add(id);
+    const index = rawEntry.originalIndex;
+    return [{
+      id,
+      document,
+      deletedAt: rawEntry.deletedAt,
+      originalIndex: typeof index === "number" && Number.isInteger(index) && index >= 0 ? index : 0,
+    }];
+  });
+};
+
 export const migrateWorkspace = (rawWorkspace: unknown): Workspace => {
   if (!isRecord(rawWorkspace) || !Array.isArray(rawWorkspace.documents)) {
     throw new Error("导入文件不是有效工作区");
@@ -136,12 +172,18 @@ export const migrateWorkspace = (rawWorkspace: unknown): Workspace => {
     ? requestedActiveId
     : documents[0].id;
 
-  return {
+  const workspace: Workspace = {
     ...rawWorkspace,
     version: CURRENT_WORKSPACE_VERSION,
     activeDocumentId,
     documents,
   };
+  if ("trash" in rawWorkspace) {
+    const trash = migrateTrash(rawWorkspace.trash);
+    if (trash.length) workspace.trash = trash;
+    else delete workspace.trash;
+  }
+  return workspace;
 };
 
 export const firstDocument = (workspace: Workspace) =>

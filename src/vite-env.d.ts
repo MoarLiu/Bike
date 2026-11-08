@@ -49,6 +49,7 @@ interface BikeDesktopBridge {
     data?: unknown;
     error?: string;
   }>;
+  onEditCommand?: (callback: (action: "undo" | "redo") => void) => () => void;
   onOpenApiConfig?: (callback: () => void) => () => void;
 }
 
