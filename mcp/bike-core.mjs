@@ -2,6 +2,15 @@ import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import {
+  anchorMarkdownReferences,
+  finalizeMarkdownExport,
+  knowledgeEditable,
+  relocateFieldReferences,
+  renameTarget,
+  summarizeKnowledge,
+} from "../shared/bike-knowledge.mjs";
+import { documentToMarkdown as renderDocumentMarkdown } from "../shared/bike-markdown.mjs";
 
 export const SERVER_NAME = "bike";
 export const SERVER_DISPLAY_NAME = "Bike MCP";
@@ -1045,6 +1054,7 @@ const createWritableNode = (rawNode = {}, usedIds) => {
 const workspaceDocumentById = (workspace, documentId) => {
   const document = workspace.documents.find((candidate) => candidate.id === documentId);
   if (!document) throw new Error(`找不到文档：${documentId}`);
+  if (document.knowledge) document.knowledge = anchorMarkdownReferences(document);
   return document;
 };
 
@@ -1099,6 +1109,7 @@ const insertNodes = ({ document, parentNodeId, nodes, position = "last" }) => {
 };
 
 const markDocumentUpdated = (document, now) => {
+  if (document.knowledge) document.knowledge = anchorMarkdownReferences(document);
   document.updatedAt = now;
   delete document.markdownSource;
   delete document.markdownUpdatedAt;
@@ -1219,8 +1230,12 @@ export const updateDocumentTitleForMcp = async (store, args = {}) =>
       const title = textOr(args.title, "").trim();
       if (!title) throw new Error("title 不能为空");
       const before = document.title;
-      document.title = title;
-      markDocumentUpdated(document, now);
+      const renamed = renameTarget(workspace, { documentId: document.id, previousLabel: before, nextLabel: title, mutate: true });
+      for (const id of renamed.updatedDocumentIds) {
+        const updated = workspace.documents.find((item) => item.id === id);
+        if (updated) markDocumentUpdated(updated, now);
+      }
+      if (!renamed.updatedDocumentIds.length) markDocumentUpdated(document, now);
       return writeResult({
         operation: "update_document_title",
         summary: `更新文档标题：${before} -> ${title}`,
@@ -1367,8 +1382,33 @@ export const updateNodeForMcp = async (store, args = {}) =>
       const document = workspaceDocumentById(workspace, args.documentId);
       const located = locateNodeMutable(document.nodes, args.nodeId);
       if (!located) throw new Error(`找不到节点：${args.nodeId}`);
+      const beforeText = located.node.text;
+      if (hasOwn(args, "text") && textOr(args.text, "") !== beforeText) {
+        const renamed = renameTarget(workspace, {
+          documentId: document.id,
+          nodeId: located.node.id,
+          previousLabel: beforeText,
+          nextLabel: textOr(args.text, ""),
+          mutate: true,
+        });
+        for (const id of renamed.updatedDocumentIds) {
+          const updated = workspace.documents.find((item) => item.id === id);
+          if (updated && updated.id !== document.id) markDocumentUpdated(updated, now);
+        }
+      }
       const fieldChanges = updateNodeFields(located.node, args);
-      if (!fieldChanges.length) throw new Error("至少需要提供一个可更新字段");
+      if (!fieldChanges.length && beforeText === located.node.text) throw new Error("至少需要提供一个可更新字段");
+      if (fieldChanges.some((change) => change.field === "note") && knowledgeEditable(document.knowledge)) {
+        document.knowledge = relocateFieldReferences(document.knowledge, {
+          nodeId: located.node.id,
+          field: "note",
+          text: located.node.note,
+          previousText: fieldChanges.find((change) => change.field === "note")?.before,
+        });
+      }
+      if (hasOwn(args, "text") && !fieldChanges.some((change) => change.field === "text")) {
+        fieldChanges.unshift({ field: "text", before: beforeText, after: located.node.text });
+      }
       markDocumentUpdated(document, now);
       return writeResult({
         operation: "update_node",
@@ -1844,143 +1884,20 @@ const compactDocument = (snapshot, document, maxDepth = 6) => {
     topLevelNodeCount: document.nodes.length,
     maxDepth: boundedDepth,
     maxDocumentNodes: snapshot.config.maxDocumentNodes,
-    truncated: budget.truncated,
+    ...(() => {
+      const knowledge = summarizeKnowledge(snapshot.workspace, document, { limit: 40 });
+      return { knowledge, truncated: budget.truncated || knowledge.truncated };
+    })(),
     nodes,
   };
 };
 
-export const markdownInlineForExport = (value) => {
-  const inline = textOr(value, "").replace(/\r?\n/g, " ").replace(/\s+/g, " ").trim();
-  const text = inline || DEFAULT_NODE_TEXT;
-  return text.replace(/([\\`*_[\]{}()#+\-.!>])/g, "\\$1");
-};
+export { markdownInlineForExport } from "../shared/bike-markdown.mjs";
 
-const markdownNoteForExport = (value, indent = "") =>
-  textOr(value, "")
-    .replace(/\r\n?/g, "\n")
-    .split("\n")
-    .map((line) => `${indent}> ${line}`)
-    .join("\n");
-
-const markdownCodeFenceForExport = (code) => {
-  let longestRun = 0;
-  let currentRun = 0;
-  for (const character of code) {
-    if (character === "`") {
-      currentRun += 1;
-      longestRun = Math.max(longestRun, currentRun);
-    } else {
-      currentRun = 0;
-    }
-  }
-  return "`".repeat(Math.max(3, longestRun + 1));
-};
-
-const markdownCodeForExport = (value, language = "", indent = "") => {
-  const code = textOr(value, "").replace(/\r\n?/g, "\n");
-  const fence = markdownCodeFenceForExport(code);
-  const info = textOr(language, "").trim().replace(/[`~\s].*$/, "");
-  return [
-    `${indent}${fence}${info}`,
-    ...code.split("\n").map((line) => `${indent}${line}`),
-    `${indent}${fence}`,
-  ].join("\n");
-};
-
-const markdownTableCellForExport = (value) =>
-  markdownInlineForExport(value).replace(/\|/g, "\\|");
-
-const tableToMarkdown = (table, indent = "") => {
-  const rows = table.filter((row) => row.length);
-  if (!rows.length) return [];
-
-  const columnCount = Math.max(...rows.map((row) => row.length));
-  const paddedRows = rows.map((row) =>
-    Array.from({ length: columnCount }, (_, index) => row[index] ?? ""),
-  );
-  const cells = paddedRows.map(
-    (row) => `${indent}| ${row.map(markdownTableCellForExport).join(" | ")} |`,
-  );
-  const separator = `${indent}| ${Array.from({ length: columnCount }, () => "---").join(" | ")} |`;
-  return [cells[0], separator, ...cells.slice(1)];
-};
-
-const appendNodeMarkdown = (lines, node, listDepth, insideList) => {
-  const text = markdownInlineForExport(node.text);
-  const headingLevel = node.headingLevel ?? 0;
-  const shouldWriteHeading = headingLevel > 0 && !insideList;
-
-  if (shouldWriteHeading) {
-    lines.push(`${"#".repeat(Math.min(headingLevel + 1, 6))} ${text}`);
-    if (node.note) lines.push(markdownNoteForExport(node.note));
-    if (node.imageName) {
-      lines.push(
-        `![${markdownInlineForExport(node.imageAlt || node.imageName)}](${node.imageName})`,
-      );
-    }
-    if (node.table) lines.push(...tableToMarkdown(node.table));
-    if (typeof node.codeBlock === "string") {
-      lines.push(markdownCodeForExport(node.codeBlock, node.codeLanguage));
-    }
-    return { childListDepth: 0, childInsideList: false };
-  }
-
-  const indent = "  ".repeat(listDepth);
-  const marker = node.isTodo || node.checked ? `- [${node.checked ? "x" : " "}]` : "-";
-  lines.push(`${indent}${marker} ${text}`);
-
-  const childIndent = `${indent}  `;
-  if (node.note) lines.push(markdownNoteForExport(node.note, childIndent));
-  if (node.imageName) {
-    lines.push(
-      `${childIndent}![${markdownInlineForExport(node.imageAlt || node.imageName)}](${node.imageName})`,
-    );
-  }
-  if (node.table) lines.push(...tableToMarkdown(node.table, childIndent));
-  if (typeof node.codeBlock === "string") {
-    lines.push(markdownCodeForExport(node.codeBlock, node.codeLanguage, childIndent));
-  }
-
-  return { childListDepth: listDepth + 1, childInsideList: true };
-};
-
-const nodesToMarkdown = (nodes) => {
-  const lines = [];
-  const stack = [];
-
-  for (let index = nodes.length - 1; index >= 0; index -= 1) {
-    stack.push({ node: nodes[index], listDepth: 0, insideList: false });
-  }
-
-  while (stack.length) {
-    const frame = stack.pop();
-    if (!frame?.node) continue;
-    const childContext = appendNodeMarkdown(
-      lines,
-      frame.node,
-      frame.listDepth,
-      frame.insideList,
-    );
-    const children = nodeChildren(frame.node);
-    for (let index = children.length - 1; index >= 0; index -= 1) {
-      stack.push({
-        node: children[index],
-        listDepth: childContext.childListDepth,
-        insideList: childContext.childInsideList,
-      });
-    }
-  }
-
-  return lines;
-};
-
-export const documentToMarkdown = (document) => {
-  if (typeof document.markdownSource === "string") {
-    return document.markdownSource.replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n");
-  }
-  const title = markdownInlineForExport(document.title || DEFAULT_DOCUMENT_TITLE);
-  const body = nodesToMarkdown(document.nodes);
-  return [`# ${title}`, "", ...body].join("\n").trimEnd();
+export const documentToMarkdown = (document, options = {}) => {
+  const exported = finalizeMarkdownExport(renderDocumentMarkdown(document), document, { metadata: options.metadata === true });
+  if (options.metadata && exported.error) throw new Error(exported.error);
+  return exported.content;
 };
 
 const sanitizeFilenameBase = (value) => {
@@ -2004,7 +1921,7 @@ const exportFilename = (title, extension) =>
 
 export const getDocument = (
   snapshot,
-  { documentId, format = "compact", maxDepth = 6 } = {},
+  { documentId, format = "compact", maxDepth = 6, metadata = false } = {},
 ) => {
   const document = documentById(snapshot, documentId);
   if (format === "json") {
@@ -2020,7 +1937,7 @@ export const getDocument = (
       documentId: document.id,
       title: document.title,
       format,
-      content: documentToMarkdown(document),
+      content: documentToMarkdown(document, { metadata }),
     };
   }
   return {
@@ -2113,14 +2030,14 @@ export const getNode = (
 
 export const exportDocumentForMcp = (
   snapshot,
-  { documentId, format = "json" } = {},
+  { documentId, format = "json", metadata = false } = {},
 ) => {
   const document = documentById(snapshot, documentId);
   if (format === "markdown") {
     return {
-      filename: exportFilename(document.title, "md"),
+      filename: exportFilename(document.title, metadata ? "bike.md" : "md"),
       mime: "text/markdown",
-      content: documentToMarkdown(document),
+      content: documentToMarkdown(document, { metadata }),
     };
   }
   return {

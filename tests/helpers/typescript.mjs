@@ -20,9 +20,13 @@ export function loadTypescript(filename) {
   const require = createRequire(resolved);
   const code = compile(readFileSync(resolved, "utf8"));
   const execute = vm.runInThisContext(`(function(require, module, exports) {\n${code}\n})`, { filename: resolved });
-  execute((name) => name.startsWith(".")
-    ? loadTypescript(path.resolve(path.dirname(resolved), `${name}.ts`))
-    : require(name), module, module.exports);
+  execute((name) => {
+    if (name.endsWith("?url")) return name.slice(0, -4);
+    if (!name.startsWith(".")) return require(name);
+    const target = path.resolve(path.dirname(resolved), name);
+    if (/\.(mjs|cjs|js)$/u.test(name)) return require(target);
+    return loadTypescript(name.endsWith(".ts") || name.endsWith(".tsx") ? target : `${target}.ts`);
+  }, module, module.exports);
   return module.exports;
 }
 
@@ -34,9 +38,13 @@ export function loadTypescriptIsolated(filename) {
   const require = createRequire(resolved);
   const code = compile(readFileSync(resolved, "utf8"));
   const execute = vm.runInThisContext(`(function(require, module, exports) {\n${code}\n})`, { filename: resolved });
-  execute((name) => name.startsWith(".")
-    ? loadTypescript(path.resolve(path.dirname(resolved), `${name}.ts`))
-    : require(name), module, module.exports);
+  execute((name) => {
+    if (name.endsWith("?url")) return name.slice(0, -4);
+    if (!name.startsWith(".")) return require(name);
+    const target = path.resolve(path.dirname(resolved), name);
+    if (/\.(mjs|cjs|js)$/u.test(name)) return require(target);
+    return loadTypescript(name.endsWith(".ts") || name.endsWith(".tsx") ? target : `${target}.ts`);
+  }, module, module.exports);
   return module.exports;
 }
 

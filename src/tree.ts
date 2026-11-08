@@ -1,5 +1,6 @@
 import type { FlatNode, OutlineNode } from "./types";
 import { uuid } from "./id";
+import { extractKnowledgeTags, scanLinks } from "./knowledge";
 
 export const uid = () =>
   `node_${uuid()}`;
@@ -378,15 +379,9 @@ export const flattenNodes = (
 export const firstNodeId = (nodes: OutlineNode[]) =>
   flattenNodes(nodes)[0]?.node.id ?? null;
 
-export const extractTags = (text: string) =>
-  Array.from(text.matchAll(/(^|\s)#([\p{L}\p{N}_-]+)/gu)).map(
-    (match) => match[2],
-  );
+export const extractTags = (text: string) => extractKnowledgeTags(text);
 
-export const extractLinks = (text: string) =>
-  Array.from(text.matchAll(/\[\[([^\]]+)\]\]/g)).map((match) =>
-    match[1].trim(),
-  );
+export const extractLinks = (text: string) => scanLinks(text).map((link) => link.label);
 
 export const nodeText = (node: OutlineNode) =>
   `${node.text} ${node.note}`.trim();

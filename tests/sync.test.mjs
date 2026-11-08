@@ -103,6 +103,11 @@ test("desktop sync preserves mobile shortcuts and document/node extensions", asy
   const { store } = await fixture(t);
   const source = { ...document("A", "mobile"), isShortcut: true, extension: { keep: true } };
   source.nodes[0].extension = ["keep"];
+  source.knowledge = { version: 1, references: [{
+    id: "ref", source: { kind: "node-field", nodeId: "lost-source", field: "text", start: -1, end: -1, raw: "[[A]]", groupId: "group" },
+    target: { documentId: "A", nodeId: "node-A" }, labelMode: "auto",
+  }], relations: [{ id: "edge", fromNodeId: "node-A", toNodeId: "missing-endpoint", label: "保留失效边" }],
+  sourceGroups: { group: { raw: "[[A]]", candidates: [{ nodeId: "node-A", field: "text" }] } } };
   store.putDocument({ id: "A", expectedRevision: null, document: source });
   const pulled = await sync.pullWorkspaceFromRemote(config);
   const edited = { ...pulled.workspace, extension: "workspace", documents: pulled.workspace.documents.map((item) => ({ ...item, title: "desktop edit" })) };
@@ -111,6 +116,7 @@ test("desktop sync preserves mobile shortcuts and document/node extensions", asy
   assert.equal(remote.isShortcut, true);
   assert.deepEqual(remote.extension, { keep: true });
   assert.deepEqual(remote.nodes[0].extension, ["keep"]);
+  assert.deepEqual(remote.knowledge, source.knowledge);
   assert.equal(result.workspace.extension, "workspace");
 });
 

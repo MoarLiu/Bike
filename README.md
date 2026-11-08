@@ -6,17 +6,18 @@ Bike 是一个本地优先的大纲、思维导图和 Markdown 写作工具。�
 
 | 平台 | 版本 | 状态 | 位置 |
 | --- | --- | --- | --- |
-| Web | `1.5.0` | 浏览器版本 | 根目录 |
-| Electron macOS Apple Silicon | `1.5.0` | 主要客户端 | 根目录 |
+| Web | `1.6.0` | 浏览器版本 | 根目录 |
+| Electron macOS Apple Silicon | `1.6.0` | 主要客户端 | 根目录 |
 
-## 1.5.0 重点
+## 1.6.0 重点
 
-- 编辑支持撤销/重做，覆盖输入、层级、拖拽、格式和 AI 写入。
-- 文档删除后进入本机回收站，可恢复、彻底删除或下载备份后清空。
-- 版本历史支持自动与手动快照、预览和恢复，恢复操作也能撤销。
-- 改善 Electron 编辑菜单、最小窗口布局和暗色正文显示；保留 1.4.4 的保存、同步与备用副本保护。
+- 文档/主题链接补全、反向链接、改名跟随；重名目标需明确选择。
+- 主题级搜索、多标签与任务筛选，以及本机收藏、最近打开和保存筛选管理。
+- 同文档主题关系的编辑和脑图虚线显示，关系修改支持撤销。
+- Electron 自动 iCloud 备份默认关闭；启用后写入已保存版本，遇外部变化暂停。
+- 保留撤销、回收站和本地版本历史；节点详情默认收起，Electron 最小窗口为 1366×960。
 
-完整更新说明见 [Bike 1.5.0](docs/release-1.5.0.md)。Bike 面向个人知识整理，以 Electron macOS 桌面版为主，继续提供 Web/Sync Server 部署包。
+完整更新说明见 [Bike 1.6.0](docs/release-1.6.0.md)。Bike 面向个人知识整理，以 Electron macOS 桌面版为主，继续提供 Web/Sync Server 部署包。
 
 ## 同步服务与 AI
 
@@ -41,10 +42,10 @@ Electron 同样接入 Web Sync。同步设备密钥按用户要求明文保存�
 - 思维导图：同一份大纲数据可切换为脑图视图，支持节点编辑、折叠和展开。
 - Markdown 文档：支持源码编辑、分栏编辑预览、纯编辑和纯预览切换。
 - AI 辅助：在大纲、思维导图、Markdown 模式中生成子主题或润色当前主题。
-- 知识组织：全文搜索、标签 `#tag`、文档链接 `[[文档名]]`。
+- 知识组织：主题级搜索、多标签 `#tag`、文档/主题链接 `[[文档名#主题名|别名]]`、反向链接和同文档主题关系。
 - 导入导出：JSON 工作区、Markdown、OPML、FreeMind、HTML、PDF。
 - 编辑安全：撤销/重做、文档回收站和本地版本历史快照。
-- 本地优先：浏览器 IndexedDB 自动保存，桌面版可备份到 iCloud Drive。
+- 本地优先：浏览器 IndexedDB 保存，桌面版支持手动备份和可选的自动 iCloud Drive 备份。
 - 节点详情栏默认收起，可通过右上角的“显示节点详情”按钮展开，再次点击收起。
 - 文档级同步：可单独部署 SQLite Sync Server，其他设备可按文档 revision 双向同步。
 - 检查更新：桌面菜单和应用内入口可检查 GitHub Release，并跳转发布页获取新版本。
@@ -58,6 +59,7 @@ Electron 同样接入 Web Sync。同步设备密钥按用户要求明文保存�
 ├── electron/               # Electron 壳
 ├── server/                 # Web 认证服务、独立同步服务
 ├── mcp/                    # Bike MCP server
+├── shared/                 # 前端与 MCP 共用的 Markdown / 知识连接运行时
 ├── config/                 # 单用户部署配置模板
 └── docs/                   # 项目文档
 ```
@@ -228,7 +230,7 @@ curl -fsSL https://raw.githubusercontent.com/MoarLiu/Bike/main/scripts/install.s
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/MoarLiu/Bike/main/scripts/install.sh \
-  | BIKE_VERSION=v1.5.0 BIKE_INSTALL_DIR=/opt/bike-sync-server bash -s -- install-sync
+  | BIKE_VERSION=v1.6.0 BIKE_INSTALL_DIR=/opt/bike-sync-server bash -s -- install-sync
 ```
 
 已经 clone 仓库时，也可以在项目目录里运行：

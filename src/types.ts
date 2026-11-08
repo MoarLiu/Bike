@@ -31,6 +31,12 @@ export interface OutlineDocument {
   markdownSource?: string;
   markdownUpdatedAt?: string;
   isShortcut?: boolean;
+  knowledge?: {
+    version: number;
+    references?: unknown[];
+    relations?: unknown[];
+    [key: string]: unknown;
+  };
   nodes: OutlineNode[];
 }
 

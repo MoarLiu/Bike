@@ -9,6 +9,7 @@ import {
   documentToMarkdown,
   parseMarkdownDocument,
 } from "./markdown";
+import { finalizeMarkdownExport, readBikeMetadata, restoreMarkdownIdentity, readableRelations } from "./knowledge";
 import pdfFontUrl from "./assets/NotoSansSC-ChineseSimplified.ttf?url";
 
 const escapeXml = (value: string) =>
@@ -168,14 +169,19 @@ const printableDocument = (outlineDocument: OutlineDocument) => {
     `</head>`,
     `<body><main><h1>${escapeXml(title)}</h1><ul>${outlineDocument.nodes
       .map(printableNode)
-      .join("")}</ul></main></body>`,
+      .join("")}</ul>${relationsHtml(outlineDocument)}</main></body>`,
     `</html>`,
   ].join("");
+};
+const relationsHtml = (document: OutlineDocument) => {
+  const relations = readableRelations(document);
+  return relations.length ? `<section><h2>主题关系</h2><ul>${relations.map((line) => `<li>${escapeXml(line)}</li>`).join("")}</ul></section>` : "";
 };
 
 export const exportDocument = (
   document: OutlineDocument,
   format: "json" | "markdown" | "opml" | "freemind" | "html",
+  options?: { metadata?: boolean },
 ) => {
   const title = documentTitle(document);
 
@@ -188,10 +194,14 @@ export const exportDocument = (
   }
 
   if (format === "markdown") {
+    const body = typeof document.markdownSource === "string" ? document.markdownSource : documentToMarkdown(document);
+    const exported = finalizeMarkdownExport(body, document, { metadata: options?.metadata === true });
     return {
-      filename: exportFilename(title, "md"),
+      filename: exportFilename(title, options?.metadata ? "bike.md" : "md"),
       mime: "text/markdown",
-      content: documentToMarkdown(document),
+      content: exported.content,
+      lossy: exported.lossy,
+      error: exported.error,
     };
   }
 
@@ -233,7 +243,7 @@ export const exportDocument = (
       `<!doctype html>`,
       `<html lang="zh-CN">`,
       `<head><meta charset="UTF-8"><title>${escapeXml(title)}</title></head>`,
-      `<body><h1>${escapeXml(title)}</h1><ul>${document.nodes.map(htmlNode).join("")}</ul></body>`,
+      `<body><h1>${escapeXml(title)}</h1><ul>${document.nodes.map(htmlNode).join("")}</ul>${relationsHtml(document)}</body>`,
       `</html>`,
     ].join(""),
   };
@@ -425,6 +435,12 @@ export const exportDocumentAsPdf = async (outlineDocument: OutlineDocument) => {
   };
 
   outlineDocument.nodes.forEach((node) => drawNode(node, 0));
+  const relations = readableRelations(outlineDocument, { separator: " 指向 " });
+  if (relations.length) {
+    y -= 12;
+    drawLines(["主题关系"], { x: margin.left, fontSize: 16, lineHeight: 24, color: rgb(0.08, 0.08, 0.09) });
+    for (const line of relations) drawLines(wrapPdfText(line, font, 11, pageSize.width - margin.left - margin.right), { x: margin.left, fontSize: 11, lineHeight: 17, color: rgb(0.22, 0.22, 0.24) });
+  }
 
   const pageCount = pdfDocument.getPageCount();
   pdfDocument.getPages().forEach((pdfPage, index) => {
@@ -479,7 +495,11 @@ const parseFreeMindElement = (element: Element): OutlineNode => ({
     .map(parseFreeMindElement),
 });
 
-export const importDocument = (content: string, filename: string): OutlineDocument | Workspace => {
+export const importDocument = (
+  content: string,
+  filename: string,
+  options?: { dropMetadata?: boolean },
+): OutlineDocument | Workspace => {
   const now = new Date().toISOString();
   const lowerFilename = filename.toLowerCase();
 
@@ -488,13 +508,23 @@ export const importDocument = (content: string, filename: string): OutlineDocume
     if ("documents" in parsed) return migrateWorkspace(parsed);
     return migrateDocument({
       ...parsed,
-      id: uuid(),
       updatedAt: now,
     });
   }
 
   if (/\.(md|markdown)$/i.test(filename)) {
-    return parseMarkdownDocument(content, { filename });
+    if (options?.dropMetadata) {
+      return parseMarkdownDocument(content.replace(/<!--\s*bike:document:[^>]*-->/gu, ""), { filename });
+    }
+    const read = readBikeMetadata(content);
+    if (read.status === "invalid" || read.status === "unknown-version" || read.status === "too-large") {
+      throw new Error(`BIKE_METADATA:${read.error || "这份 Markdown 的 Bike 元数据无法安全恢复"}`);
+    }
+    const parsed = parseMarkdownDocument(read.body ?? content, { filename });
+    if ((read.status === "matched" || read.status === "digest-mismatch") && read.metadata) {
+      return restoreMarkdownIdentity(parsed, read.metadata, { matched: read.status === "matched" });
+    }
+    return parsed;
   }
 
   const parser = new DOMParser();

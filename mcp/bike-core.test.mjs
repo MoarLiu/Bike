@@ -429,6 +429,11 @@ test("indexes deeply nested outlines without recursive stack overflow", () => {
       maxDocumentNodes: 10,
     },
   };
+  const compact = getDocument(snapshot, { documentId: "doc_deep", maxDepth: 0 });
+  assert.equal(compact.content.nodeCount, 5000);
+  assert.equal(compact.content.nodes.length, 1);
+  assert.equal(compact.content.nodes[0].children.length, 0);
+  assert.equal(compact.content.knowledge.references.total, 0);
   const deepNode = getNode(snapshot, {
     documentId: "doc_deep",
     nodeId: "deep_4999",

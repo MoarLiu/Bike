@@ -67,6 +67,27 @@ const counter = () => {
   return fn;
 };
 
+test("backup save receipts follow committed IndexedDB revisions across windows", async (t) => {
+  const b = browser(t);
+  b.seedDb(workspace("initial"), { revision: 10 });
+  const a = b.tab();
+  const initial = await loaded(a);
+  assert.equal(a.getWorkspaceSaveRevision(initial.workspace), 10);
+  const first = edit(initial.workspace, "first");
+  await a.saveWorkspace(first);
+  assert.equal(a.getWorkspaceSaveRevision(first), 11);
+  const other = b.tab();
+  const latest = await loaded(other);
+  const second = edit(latest.workspace, "second");
+  await other.saveWorkspace(second);
+  assert.equal(other.getWorkspaceSaveRevision(second), 12);
+  assert.equal(a.getWorkspaceSaveRevision(first), 11);
+  const rejected = edit(first, "stale");
+  assert.equal((await a.saveWorkspace(rejected)).ok, false);
+  assert.equal(a.getWorkspaceSaveRevision(rejected), undefined);
+  await b.done();
+});
+
 const loaded = async (tab) => {
   const result = await tab.loadWorkspace();
   assert.equal(result.status, "loaded", result.error?.message);

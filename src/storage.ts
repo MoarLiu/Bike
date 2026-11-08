@@ -62,7 +62,7 @@ type ReadResult =
 
 type WriteOutcome =
   | { status: "saved"; revision: number }
-  | { status: "unchanged" }
+  | { status: "unchanged"; revision: number }
   | { status: "conflict" }
   | { status: "superseded" };
 
@@ -80,6 +80,10 @@ const pageId = uuid();
 let knownRevision: number | null = null;
 // The workspace object currently stored at knownRevision, if this page has it.
 let persistedWorkspace: Workspace | null = null;
+// A receipt belongs to the exact object committed by IndexedDB. Its revision
+// orders saves across windows, unlike a renderer's private request counter.
+const savedRevisions = new WeakMap<Workspace, number>();
+export const getWorkspaceSaveRevision = (workspace: Workspace): number | undefined => savedRevisions.get(workspace);
 let ownFallback: FallbackSnapshot | null = null;
 let saveSequence = 0;
 let ownFallbackSequence = 0;
@@ -409,6 +413,7 @@ const adopt = (result: ReadResult): WorkspaceLoadResult => {
     return { status: "empty" };
   }
   persistedWorkspace = result.persisted ? result.workspace : null;
+  if (result.persisted && result.revision !== null) savedRevisions.set(result.workspace, result.revision);
   adoptedFallback = result.snapshot ?? null;
   return { status: "loaded", workspace: result.workspace, source: result.source };
 };
@@ -527,7 +532,7 @@ const writeWorkspace = async (
           return;
         }
         if (!overwrite && workspace === persistedWorkspace) {
-          result = { status: "unchanged" };
+          result = { status: "unchanged", revision: stored.revision };
           return;
         }
         const revision = stored.revision + 1;
@@ -586,6 +591,7 @@ const writeWorkspace = async (
     clearSavedFallbacks(workspace);
     broadcastSaved(outcome.revision);
   }
+  savedRevisions.set(workspace, outcome.revision);
   return { ok: true, target: "indexeddb" };
 };
 

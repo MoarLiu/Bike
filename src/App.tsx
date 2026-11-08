@@ -79,8 +79,61 @@ import {
   type AiNodeAction,
 } from "./ai";
 import { saveICloudBackup } from "./backup";
+import { BackupSettingsDialog } from "./components/BackupSettingsDialog";
+import { KnowledgePanel } from "./components/KnowledgePanel";
+import { LinkAutocomplete } from "./components/LinkAutocomplete";
+import { LinkInput } from "./components/LinkInput";
+import { SearchResults } from "./components/SearchResults";
+import { SearchControls } from "./components/SearchControls";
 import { TrashDialog } from "./components/TrashDialog";
 import { VersionHistoryDialog } from "./components/VersionHistoryDialog";
+import {
+  activeLinkQuery,
+  addRelation,
+  anchorMarkdownReferences,
+  attachReference,
+  backlinksFor,
+  backupContentHash,
+  buildKnowledgeIndex,
+  copiedKnowledgeFragment,
+  createBackupSchedule,
+  deleteRelation,
+  deleteNavigationFilter,
+  renameNavigationFilter,
+  relationView,
+  updateRelation,
+  foldKey,
+  expandAncestors,
+  formatWikiLink,
+  insertLinkAtQuery,
+  knowledgeEditable,
+  normalizeNavigation,
+  pruneNavigation,
+  pruneBackupPayloads,
+  readBikeMetadata,
+  reduceBackupSchedule,
+  rekeyNodes as rekeyKnowledgeNodes,
+  relocateMarkdownReferences,
+  reconcileMarkdownReferences,
+  rememberOpen,
+  renameTarget,
+  resetRecentOpens,
+  moveSubtreeConnections,
+  resolveDocumentConnections,
+  resolveWikiLink,
+  reverseRelation,
+  remapCollidingIds,
+  retargetIncomingNodes,
+  scanLinks,
+  saveNavigationFilter,
+  searchKnowledge,
+  suggestLinkTargets,
+  toggleFavorite,
+  withFieldText,
+  type LinkOrigin,
+  type NavigationState,
+  type Suggestion,
+} from "./knowledge";
 import { sameDocumentContent } from "./documentSignature";
 import {
   emptyEditHistory,
@@ -97,22 +150,24 @@ import {
   exportWorkspace,
   importDocument,
 } from "./exporters";
-import { documentToMarkdown, parseMarkdownDocument } from "./markdown";
+import { documentToMarkdown, markdownLinkOrigins, parseMarkdownDocument } from "./markdown";
 import { firstDocument, migrateWorkspace } from "./migrations";
 import { createStarterWorkspace } from "./sample";
 import {
   discardWorkspaceRecoverySnapshot,
+  getWorkspaceSaveRevision,
   isWorkspacePersisted,
   listWorkspaceRecoverySnapshots,
   loadWorkspace,
   reloadWorkspaceIf,
-  saveWorkspace,
+  saveWorkspace as saveWorkspaceToStorage,
   saveWorkspaceFallback,
   subscribeToWorkspaceChanges,
   subscribeToWorkspaceConflicts,
   type WorkspaceRecoverySnapshot,
   type WorkspaceSaveResult,
 } from "./storage";
+import { readPreference, writePreference } from "./navigationStore";
 import { safeMarkdownUrl } from "./safeUrl";
 import {
   loadSyncConfig,
@@ -168,6 +223,7 @@ import {
 } from "./versionHistory";
 
 type ExportFormat = "json" | "markdown" | "opml" | "freemind" | "html";
+type MindRelation = { id: string; fromNodeId: string; toNodeId: string; label: string };
 type AppViewMode = ViewMode | "markdown";
 type MarkdownPaneMode = "edit" | "preview" | "split";
 type MarkdownDocument = OutlineDocument & {
@@ -190,6 +246,7 @@ type NodeClipboard = {
   sourceDocumentId: string;
   sourceId: string;
   node: OutlineNode;
+  knowledge?: OutlineDocument["knowledge"];
 };
 type OutlineDropZone = "before" | "after" | "child";
 type StructuredAiTargetId = string;
@@ -236,6 +293,11 @@ const isEditableEventTarget = (target: EventTarget | null) =>
 const clampNumber = (value: number, min: number, max: number) =>
   Math.min(max, Math.max(min, value));
 
+const centerMindMapItem = (bounds: { width: number; height: number }, item: { x: number; y: number; width: number; height: number }, currentScale: number) => {
+  const scale = clampNumber(Math.min(currentScale, (bounds.width - 48) / item.width, (bounds.height - 64) / item.height), 0.35, 2.5);
+  return { scale, x: bounds.width / 2 - (item.x + item.width / 2) * scale, y: bounds.height / 2 - (item.y + item.height / 2) * scale };
+};
+
 const rekeyNodes = (nodes: OutlineNode[]): OutlineNode[] =>
   nodes.map((node) => ({
     ...node,
@@ -248,8 +310,11 @@ const collectDocumentText = (document: OutlineDocument) =>
     .map((row) => nodeText(row.node))
     .join(" ")}`.toLowerCase();
 
-const getDocumentMarkdown = (document: MarkdownDocument) =>
-  document.markdownSource ?? documentToMarkdown(document);
+const getDocumentMarkdown = (document: MarkdownDocument) => {
+  const source = document.markdownSource ?? documentToMarkdown(document);
+  const read = readBikeMetadata(source);
+  return read.status === "unknown-version" ? source : read.body ?? source;
+};
 
 const replaceMarkdownTitle = (source: string, title: string) => {
   const normalized = source.replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n");
@@ -436,10 +501,57 @@ const insertMarkdownChildren = (
 
 const clearDocumentMarkdown = (document: MarkdownDocument): MarkdownDocument => {
   const next = { ...document };
+  const knowledge = anchorMarkdownReferences(next);
+  if (knowledge) next.knowledge = knowledge as MarkdownDocument["knowledge"];
   delete next.markdownSource;
   delete next.markdownUpdatedAt;
   return next;
 };
+
+const stampRenamedWorkspace = (workspace: Workspace, ids: string[]): Workspace => {
+  const updated = new Set(ids);
+  const timestamp = now();
+  return {
+    ...workspace,
+    documents: workspace.documents.map((document) => (
+      updated.has(document.id)
+        ? clearDocumentMarkdown({ ...(document as MarkdownDocument), updatedAt: timestamp })
+        : document
+    )),
+  };
+};
+
+let openWikiLinkHandler: ((raw: string, source: LinkOrigin) => void) | null = null;
+
+function DocumentTitleInput({
+  value,
+  className,
+  ariaLabel,
+  onCommit,
+}: {
+  value: string;
+  className: string;
+  ariaLabel?: string;
+  onCommit: (value: string) => void;
+}) {
+  const [draft, setDraft] = useState(value);
+  useEffect(() => setDraft(value), [value]);
+  return (
+    <input
+      className={className}
+      value={draft}
+      aria-label={ariaLabel}
+      onChange={(event) => setDraft(event.target.value)}
+      onBlur={() => {
+        if (draft !== value) onCommit(draft);
+      }}
+      onKeyDown={(event) => {
+        if (event.nativeEvent.isComposing) return;
+        if (event.key === "Enter") event.currentTarget.blur();
+      }}
+    />
+  );
+}
 
 const renderNodeMarkdown = (node: OutlineNode, depth = 0): string => {
   const indent = "  ".repeat(depth);
@@ -453,6 +565,11 @@ const renderNodeMarkdown = (node: OutlineNode, depth = 0): string => {
 
 const nodeContainsId = (node: OutlineNode, id: string): boolean =>
   node.id === id || node.children.some((child) => nodeContainsId(child, id));
+
+const subtreeIds = (node: OutlineNode): string[] => [
+  node.id,
+  ...(node.children ?? []).flatMap(subtreeIds),
+];
 
 const firstNodeIdInWorkspace = (workspace: Workspace) =>
   firstNodeId(firstDocument(workspace).nodes);
@@ -535,12 +652,16 @@ const InspectorNoteField = React.memo(function InspectorNoteField({
   onPatch,
   onDraftChange,
   onCommit,
+  onSuggest, onBind, onCreate,
 }: {
   nodeId: string;
   note: string;
   onPatch: (id: string, patch: Partial<OutlineNode>) => void;
   onDraftChange: (id: string, value: string, baseNote: string) => void;
   onCommit: (id: string, value: string) => void;
+  onSuggest: React.ComponentProps<typeof LinkInput>["onSuggest"];
+  onBind: React.ComponentProps<typeof LinkInput>["onBind"];
+  onCreate: React.ComponentProps<typeof LinkInput>["onCreate"];
 }) {
   const [draft, setDraft] = useState(note);
   const latestRef = useRef({ nodeId, note, draft, onPatch, onCommit });
@@ -586,7 +707,11 @@ const InspectorNoteField = React.memo(function InspectorNoteField({
   };
 
   return (
-    <textarea
+    <LinkInput
+      aria-label="备注"
+      onSuggest={onSuggest}
+      onBind={(text, span, target, mode) => { clearDebounce(); setDraft(text); latestRef.current = { ...latestRef.current, draft: text, note: text }; onBind(text, span, target, mode); onCommit(nodeId, text); }}
+      onCreate={(text, query, title) => { clearDebounce(); const inserted = insertLinkAtQuery(text, query, { documentName: title }); setDraft(inserted.text); latestRef.current = { ...latestRef.current, draft: inserted.text, note: inserted.text }; onCreate(text, query, title); onCommit(nodeId, inserted.text); }}
       value={draft}
       onChange={handleChange}
       onFocus={() => {
@@ -611,13 +736,44 @@ function App() {
   const [search, setSearch] = useState("");
   const [activeNodeId, setActiveNodeId] = useState<string | null>(null);
   const [focusNodeId, setFocusNodeId] = useState<string | null>(null);
-  const [selectedTag, setSelectedTag] = useState<string | null>(null);
+  const [selectedTags, setSelectedTags] = useState<string[]>([]);
+  const selectedTag = selectedTags[0] ?? null;
+  const setSelectedTag = (tag: string | null) => setSelectedTags(tag ? [tag] : []);
+  const [filterDocumentIds, setFilterDocumentIds] = useState<string[]>([]);
+  const [favoriteOnly, setFavoriteOnly] = useState(false);
+  const [includeCode, setIncludeCode] = useState(false);
   const [showNodeInspector, setShowNodeInspector] = useState(false);
   const [nodeClipboard, setNodeClipboard] = useState<NodeClipboard | null>(null);
   const [notice, setNotice] = useState("本地自动保存已开启");
   const [noticeKey, setNoticeKey] = useState(0);
   const [showConfirmDelete, setShowConfirmDelete] = useState(false);
-  const [sidebarView, setSidebarView] = useState<"all" | "recent">("all");
+  const [sidebarView, setSidebarView] = useState<"all" | "recent" | "quick">("all");
+  const [navigation, setNavigation] = useState<NavigationState>(() => {
+    try {
+      return normalizeNavigation(JSON.parse(localStorage.getItem("bike.navigation.v1") || "null"));
+    } catch {
+      return normalizeNavigation(null);
+    }
+  });
+  const [location, setLocation] = useState<{ nodeId: string | null; documentId: string | null; version: number }>({ nodeId: null, documentId: null, version: 0 });
+  const locatedNodeId = location.nodeId;
+  const setLocatedNodeId = useCallback((nodeId: string | null, documentId: string) => setLocation((current) => ({ nodeId, documentId, version: current.version + 1 })), []);
+  const [showRelations, setShowRelations] = useState(() => readPreference("bike.mindmap.relations", "1") !== "0");
+  const [showBackupSettings, setShowBackupSettings] = useState(false);
+  const [backupStatus, setBackupStatus] = useState<{ auto?: boolean; paused?: string | null; lastSuccessAt?: string | null; lastError?: { message?: string } | null }>({});
+  const [taskFilter, setTaskFilter] = useState<"all" | "open" | "done">("all");
+  const [searchLimit, setSearchLimit] = useState(100);
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+  const labelBaselineRef = useRef(new Map<string, string>());
+  const backupScheduleRef = useRef(createBackupSchedule());
+  const backupLocalPauseRef = useRef<string | null>("loading");
+  const preferenceFailureRef = useRef(false);
+  const backupTicketRef = useRef(0);
+  const backupTicketReadyRef = useRef(false);
+  const backupTimerRef = useRef<number | null>(null);
+  const backupPayloadsRef = useRef(new Map<number, Workspace>());
+  const backupFlightRef = useRef<Promise<void> | null>(null);
+  const navHistoryRef = useRef<{ entries: Array<{ documentId: string; nodeId: string | null }>; index: number }>({ entries: [], index: -1 });
   const [recentTicker, setRecentTicker] = useState(0);
   const [aiConfig, setAiConfig] = useState<AiApiConfig>(() => loadAiConfig());
   const [showAiConfig, setShowAiConfig] = useState(false);
@@ -665,7 +821,7 @@ function App() {
   const autoSyncDirtyRef = useRef(false);
 
   const [theme, setTheme] = useState<"light" | "dark">(
-    () => (localStorage.getItem("theme") as "light" | "dark") || "light"
+    () => readPreference("theme", "light") as "light" | "dark"
   );
   const [pendingCaretFocus, setPendingCaretFocus] = useState<{ id: string; position: number } | null>(null);
 
@@ -677,18 +833,174 @@ function App() {
   const refreshRecoverySnapshots = useEventCallback(() => {
     setRecoverySnapshots(listWorkspaceRecoverySnapshots(workspaceRef.current));
   });
+  const persistPreference = useEventCallback((key: string, value: string) => {
+    if (!writePreference(key, value) && !preferenceFailureRef.current) {
+      preferenceFailureRef.current = true;
+      showNotice("偏好设置暂时无法保存，当前编辑仍可继续");
+    }
+  });
+  const pauseLocalBackup = useEventCallback((reason: string) => {
+    const changed = backupLocalPauseRef.current !== reason;
+    backupLocalPauseRef.current = reason;
+    backupScheduleRef.current = reduceBackupSchedule(backupScheduleRef.current, { type: "pause", reason }, Date.now()).state;
+    pruneBackupPayloads(backupPayloadsRef.current, backupScheduleRef.current);
+    if (changed && ["loading", "load-error", "save-failed", "fallback", "storage-conflict", "recovering", "restoring"].includes(reason)) {
+      const bridge = typeof window === "undefined" ? undefined : window.bike ?? window.localOutline;
+      void bridge?.pauseBackup?.().catch(() => {});
+    }
+  });
 
-  const showSaveResult = useEventCallback((result: WorkspaceSaveResult) => {
+  const applyBackupStatus = useEventCallback((status: { auto?: boolean; paused?: string | null; lastTicket?: number }) => {
+    if (Number.isInteger(status.lastTicket)) {
+      backupTicketRef.current = Math.max(backupTicketRef.current, status.lastTicket ?? 0);
+      backupTicketReadyRef.current = true;
+    }
+    const mainPause = typeof status.paused === "string" ? status.paused : null;
+    const source = workspaceRef.current;
+    const canResumeSource = mainPause === "local-source" && source && isWorkspacePersisted(source) && getWorkspaceSaveRevision(source) != null && !storageConflictRef.current && !recoveryBusyRef.current;
+    const paused = backupLocalPauseRef.current ?? (canResumeSource ? null : mainPause);
+    let schedule = reduceBackupSchedule(backupScheduleRef.current, paused
+      ? { type: "pause", reason: paused }
+      : { type: "resume" }, Date.now()).state;
+    if (status.auto !== undefined) {
+      schedule = reduceBackupSchedule(schedule, { type: "set-enabled", enabled: status.auto === true }, Date.now()).state;
+    }
+    backupScheduleRef.current = schedule;
+    const semanticHash = (status as { lastSemanticHash?: string }).lastSemanticHash;
+    if (!schedule.writing && !schedule.pending) schedule.lastHash = canResumeSource ? null : semanticHash ?? schedule.lastHash;
+    pruneBackupPayloads(backupPayloadsRef.current, schedule);
+    setBackupStatus({ ...status, paused });
+  });
+
+  const runBackupJob = useEventCallback(async (job: { ticket: number; hash: string } | null): Promise<void> => {
+    if (!job) return;
+    if (backupLocalPauseRef.current || storageConflictRef.current || recoveryBusyRef.current) {
+      pauseLocalBackup(backupLocalPauseRef.current || "storage-conflict");
+      backupScheduleRef.current = reduceBackupSchedule(backupScheduleRef.current, { type: "write-finished", ticket: job.ticket, ok: false }, Date.now()).state;
+      pruneBackupPayloads(backupPayloadsRef.current, backupScheduleRef.current);
+      return;
+    }
+    const bridge = window.bike ?? window.localOutline;
+    const payload = backupPayloadsRef.current.get(job.ticket);
+    if (!bridge?.enqueueBackup || !payload) return;
+    // The source revision orders content; the main process owns request tickets
+    // even when a re-opened renderer has not seen an interrupted issued ticket.
+    const allocateNext = true;
+    const backup = await bridge.enqueueBackup({
+      workspace: payload,
+      sourceRevision: getWorkspaceSaveRevision(payload),
+      semanticHash: job.hash,
+      ticket: allocateNext ? undefined : job.ticket,
+      allocateNext,
+      resumeSource: true,
+      manual: false,
+      wait: true,
+    });
+    if (Number.isInteger(backup.ticket)) {
+      backupTicketRef.current = Math.max(backupTicketRef.current, backup.ticket ?? 0);
+      backupTicketReadyRef.current = true;
+    }
+    const finished = reduceBackupSchedule(backupScheduleRef.current, {
+      type: "write-finished",
+      ticket: job.ticket,
+      hash: job.hash,
+      ok: backup.ok,
+    }, Date.now());
+    backupScheduleRef.current = finished.state;
+    pruneBackupPayloads(backupPayloadsRef.current, finished.state);
+    if (!backup.ok && backup.code === "external-change") {
+      backupScheduleRef.current = reduceBackupSchedule(backupScheduleRef.current, { type: "pause", reason: "external-change" }, Date.now()).state;
+      showNotice(backup.error || "发现外部备份变更，已暂停自动备份");
+    }
+    void bridge.getBackupStatus?.().then((status) => applyBackupStatus(status as typeof backupStatus));
+    await runBackupJob(finished.enqueue);
+  });
+
+  const dispatchBackup = useEventCallback((job: { ticket: number; hash: string } | null): Promise<void> => {
+    if (!job) return backupFlightRef.current ?? Promise.resolve();
+    const flight = runBackupJob(job).finally(() => {
+      if (backupFlightRef.current === flight) backupFlightRef.current = null;
+    });
+    backupFlightRef.current = flight;
+    return flight;
+  });
+
+  const flushScheduledBackup = useEventCallback(async () => {
+    while (backupFlightRef.current || backupScheduleRef.current.pending) {
+      if (backupFlightRef.current) {
+        await backupFlightRef.current;
+        continue;
+      }
+      const step = reduceBackupSchedule(backupScheduleRef.current, { type: "flush" }, Date.now());
+      backupScheduleRef.current = step.state;
+      if (!step.enqueue) return;
+      await dispatchBackup(step.enqueue);
+    }
+  });
+
+  const armBackupTimer = useEventCallback(() => {
+    if (backupTimerRef.current !== null) window.clearTimeout(backupTimerRef.current);
+    backupTimerRef.current = null;
+    const dueAt = backupScheduleRef.current.dueAt;
+    if (dueAt == null || backupScheduleRef.current.writing) return;
+    backupTimerRef.current = window.setTimeout(() => {
+      backupTimerRef.current = null;
+      const step = reduceBackupSchedule(backupScheduleRef.current, { type: "tick" }, Date.now());
+      backupScheduleRef.current = step.state;
+      dispatchBackup(step.enqueue);
+      armBackupTimer();
+    }, Math.max(0, dueAt - Date.now()));
+  });
+
+  const showSaveResult = useEventCallback((result: WorkspaceSaveResult, saved?: Workspace) => {
     refreshRecoverySnapshots();
     if (!result.ok) {
+      pauseLocalBackup(result.conflict ? "storage-conflict" : "save-failed");
       // Conflicts are handled by the storage conflict listener.
       if (result.conflict) return;
       showNotice(`保存失败：${result.error.message}`);
       return;
     }
     if (result.target === "localstorage") {
+      pauseLocalBackup("fallback");
       showNotice("IndexedDB 不可用，已临时保存到浏览器备用存储");
+      return;
     }
+    const bridge = window.bike ?? window.localOutline;
+    const payload = saved ?? workspaceRef.current;
+    if (["save-failed", "fallback"].includes(backupLocalPauseRef.current ?? "") && !storageConflictRef.current && !recoveryBusyRef.current) {
+      backupLocalPauseRef.current = null;
+      backupScheduleRef.current = reduceBackupSchedule(backupScheduleRef.current, { type: "resume" }, Date.now()).state;
+      backupScheduleRef.current.lastHash = null;
+    }
+    if (backupLocalPauseRef.current || storageConflictRef.current || recoveryBusyRef.current) return;
+    if (!bridge?.enqueueBackup || !backupScheduleRef.current.enabled || !payload) return;
+    if (getWorkspaceSaveRevision(payload) == null) return;
+    backupTicketRef.current += 1;
+    const ticket = backupTicketRef.current;
+    backupPayloadsRef.current.set(ticket, payload);
+    const step = reduceBackupSchedule(backupScheduleRef.current, {
+      type: "saved",
+      ticket,
+      hash: backupContentHash(payload),
+      authoritative: true,
+    }, Date.now());
+    backupScheduleRef.current = step.state;
+    pruneBackupPayloads(backupPayloadsRef.current, step.state);
+    dispatchBackup(step.enqueue);
+    armBackupTimer();
+  });
+  const saveWorkspace = useEventCallback(async (payload: Workspace) => {
+    const result = await saveWorkspaceToStorage(payload);
+    showSaveResult(result, payload);
+    return result;
+  });
+  const flushBackupBeforeClose = useEventCallback(async () => {
+    if (!backupLocalPauseRef.current && !storageConflictRef.current && !recoveryBusyRef.current) {
+      const latest = flushPendingEditsRef.current() ?? workspaceRef.current;
+      if (latest) await saveWorkspace(latest);
+    }
+    await flushScheduledBackup();
   });
 
   const replaceWorkspace = useEventCallback((next: Workspace) => {
@@ -762,11 +1074,13 @@ function App() {
     isMounted: () => boolean = () => true,
     options: { includeFallback?: boolean } = {},
   ) => {
+    pauseLocalBackup("loading");
     setLoadError(null);
     setReady(false);
     return loadWorkspace(options).then((result) => {
       if (!isMounted()) return false;
       if (result.status === "error") {
+        pauseLocalBackup("load-error");
         const message = `数据加载失败，已暂停自动保存：${result.error.message}`;
         setLoadError(message);
         showNotice(message);
@@ -774,6 +1088,8 @@ function App() {
       }
       const next = result.status === "loaded" ? result.workspace : createStarterWorkspace();
       replaceWorkspace(next);
+      backupLocalPauseRef.current = null;
+      backupScheduleRef.current = reduceBackupSchedule(backupScheduleRef.current, { type: "resume" }, Date.now()).state;
       clearEditHistory();
       lastAutoSnapshotRef.current.clear();
       refreshRecoverySnapshots();
@@ -782,6 +1098,7 @@ function App() {
       return true;
     }).catch((error) => {
       if (!isMounted()) return false;
+      pauseLocalBackup("load-error");
       const message = `数据加载失败，已暂停自动保存：${error instanceof Error ? error.message : String(error)}`;
       setLoadError(message);
       showNotice(message);
@@ -791,8 +1108,70 @@ function App() {
 
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
-    localStorage.setItem("theme", theme);
+    persistPreference("theme", theme);
   }, [theme]);
+
+  useEffect(() => {
+    persistPreference("bike.navigation.v1", JSON.stringify(navigation));
+  }, [navigation]);
+
+  useEffect(() => {
+    persistPreference("bike.mindmap.relations", showRelations ? "1" : "0");
+  }, [showRelations]);
+
+  useEffect(() => { setSearchLimit(100); }, [debouncedSearch, selectedTags, taskFilter, filterDocumentIds, favoriteOnly, includeCode]);
+
+  useEffect(() => {
+    const handle = window.setTimeout(() => setDebouncedSearch(search), 150);
+    return () => window.clearTimeout(handle);
+  }, [search]);
+
+  useEffect(() => {
+    const bridge = window.bike ?? window.localOutline;
+    void bridge?.getBackupStatus?.().then((status) => applyBackupStatus(status as typeof backupStatus));
+  }, []);
+
+  useEffect(() => {
+    const bridge = window.bike ?? window.localOutline;
+    if (!bridge?.onBackupFlush || !bridge.finishBackupFlush) return undefined;
+    return bridge.onBackupFlush(() => {
+      void flushBackupBeforeClose().finally(() => bridge.finishBackupFlush?.());
+    });
+  }, [flushScheduledBackup]);
+  useEffect(() => {
+    const bridge = window.bike ?? window.localOutline;
+    if (!bridge?.getBackupStatus || (!showBackupSettings && !backupStatus.auto)) return;
+    const timer = window.setInterval(() => { void bridge.getBackupStatus?.().then((status) => applyBackupStatus(status as typeof backupStatus)); }, 3000);
+    return () => window.clearInterval(timer);
+  }, [showBackupSettings, backupStatus.auto]);
+  const resumePersistedBackup = useEventCallback(() => {
+    if (storageConflict || recoveryBusy || !ready) {
+      pauseLocalBackup(!ready ? "loading" : storageConflict ? "storage-conflict" : "recovering");
+      return;
+    }
+    if (["storage-conflict", "recovering"].includes(backupLocalPauseRef.current ?? "")) {
+      backupLocalPauseRef.current = null;
+      const bridge = window.bike ?? window.localOutline;
+      void bridge?.getBackupStatus?.().then((status) => {
+        applyBackupStatus(status as typeof backupStatus);
+        const latest = workspaceRef.current;
+        if (latest && isWorkspacePersisted(latest)) showSaveResult({ ok: true, target: "indexeddb" }, latest);
+      });
+    }
+    const saved = workspaceRef.current;
+    if (ready && backupStatus.auto && saved && isWorkspacePersisted(saved) && !backupLocalPauseRef.current) {
+      showSaveResult({ ok: true, target: "indexeddb" }, saved);
+    }
+  });
+  useEffect(() => { resumePersistedBackup(); }, [ready, backupStatus.auto, storageConflict, recoveryBusy]);
+
+  useEffect(() => {
+    if (!workspace) return;
+    setNavigation((state) => pruneNavigation(state, {
+      liveIds: workspace.documents.map((document) => document.id),
+      trashIds: (workspace.trash ?? []).map((entry) => entry.document.id),
+    }));
+  }, [workspace]);
 
   useEffect(() => {
     workspaceRef.current = workspace;
@@ -829,7 +1208,7 @@ function App() {
     if (isWorkspacePersisted(workspace)) return;
     const handle = window.setTimeout(() => {
       if (storageConflictRef.current || recoveryBusyRef.current) return;
-      saveWorkspace(workspace).then(showSaveResult);
+      void saveWorkspace(workspace);
     }, 250);
     return () => window.clearTimeout(handle);
   }, [workspace, ready, storageConflict]);
@@ -888,37 +1267,40 @@ function App() {
     return Array.from(tagSet).sort((a, b) => a.localeCompare(b, "zh-CN"));
   }, [activeDocument]);
 
-  const linkRows = useMemo(() => {
-    if (!activeDocument) return [];
-    return flattenNodes(activeDocument.nodes)
-      .flatMap((row) =>
-        extractLinks(row.node.text).map((link) => ({
-          source: row.node.text || "未命名主题",
-          link,
-        })),
-      )
-      .slice(0, 12);
-  }, [activeDocument]);
+  const knowledgeIndex = useMemo(() => (workspace ? buildKnowledgeIndex(workspace) : null), [workspace]);
+  const globalTags = knowledgeIndex?.tags ?? [];
+  const searchResult = useMemo(() => {
+    if (!knowledgeIndex || (!debouncedSearch.trim() && !selectedTags.length && taskFilter === "all" && !favoriteOnly && !filterDocumentIds.length)) return null;
+    const filters = { query: debouncedSearch, tags: selectedTags, task: taskFilter, documentIds: filterDocumentIds, favoriteOnly, favoriteIds: navigation.favorites, includeCode };
+    const result = searchKnowledge(knowledgeIndex, { ...filters, limit: 100 });
+    for (let offset = 100; offset < searchLimit && result.truncated; offset += 100) {
+      const page = searchKnowledge(knowledgeIndex, { ...filters, offset, limit: 100 });
+      for (const group of page.groups) {
+        const existing = result.groups.find((item) => item.documentId === group.documentId);
+        if (existing) existing.hits.push(...group.hits);
+        else result.groups.push(group);
+      }
+      result.truncated = page.truncated;
+    }
+    return result;
+  }, [debouncedSearch, knowledgeIndex, searchLimit, selectedTags, taskFilter, filterDocumentIds, favoriteOnly, navigation.favorites, includeCode]);
+  const knowledgeConnections = useMemo(
+    () => (workspace && activeDocument ? resolveDocumentConnections(workspace, activeDocument) : []),
+    [activeDocument, workspace],
+  );
 
   const matchingDocuments = useMemo(() => {
     if (!workspace) return [];
-    const query = search.trim().toLowerCase();
-    const filtered = workspace.documents.filter((document) => {
-      const matchesQuery = !query || collectDocumentText(document).includes(query);
-      const matchesTag =
-        !selectedTag ||
-        flattenNodes(document.nodes).some((row) =>
-          [...extractTags(row.node.text), ...extractTags(row.node.note)].includes(selectedTag),
-        );
-      return matchesQuery && matchesTag;
-    });
+    // SearchResults owns indexed/debounced filtering. Do not rescan every
+    // document on each raw keystroke just to prepare the idle document list.
+    const filtered = workspace.documents;
     if (sidebarView === "recent") {
       return [...filtered]
         .sort((a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""))
         .slice(0, 12);
     }
     return filtered;
-  }, [search, selectedTag, workspace, sidebarView, recentTicker]);
+  }, [workspace, sidebarView, recentTicker]);
 
   const commitWorkspace = useEventCallback((
     updater: (workspace: Workspace) => Workspace,
@@ -1013,6 +1395,7 @@ function App() {
       updatedAt: timestamp,
       markdownSource: content,
       markdownUpdatedAt: timestamp,
+      knowledge: reconcileMarkdownReferences(document, parsed) as MarkdownDocument["knowledge"],
     };
   };
 
@@ -1027,14 +1410,31 @@ function App() {
 
     let nextDocument: MarkdownDocument | null = null;
     try {
-      const nextWorkspace = commitWorkspace((current) => ({
-        ...current,
-        documents: current.documents.map((document) => {
-          if (document.id !== draft.documentId) return document;
-          nextDocument = parseMarkdownIntoDocument(document as MarkdownDocument, draft.value);
-          return nextDocument;
-        }),
-      }), { label: "编辑 Markdown", group: `markdown:${draft.documentId}` });
+      const nextWorkspace = commitWorkspace((current) => {
+        const before = current.documents.find((document) => document.id === draft.documentId);
+        if (!before) return current;
+        const parsed = parseMarkdownIntoDocument(before as MarkdownDocument, draft.value);
+        let next: Workspace = { ...current, documents: current.documents.map((document) => document.id === before.id ? parsed : document) };
+        const changes: Array<{ nodeId?: string; previousLabel: string; nextLabel: string }> = [];
+        if (before.title !== parsed.title) changes.push({ previousLabel: before.title, nextLabel: parsed.title });
+        const previousNodes = new Map(flattenNodes(before.nodes).map(({ node }) => [node.id, node]));
+        for (const { node } of flattenNodes(parsed.nodes)) {
+          const previous = previousNodes.get(node.id);
+          if (previous && previous.text !== node.text) changes.push({ nodeId: node.id, previousLabel: previous.text, nextLabel: node.text });
+        }
+        const updated = new Set<string>();
+        for (const change of changes) {
+          const renamed = renameTarget(next, { documentId: before.id, ...change });
+          next = renamed.workspace as Workspace;
+          renamed.updatedDocumentIds.forEach((id) => updated.add(id));
+        }
+        if (updated.size) {
+          const timestamp = now();
+          next = { ...next, documents: next.documents.map((document) => updated.has(document.id) ? { ...document, updatedAt: timestamp } : document) };
+        }
+        nextDocument = next.documents.find((document) => document.id === before.id) as MarkdownDocument;
+        return next;
+      }, { label: "编辑 Markdown", group: `markdown:${draft.documentId}` });
 
       markdownDraftRef.current = { ...draft, dirty: false };
       const nextNodes = nextDocument ? (nextDocument as MarkdownDocument).nodes : null;
@@ -1052,6 +1452,24 @@ function App() {
     }
   });
 
+  const publishNodeLabel = useEventCallback((nodeId: string, previousLabel: string, nextLabel: string) => {
+    if (previousLabel === nextLabel) return workspaceRef.current;
+    let ambiguous = 0;
+    const result = commitWorkspace((workspace) => {
+      const renamed = renameTarget(workspace, {
+        documentId: workspace.activeDocumentId,
+        nodeId,
+        previousLabel,
+        nextLabel,
+      });
+      ambiguous = renamed.ambiguous.length;
+      return stampRenamedWorkspace(renamed.workspace as Workspace, renamed.updatedDocumentIds);
+    }, { label: "重命名主题", group: null });
+    labelBaselineRef.current.set(nodeId, nextLabel);
+    if (ambiguous) showNotice(`有 ${ambiguous} 条重名链接没有自动改名`);
+    return result ?? workspaceRef.current;
+  });
+
   const flushFocusedStructuredInput = useEventCallback(() => {
     const element = document.activeElement;
     if (!(element instanceof HTMLTextAreaElement)) return workspaceRef.current;
@@ -1063,22 +1481,10 @@ function App() {
     const current = workspaceRef.current;
     const active = current?.documents.find((item) => item.id === current.activeDocumentId);
     const node = active ? findNode(active.nodes, nodeId) : null;
-    if (!current || !active || !node || node.text === element.value) return current;
-
-    return commitWorkspace((workspace) => ({
-      ...workspace,
-      documents: workspace.documents.map((document) =>
-        document.id === workspace.activeDocumentId
-          ? clearDocumentMarkdown({
-              ...(document as MarkdownDocument),
-              updatedAt: now(),
-              nodes: updateNode(document.nodes, nodeId, (target) => {
-                target.text = element.value;
-              }),
-            })
-          : document,
-      ),
-    }), { label: "编辑主题", group: `text:${nodeId}` });
+    if (!current || !active || !node) return current;
+    const previous = labelBaselineRef.current.get(nodeId) ?? node.text;
+    if (previous === element.value && node.text === element.value) return current;
+    return publishNodeLabel(nodeId, previous, element.value);
   });
 
   const handleInspectorNoteDraftChange = useEventCallback((
@@ -1131,11 +1537,8 @@ function App() {
       documents: workspace.documents.map((document) =>
         document.id === workspace.activeDocumentId
           ? clearDocumentMarkdown({
-              ...(document as MarkdownDocument),
+              ...withFieldText(document, { nodeId: draft.nodeId, field: "note", text: draft.value }) as MarkdownDocument,
               updatedAt: now(),
-              nodes: updateNode(document.nodes, draft.nodeId, (target) => {
-                target.note = draft.value;
-              }),
             })
           : document,
       ),
@@ -1156,6 +1559,159 @@ function App() {
   });
 
   flushPendingEditsRef.current = flushPendingEdits;
+
+  const rememberNavigation = useEventCallback((documentId: string, nodeId: string | null) => {
+    const history = navHistoryRef.current;
+    const current = history.entries[history.index];
+    if (current?.documentId === documentId && current.nodeId === nodeId) return;
+    const entries = [...history.entries.slice(0, history.index + 1), { documentId, nodeId }].slice(-50);
+    navHistoryRef.current = { entries, index: entries.length - 1 };
+    setNavigation((state) => rememberOpen(state, { documentId, nodeId, view: modeRef.current, openedAt: now() }));
+  });
+
+  const openKnowledgeTarget = useEventCallback((documentId: string, nodeId: string | null) => {
+    const current = flushPendingEdits() ?? workspaceRef.current;
+    const targetDocument = current?.documents.find((item) => item.id === documentId);
+    if (!current || !targetDocument) {
+      showNotice(nodeId ? "目标主题已不存在" : "目标文档已不存在");
+      return;
+    }
+    const expanded = nodeId ? expandAncestors(targetDocument.nodes, nodeId) : { nodes: targetDocument.nodes, found: true };
+    if (nodeId && !expanded.found) { showNotice("目标主题已不存在"); return; }
+    const nextNodes = expanded.nodes as OutlineNode[];
+    const targetExists = !nodeId || Boolean(findNode(nextNodes, nodeId));
+    if (!nodeId) setFocusNodeId(null);
+    if (modeRef.current === "markdown") { modeRef.current = "outline"; setMode("outline"); }
+    if (focusNodeId && nodeId) {
+      const focusRoot = findNode(nextNodes, focusNodeId);
+      if (!focusRoot || !findNode([focusRoot], nodeId)) setFocusNodeId(null);
+    }
+    replaceWorkspace({
+      ...current,
+      activeDocumentId: documentId,
+      documents: current.documents.map((item) => item.id === documentId ? { ...item, nodes: nextNodes } : item),
+    });
+    setActiveNodeId(targetExists && nodeId ? nodeId : firstNodeId(nextNodes));
+    setLocatedNodeId(nodeId, documentId);
+    rememberNavigation(documentId, nodeId);
+    window.setTimeout(() => {
+      if (modeRef.current === "mindmap") { window.document.querySelector(".editor-pane")?.scrollTo({ top: 0 }); return; }
+      if (!nodeId) { window.document.querySelector(".editor-pane")?.scrollTo({ top: 0 }); return; }
+      window.document.querySelector(`[data-node-id="${CSS.escape(nodeId)}"]`)?.scrollIntoView({ block: "center" });
+    }, 30);
+  });
+
+  const followWikiLink = useEventCallback((raw: string, source: LinkOrigin) => {
+    const current = flushPendingEdits() ?? workspaceRef.current;
+    if (!current) return;
+    if (source.kind === "markdown") {
+      const document = current.documents.find((item) => item.id === source.documentId);
+      const knowledge: unknown = document?.knowledge;
+      const exactMarkdownBinding = knowledgeEditable(knowledge) && knowledge.references.some((reference) => reference.source.kind === "markdown" && reference.source.start === source.start && reference.source.end === source.end);
+      if (document && !exactMarkdownBinding) {
+        const fieldOrigin = markdownLinkOrigins(document, documentToMarkdown(document)).get(source.start);
+        if (fieldOrigin) source = { documentId: document.id, kind: "node-field", ...fieldOrigin };
+      }
+    }
+    const resolved = resolveWikiLink(current, raw, source);
+    if (resolved.status !== "resolved" || !resolved.documentId) {
+      showNotice(resolved.status === "ambiguous" ? "有多个同名目标，请从候选里选择" : resolved.status === "deleted" ? "链接目标已删除，可从回收站恢复" : resolved.status === "sourceMismatch" ? "链接位置已变化，请重新选择目标" : "找不到链接目标");
+      return;
+    }
+    openKnowledgeTarget(resolved.documentId, resolved.nodeId ?? null);
+  });
+
+  useEffect(() => {
+    openWikiLinkHandler = followWikiLink;
+    return () => {
+      if (openWikiLinkHandler === followWikiLink) openWikiLinkHandler = null;
+    };
+  }, [followWikiLink]);
+
+  const travelNavigation = useEventCallback((direction: -1 | 1) => {
+    const history = navHistoryRef.current;
+    const nextIndex = history.index + direction;
+    const entry = history.entries[nextIndex];
+    if (!entry) return;
+    navHistoryRef.current = { ...history, index: nextIndex };
+    openKnowledgeTarget(entry.documentId, entry.nodeId);
+    navHistoryRef.current = { ...history, index: nextIndex };
+  });
+
+  const bindNodeLink = useEventCallback((
+    nodeId: string,
+    text: string,
+    source: { start: number; end: number; raw: string },
+    target: { documentId: string; nodeId?: string },
+    labelMode: "auto" | "custom",
+    field: "text" | "note" | "markdown" = "text",
+  ) => {
+    const span = { start: source.start, end: source.end, raw: source.raw };
+    const attached = commitWorkspace((workspace) => ({
+      ...workspace,
+      documents: workspace.documents.map((document) => {
+        if (document.id !== workspace.activeDocumentId) return document;
+        const withText = field === "markdown" ? parseMarkdownIntoDocument(document, text) : withFieldText(document, { nodeId, field, text }) as MarkdownDocument;
+        const result = attachReference(withText, {
+          source: field === "markdown" ? { kind: "markdown", ...span } : { kind: "node-field", nodeId, field, ...span },
+          target,
+          labelMode,
+        });
+        if (result.error) {
+          showNotice(result.error);
+          return clearDocumentMarkdown({ ...withText, updatedAt: now() });
+        }
+        const next = { ...(result.document as MarkdownDocument), updatedAt: now() };
+        return field === "markdown" ? next : clearDocumentMarkdown(next);
+      }),
+    }), { label: "插入链接", group: null });
+    if (field === "text") labelBaselineRef.current.set(nodeId, text);
+    if (field === "markdown") {
+      if (markdownParseTimerRef.current) window.clearTimeout(markdownParseTimerRef.current);
+      markdownDraftRef.current = { documentId: workspaceRef.current?.activeDocumentId ?? null, value: text, dirty: false };
+      setMarkdownDraft(text);
+    }
+    return attached;
+  });
+
+  const createLinkedDocument = useEventCallback((nodeId: string, text: string, query: { start: number; end: number }, title: string, field: "text" | "note" | "markdown" = "text") => {
+    const inserted = insertLinkAtQuery(text, query, { documentName: title });
+    const id = uuid();
+    commitWorkspace((workspace) => {
+      const created: OutlineDocument = {
+        id,
+        title,
+        createdAt: now(),
+        updatedAt: now(),
+        nodes: [createNode("新主题")],
+      };
+      return {
+        ...workspace,
+        documents: [
+          created,
+          ...workspace.documents.map((document) => {
+            if (document.id !== workspace.activeDocumentId) return document;
+            const withText = field === "markdown" ? parseMarkdownIntoDocument(document, inserted.text) : withFieldText(document, { nodeId, field, text: inserted.text }) as MarkdownDocument;
+            const result = attachReference(withText, {
+              source: field === "markdown" ? { kind: "markdown", start: inserted.start, end: inserted.end, raw: inserted.raw } : { kind: "node-field", nodeId, field, start: inserted.start, end: inserted.end, raw: inserted.raw },
+              target: { documentId: id },
+              labelMode: "auto",
+            });
+            const next = { ...(result.document as MarkdownDocument), updatedAt: now() };
+        return field === "markdown" ? next : clearDocumentMarkdown(next);
+          }),
+        ],
+      };
+    }, { label: "创建文档并链接", group: null });
+    if (field === "text") labelBaselineRef.current.set(nodeId, inserted.text);
+    if (field === "markdown") {
+      if (markdownParseTimerRef.current) window.clearTimeout(markdownParseTimerRef.current);
+      markdownDraftRef.current = { documentId: workspaceRef.current?.activeDocumentId ?? null, value: inserted.text, dirty: false };
+      setMarkdownDraft(inserted.text);
+    }
+    showNotice("已创建文档并插入链接。撤销只会移除链接，新文档会保留，也可以移入回收站。");
+  });
+
 
   const handleMarkdownDraftChange = useEventCallback((value: string) => {
     if (!activeDocument) return;
@@ -1355,9 +1911,11 @@ function App() {
   const selectDocument = useEventCallback((id: string) => {
     const currentWorkspace = flushPendingEdits() ?? workspaceRef.current;
     const document = currentWorkspace?.documents.find((item) => item.id === id);
+    const nodeId = firstNodeId(document?.nodes ?? []);
     setFocusNodeId(null);
-    setActiveNodeId(firstNodeId(document?.nodes ?? []));
+    setActiveNodeId(nodeId);
     commitWorkspace((current) => ({ ...current, activeDocumentId: id }));
+    rememberNavigation(id, nodeId);
   });
 
   const createDocument = useEventCallback(() => {
@@ -1387,13 +1945,22 @@ function App() {
     ) as MarkdownDocument | undefined;
     if (!sourceDocument) return;
     const id = uuid();
+    const rekeyed = rekeyKnowledgeNodes(sourceDocument.nodes, uid);
+    const fragment = copiedKnowledgeFragment(anchorMarkdownReferences(sourceDocument), {
+      sourceDocumentId: sourceDocument.id,
+      nextDocumentId: id,
+      idMap: rekeyed.idMap,
+      wholeDocument: true,
+    });
+    if (fragment.locked) { showNotice("请升级后再复制这份文档，原知识数据已保留"); return; }
     const document = clearDocumentMarkdown({
       ...sourceDocument,
       id,
       title: `${sourceDocument.title} 副本`,
       createdAt: now(),
       updatedAt: now(),
-      nodes: rekeyNodes(sourceDocument.nodes),
+      nodes: rekeyed.nodes as OutlineNode[],
+      knowledge: { ...sourceDocument.knowledge, version: 1, references: fragment.references, relations: fragment.relations, sourceGroups: fragment.sourceGroups },
     });
     setActiveNodeId(firstNodeId(document.nodes));
     setFocusNodeId(null);
@@ -1560,18 +2127,25 @@ function App() {
   });
 
   const handleNodeText = useEventCallback((id: string, text: string, options?: EditOptions) => {
-    updateActiveNodesStable((nodes) => updateNode(nodes, id, (node) => {
-      node.text = text;
-    }), options ?? { label: "编辑主题", group: `text:${id}` });
+    patchActiveDocumentStable((document) => withFieldText(document, { nodeId: id, field: "text", text }),
+      options ?? { label: "编辑主题", group: `text:${id}` });
   });
 
   const handleNodePatch = useEventCallback((id: string, patch: Partial<OutlineNode>) => {
     const keys = Object.keys(patch);
     const isNote = keys.length === 1 && keys[0] === "note";
-    updateActiveNodesStable((nodes) => updateNode(nodes, id, (node) => {
-      Object.assign(node, patch);
-      node.color = normalizeColor(node.color);
-    }), { label: isNote ? "编辑备注" : "修改主题", group: isNote ? `note:${id}` : null });
+    patchActiveDocumentStable((document) => {
+      let next = document;
+      for (const field of ["text", "note"] as const) {
+        if (typeof patch[field] === "string") {
+          next = withFieldText(next, { nodeId: id, field, text: patch[field] });
+        }
+      }
+      return { ...next, nodes: updateNode(next.nodes, id, (node) => {
+        Object.assign(node, patch);
+        node.color = normalizeColor(node.color);
+      }) };
+    }, { label: isNote ? "编辑备注" : "修改主题", group: isNote ? `note:${id}` : null });
   });
 
   const ensureAiConfig = useEventCallback(() => {
@@ -1808,9 +2382,38 @@ function App() {
       (document) => document.id === currentWorkspace.activeDocumentId,
     );
     const node = currentDocument ? findNode(currentDocument.nodes, id) : null;
-    if (!node) return;
-    const [copy] = rekeyNodes([node]);
-    updateActiveNodesStable((nodes) => (findNode(nodes, id) ? insertSiblingAfter(nodes, id, copy) : nodes));
+    if (!node || !currentDocument) return;
+    const rekeyed = rekeyKnowledgeNodes([node], uid);
+    const normalizedKnowledge = anchorMarkdownReferences(currentDocument);
+    const fragment = copiedKnowledgeFragment(normalizedKnowledge, {
+      sourceDocumentId: currentDocument.id,
+      nextDocumentId: currentDocument.id,
+      idMap: rekeyed.idMap,
+    });
+    if (fragment.locked) { showNotice("请升级后再复制这份文档的主题"); return; }
+    const copy = rekeyed.nodes[0] as OutlineNode;
+    commitWorkspace((workspace) => ({
+      ...workspace,
+      documents: workspace.documents.map((document) => {
+        if (document.id !== currentDocument.id || !findNode(document.nodes, id)) return document;
+        const base = knowledgeEditable(normalizedKnowledge)
+          ? normalizedKnowledge
+          : { version: 1 as const, references: [], relations: [] };
+        return clearDocumentMarkdown({
+          ...(document as MarkdownDocument),
+          updatedAt: now(),
+          nodes: insertSiblingAfter(document.nodes, id, copy),
+          ...(fragment.references.length || fragment.relations.length ? {
+            knowledge: {
+              ...base,
+              references: [...(base.references ?? []), ...fragment.references],
+              relations: [...(base.relations ?? []), ...fragment.relations],
+              sourceGroups: { ...base.sourceGroups, ...fragment.sourceGroups },
+            },
+          } : {}),
+        });
+      }),
+    }), { label: "复制主题", group: null });
     setActiveNodeId(copy.id);
     showNotice("已创建主题副本");
   });
@@ -1841,6 +2444,7 @@ function App() {
       sourceDocumentId: document.id,
       sourceId: id,
       node: cloneNodes([node])[0],
+      knowledge: document.knowledge ? JSON.parse(JSON.stringify(anchorMarkdownReferences(document))) : undefined,
     });
     try {
       await navigator.clipboard.writeText(renderNodeMarkdown(node));
@@ -1862,6 +2466,7 @@ function App() {
       sourceDocumentId: document.id,
       sourceId: id,
       node: cloneNodes([node])[0],
+      knowledge: document.knowledge ? JSON.parse(JSON.stringify(anchorMarkdownReferences(document))) : undefined,
     });
     showNotice("已剪切主题，选择目标后粘贴");
   });
@@ -1874,6 +2479,7 @@ function App() {
     let didPaste = false;
     let blocked = false;
     let staleCut = false;
+    let knowledgeError = "";
     flushFocusedStructuredInput();
     commitWorkspace((current) => {
       const activeDocumentId = current.activeDocumentId;
@@ -1893,15 +2499,61 @@ function App() {
       }
       if (targetId !== MINDMAP_ROOT_ID && !findNode(active.nodes, targetId)) return current;
 
-      [pasted] =
-        clipboard.mode === "copy"
-          ? rekeyNodes([clipboard.node])
-          : cloneNodes([sourceNode ?? clipboard.node]);
+      let documents = current.documents;
+      let nextActive = active;
+      let nextSource = sourceDocument;
+      const movedIds = sourceNode ? subtreeIds(sourceNode) : [];
+      if (clipboard.mode === "cut" && sourceNode && sourceDocument && sourceDocument.id !== active.id) {
+        const moved = moveSubtreeConnections(sourceDocument, active, movedIds);
+        if (moved.error) { knowledgeError = moved.error; return current; }
+        documents = retargetIncomingNodes(current.documents.map((document) => {
+          if (document.id === active.id) return moved.target as OutlineDocument;
+          if (document.id === sourceDocument.id) return moved.source as OutlineDocument;
+          return document;
+        }), {
+          sourceDocumentId: sourceDocument.id,
+          targetDocumentId: active.id,
+          movedIds,
+        }) as OutlineDocument[];
+        nextActive = documents.find((document) => document.id === active.id) as MarkdownDocument;
+        nextSource = documents.find((document) => document.id === sourceDocument.id) as MarkdownDocument;
+      }
+      if (clipboard.mode === "copy") {
+        const rekeyed = rekeyKnowledgeNodes([clipboard.node], uid);
+        const fragment = copiedKnowledgeFragment(clipboard.knowledge, {
+          sourceDocumentId: clipboard.sourceDocumentId,
+          nextDocumentId: active.id,
+          idMap: rekeyed.idMap,
+        });
+        if (fragment.locked || (nextActive.knowledge && !knowledgeEditable(nextActive.knowledge))) {
+          knowledgeError = "这份文档的知识数据需要更新版本后才能复制主题";
+          return current;
+        }
+        pasted = rekeyed.nodes[0] as OutlineNode;
+        if (fragment.references.length || fragment.relations.length) {
+          const base = knowledgeEditable(nextActive.knowledge)
+            ? nextActive.knowledge
+            : { version: 1 as const, references: [], relations: [] };
+          nextActive = {
+            ...nextActive,
+            knowledge: {
+              ...base,
+              references: [...(base.references ?? []), ...fragment.references],
+              relations: [...(base.relations ?? []), ...fragment.relations],
+              sourceGroups: { ...base.sourceGroups, ...fragment.sourceGroups },
+            },
+          };
+        }
+      } else {
+        pasted = cloneNodes([sourceNode ?? clipboard.node])[0];
+      }
       pastedId = pasted.id;
       const activeBaseNodes =
         clipboard.mode === "cut" && sourceNode && activeDocumentId === clipboard.sourceDocumentId
           ? removeNode(active.nodes, clipboard.sourceId)
-          : active.nodes;
+          : clipboard.mode === "cut" && sourceNode
+            ? removeNode(nextActive.nodes, clipboard.sourceId)
+            : active.nodes;
       const activeNodes = targetId === MINDMAP_ROOT_ID
         ? [...activeBaseNodes, pasted]
         : addChild(activeBaseNodes, targetId, pasted);
@@ -1909,25 +2561,26 @@ function App() {
 
       return {
         ...current,
-        documents: current.documents.map((document) => {
+        documents: documents.map((document) => {
           if (document.id === activeDocumentId) {
             return clearDocumentMarkdown({
-              ...(document as MarkdownDocument),
+              ...(nextActive as MarkdownDocument),
               updatedAt: now(),
               nodes: activeNodes,
             });
           }
-          if (clipboard.mode === "cut" && sourceNode && document.id === clipboard.sourceDocumentId) {
+          if (clipboard.mode === "cut" && sourceNode && document.id === clipboard.sourceDocumentId && nextSource) {
             return clearDocumentMarkdown({
-              ...(document as MarkdownDocument),
+              ...(nextSource as MarkdownDocument),
               updatedAt: now(),
-              nodes: removeNode(document.nodes, clipboard.sourceId),
+              nodes: removeNode(nextSource.nodes, clipboard.sourceId),
             });
           }
           return document;
         }),
       };
     });
+    if (knowledgeError) { showNotice(knowledgeError); return; }
     if (blocked) {
       showNotice("不能把主题粘贴到自己或自己的子主题里");
       return;
@@ -2059,18 +2712,29 @@ function App() {
 
   const updateTitle = useEventCallback((title: string, options?: EditOptions) => {
     const nextTitle = title || "未命名文档";
-    if (modeRef.current === "markdown" && activeDocument) {
-      const currentSource = markdownDraftRef.current.documentId === activeDocument.id
-        ? markdownDraftRef.current.value
-        : getDocumentMarkdown(activeDocument);
-      handleMarkdownDraftChange(replaceMarkdownTitle(currentSource, nextTitle));
-      flushMarkdownDraft();
-      return;
-    }
-    patchActiveDocumentStable((document) =>
-      document.title === nextTitle ? document : { ...document, title: nextTitle },
-      options ?? { label: "修改标题", group: `title:${workspaceRef.current?.activeDocumentId}` },
-    );
+    flushPendingEdits();
+    let ambiguous = 0;
+    commitWorkspace((workspace) => {
+      const renamed = renameTarget(workspace, {
+        documentId: workspace.activeDocumentId,
+        previousLabel: workspace.documents.find((document) => document.id === workspace.activeDocumentId)?.title,
+        nextLabel: nextTitle,
+      });
+      ambiguous = renamed.ambiguous.length;
+      const updated = new Set(renamed.updatedDocumentIds);
+      const timestamp = now();
+      return {
+        ...renamed.workspace,
+        documents: renamed.workspace.documents.map((document) => {
+          if (!updated.has(document.id)) return document;
+          if (document.id === workspace.activeDocumentId && typeof document.markdownSource === "string") {
+            return parseMarkdownIntoDocument(document as MarkdownDocument, replaceMarkdownTitle(document.markdownSource, nextTitle));
+          }
+          return { ...document, updatedAt: timestamp };
+        }),
+      } as Workspace;
+    }, options ?? { label: "重命名文档", group: null });
+    if (ambiguous) showNotice(`有 ${ambiguous} 条重名链接没有自动改名`);
   });
 
   const moveSelected = useEventCallback((direction: -1 | 1) => {
@@ -2079,19 +2743,19 @@ function App() {
     updateActiveNodesStable((nodes) => moveNode(nodes, activeNodeId, direction));
   });
 
-  const exportActive = useEventCallback((format: ExportFormat) => {
+  const exportActive = useEventCallback((format: ExportFormat, metadata: boolean = false) => {
     const currentWorkspace = flushPendingEdits() ?? workspaceRef.current;
     const document = currentWorkspace?.documents.find(
       (item) => item.id === currentWorkspace.activeDocumentId,
     ) as MarkdownDocument | undefined;
     if (!document) return;
-    const result = exportDocument(document, format);
-    downloadText(
-      result.filename,
-      format === "markdown" ? getDocumentMarkdown(document) : result.content,
-      result.mime,
-    );
-    showNotice(`已导出 ${result.filename}`);
+    if ((format === "opml" || format === "freemind") && knowledgeEditable(document.knowledge) && (document.knowledge.references.length || document.knowledge.relations.length)) {
+      showNotice("这个格式不能完整保留链接身份和关系");
+    }
+    const result = exportDocument(document, format, { metadata });
+    if (metadata && result.error) { showNotice(result.error); return; }
+    downloadText(result.filename, result.content, result.mime);
+    showNotice(result.error ? result.error : `已导出 ${result.filename}${result.lossy ? "（稳定 id 未保留）" : ""}`);
   });
 
   const exportActivePdf = useEventCallback(async () => {
@@ -2125,7 +2789,18 @@ function App() {
         localStorage.getItem(ICLOUD_REVISION_KEY) ??
         localStorage.getItem(LEGACY_ICLOUD_REVISION_KEY) ??
         undefined;
-      const result = await saveICloudBackup(currentWorkspace, expectedRevision);
+      const bridge = window.bike ?? window.localOutline;
+      let result;
+      if (bridge?.enqueueBackup) {
+        const saved = await saveWorkspace(currentWorkspace);
+        if (!saved.ok || saved.target !== "indexeddb") {
+          showNotice("本机保存未完成，未写入备份");
+          return;
+        }
+        result = await bridge.enqueueBackup({ workspace: currentWorkspace, sourceRevision: getWorkspaceSaveRevision(currentWorkspace), semanticHash: backupContentHash(currentWorkspace), manual: true, wait: true });
+      } else {
+        result = await saveICloudBackup(currentWorkspace, expectedRevision);
+      }
       if (result.ok && result.revision) {
         localStorage.setItem(ICLOUD_REVISION_KEY, result.revision);
         localStorage.removeItem(LEGACY_ICLOUD_REVISION_KEY);
@@ -2171,13 +2846,31 @@ function App() {
     }
     const currentWorkspace = flushPendingEdits() ?? workspaceRef.current;
     if (currentWorkspace) downloadWorkspaceBackup(currentWorkspace, "load-backup");
+    pauseLocalBackup("restoring");
+    pruneBackupPayloads(backupPayloadsRef.current, backupScheduleRef.current);
     replaceWorkspace(next);
     clearEditHistory();
     setActiveNodeId(firstNodeIdInWorkspace(next));
     setFocusNodeId(null);
-    if (result.revision) {
+    const saved = await saveWorkspace(next);
+    if (!saved.ok || saved.target !== "indexeddb") {
+      showNotice("备份已载入，但本机保存未成功，自动备份仍暂停");
+      return;
+    }
+    if (result.revision && bikeBridge.acceptBackupBaseline) {
+      const accepted = await bikeBridge.acceptBackupBaseline(result.revision, { workspace: next, sourceRevision: getWorkspaceSaveRevision(next), semanticHash: backupContentHash(next) });
+      if (accepted.ok !== true) {
+        showNotice("外部备份再次变化，自动备份仍暂停，请重新查看外部变更");
+        return;
+      }
       localStorage.setItem(ICLOUD_REVISION_KEY, result.revision);
       localStorage.removeItem(LEGACY_ICLOUD_REVISION_KEY);
+      backupLocalPauseRef.current = null;
+      applyBackupStatus(accepted as typeof backupStatus);
+      const latest = workspaceRef.current;
+      if (latest && latest !== next) {
+        await saveWorkspace(latest);
+      }
     }
     showNotice(`已载入 iCloud 备份：${result.path}`);
   });
@@ -2227,6 +2920,7 @@ function App() {
       return;
     }
     storageConflictRef.current = true;
+    pauseLocalBackup("storage-conflict");
     setStorageConflict(true);
     clearAutoSyncTimer();
     if (current) {
@@ -2616,7 +3310,19 @@ function App() {
     event.target.value = "";
     if (!file) return;
     try {
-      const imported = importDocument(await file.text(), file.name);
+      const source = await file.text();
+      let imported;
+      try {
+        imported = importDocument(source, file.name);
+      } catch (error) {
+        if (!(error instanceof Error) || !error.message.startsWith("BIKE_METADATA:")) throw error;
+        const accepted = window.confirm(`${error.message.slice("BIKE_METADATA:".length)}\n\n可以只导入正文，或取消并保留原文件。`);
+        if (!accepted) {
+          showNotice("已取消导入");
+          return;
+        }
+        imported = importDocument(source, file.name, { dropMetadata: true });
+      }
       if ("documents" in imported) {
         const currentWorkspace = workspaceRef.current;
         const shouldReplace = window.confirm(
@@ -2637,22 +3343,67 @@ function App() {
         }
         replaceWorkspace(imported);
         clearEditHistory();
+        setNavigation((state) => resetRecentOpens(pruneNavigation(state, {
+          liveIds: imported.documents.map((document) => document.id),
+          trashIds: (imported.trash ?? []).map((entry) => entry.document.id),
+        })));
         setActiveNodeId(firstNodeIdInWorkspace(imported));
         setFocusNodeId(null);
         showNotice(`已导入工作区：${file.name}`);
         return;
       }
       setFocusNodeId(null);
-      setActiveNodeId(firstNodeId(imported.nodes));
-      commitWorkspace((current) => ({
-        ...current,
-        activeDocumentId: imported.id,
-        documents: [imported, ...current.documents],
-      }));
+      let importedId = imported.id;
+      const placed = commitWorkspace((current) => {
+        const usedIds = new Set<string>();
+        const addTree = (nodes: OutlineNode[]) => {
+          nodes.forEach((node) => {
+            usedIds.add(node.id);
+            addTree(node.children ?? []);
+          });
+        };
+        current.documents.forEach((document) => {
+          usedIds.add(document.id);
+          addTree(document.nodes);
+        });
+        (current.trash ?? []).forEach((entry) => {
+          usedIds.add(entry.document.id);
+          addTree(entry.document.nodes);
+        });
+        const remapped = remapCollidingIds(imported, usedIds, (prefix) => prefix === "doc" ? uuid() : uid());
+        importedId = remapped.document.id;
+        return {
+          ...current,
+          activeDocumentId: remapped.document.id,
+          documents: [remapped.document as OutlineDocument, ...current.documents],
+        };
+      });
+      if (placed) setActiveNodeId(firstNodeId(placed.documents.find((document) => document.id === importedId)?.nodes ?? []));
       showNotice(`已导入文档：${file.name}`);
     } catch (error) {
       showNotice(error instanceof Error ? error.message : "导入失败");
     }
+  });
+
+  const saveCurrentFilter = useEventCallback(() => {
+    const name = window.prompt("筛选名称", search || selectedTags.join("、") || "未命名筛选");
+    if (name) setNavigation((state) => saveNavigationFilter(state, { name, query: search, tags: selectedTags, task: taskFilter, documentIds: filterDocumentIds, favoriteOnly, includeCode }));
+  });
+
+  const changeRelation = useEventCallback((action: "add" | "update" | "delete" | "reverse", input: Partial<MindRelation>) => {
+    flushPendingEdits();
+    let success = false;
+    patchActiveDocumentStable((document) => {
+      if (document.knowledge && !knowledgeEditable(document.knowledge)) { showNotice("请升级后再修改这份文档的关系"); return document; }
+      const result = action === "add" ? addRelation(document, { fromNodeId: input.fromNodeId || "", toNodeId: input.toNodeId || "", label: input.label })
+        : action === "update" ? updateRelation(document, input.id || "", input)
+        : action === "reverse" ? reverseRelation(document, input.id || "")
+        : { document: deleteRelation(document, input.id || ""), error: null };
+      if (result.error) { showNotice(result.error); return document; }
+      success = true;
+      return result.document;
+    }, { label: action === "add" ? "添加关系" : action === "delete" ? "删除关系" : action === "reverse" ? "反转关系" : "编辑关系", group: null, preserveMarkdown: true });
+    return success;
   });
 
   const setNodeRef = useEventCallback((id: string, element: HTMLTextAreaElement | null) => {
@@ -2734,7 +3485,7 @@ function App() {
 
   const tagHits = selectedTag
     ? flattenNodes(activeDocument.nodes).filter((row) =>
-        [...extractTags(row.node.text), ...extractTags(row.node.note)].includes(selectedTag),
+        selectedTags.every((tag) => [...extractTags(row.node.text), ...extractTags(row.node.note)].map(foldKey).includes(foldKey(tag))),
       )
     : [];
   const canUndo = historyRef.current.past.length > 0;
@@ -2757,10 +3508,16 @@ function App() {
           <Search size={16} />
           <input
             value={search}
-            onChange={(event) => setSearch(event.target.value)}
+            onChange={(event) => { setSearch(event.target.value); setSidebarView("all"); }}
             placeholder="搜索文档、主题、备注"
           />
         </label>
+
+        <SearchControls documents={workspace.documents} documentIds={filterDocumentIds} favoriteOnly={favoriteOnly} includeCode={includeCode}
+          onDocuments={(ids) => { setFilterDocumentIds(ids); setSidebarView("all"); }}
+          onFavorite={(value) => { setFavoriteOnly(value); setSidebarView("all"); }}
+          onCode={(value) => { setIncludeCode(value); setSidebarView("all"); }} onSave={saveCurrentFilter}
+          onClear={() => { setSearch(""); setSelectedTags([]); setTaskFilter("all"); setFilterDocumentIds([]); setFavoriteOnly(false); setIncludeCode(false); }} />
 
         <div className="sidebar-actions">
           <button onClick={createDocument}>
@@ -2781,7 +3538,7 @@ function App() {
             <Clock size={16} />
             最近编辑
           </button>
-          <button onClick={() => showNotice("快速访问功能开发中，敬请期待")}>
+          <button className={sidebarView === "quick" ? "selected" : ""} onClick={() => setSidebarView("quick")}>
             <Zap size={16} />
             快速访问
           </button>
@@ -2792,37 +3549,66 @@ function App() {
         </nav>
 
         <div className={classNames("document-list", sidebarView === "recent" && "recent-list")}>
-          <div className="document-list-title">
-            <span>{sidebarView === "recent" ? "最近编辑" : "我的文档"}</span>
-            <small>
-              {sidebarView === "recent"
-                ? `${matchingDocuments.length} 个最近文档`
-                : `${matchingDocuments.length} 个文档`}
-            </small>
-          </div>
-          {matchingDocuments.map((document) => (
-            <button
-              key={document.id}
-              className={classNames(
-                "document-item",
-                document.id === activeDocument.id && "active",
-                sidebarView === "recent" && "show-time",
-              )}
-              onClick={() => selectDocument(document.id)}
-            >
-              <FileText size={16} />
-              <span>{document.title}</span>
-              <small>
-                {sidebarView === "recent"
-                  ? formatRecentTime(document.updatedAt)
-                  : formatTime(document.updatedAt)}
-              </small>
-            </button>
-          ))}
-          {matchingDocuments.length === 0 && (
-            <span className="empty-text">
-              {sidebarView === "recent" ? "暂无最近编辑文档" : "没有匹配的文档"}
-            </span>
+          {sidebarView === "quick" ? (
+            <>
+              <div className="document-list-title"><span>收藏</span><small>{navigation.favorites.length}</small></div>
+              {navigation.favorites.filter((id) => workspace.documents.some((document) => document.id === id)).map((id) => {
+                const document = workspace.documents.find((item) => item.id === id);
+                if (!document) return null;
+                return (
+                  <button key={id} className="document-item" onClick={() => selectDocument(id)}>
+                    <Star size={16} />
+                    <span>{document.title}</span>
+                  </button>
+                );
+              })}
+              <div className="document-list-title"><span>最近打开</span></div>
+              {navigation.recent.map((item) => {
+                const document = workspace.documents.find((entry) => entry.id === item.documentId);
+                if (!document) return null;
+                return (
+                  <button key={item.documentId} className="document-item" onClick={() => openKnowledgeTarget(item.documentId, item.nodeId)}>
+                    <Clock size={16} />
+                    <span>{document.title}</span>
+                  </button>
+                );
+              })}
+              <div className="document-list-title"><span>保存的筛选</span></div>
+              {navigation.filters.map((filter) => (
+                <div key={filter.id} className="saved-filter-row">
+                  <button type="button" className="document-item" onClick={() => {
+                    setSearch(filter.query); setSelectedTags(filter.tags); setTaskFilter(filter.task);
+                    setFilterDocumentIds(filter.documentIds); setFavoriteOnly(filter.favoriteOnly); setIncludeCode(filter.includeCode === true); setSidebarView("all");
+                  }}><Search size={16} /><span>{filter.name}{filter.broken ? "（需修复）" : ""}</span></button>
+                  <button className="control-button compact" type="button" aria-label={`重命名筛选 ${filter.name}`} onClick={() => { const name = window.prompt("筛选名称", filter.name); if (name) setNavigation((state) => renameNavigationFilter(state, filter.id, name)); }}>改名</button>
+                  <button className="control-button compact danger" type="button" aria-label={`删除筛选 ${filter.name}`} onClick={() => setNavigation((state) => deleteNavigationFilter(state, filter.id))}>删除</button>
+                </div>
+              ))}
+            </>
+          ) : searchResult ? (
+            <SearchResults result={searchResult} onOpen={openKnowledgeTarget} onLoadMore={() => setSearchLimit((limit) => limit + 100)} />
+          ) : (
+            <>
+              <div className="document-list-title">
+                <span>{sidebarView === "recent" ? "最近编辑" : "我的文档"}</span>
+                <small>{matchingDocuments.length} 个文档</small>
+              </div>
+              {matchingDocuments.map((document) => (
+                <div
+                  key={document.id}
+                  className={classNames("document-item", "document-entry", document.id === activeDocument.id && "active", sidebarView === "recent" && "show-time")}
+                >
+                  <button type="button" className="document-item-main" onClick={() => selectDocument(document.id)}><FileText size={16} /><span>{document.title}</span></button>
+                  <button type="button" title={navigation.favorites.includes(document.id) ? "取消收藏" : "收藏"} onClick={(event) => {
+                    event.stopPropagation();
+                    setNavigation((state) => toggleFavorite(state, document.id));
+                  }}>
+                    <Star size={14} />
+                  </button>
+                  <small>{sidebarView === "recent" ? formatRecentTime(document.updatedAt) : formatTime(document.updatedAt)}</small>
+                </div>
+              ))}
+            </>
           )}
         </div>
 
@@ -2832,16 +3618,23 @@ function App() {
             标签
           </div>
           <div className="tag-list">
-            {tags.map((tag) => (
+            {globalTags.map((tag) => (
               <button
-                key={tag}
-                className={classNames("tag-pill", selectedTag === tag && "selected")}
-                onClick={() => setSelectedTag(selectedTag === tag ? null : tag)}
+                key={tag.key}
+                className={classNames("tag-pill", selectedTags.some((value) => foldKey(value) === foldKey(tag.label)) && "selected")}
+                onClick={() => { setSidebarView("all"); setSelectedTags((tags) => tags.some((value) => foldKey(value) === foldKey(tag.label)) ? tags.filter((value) => foldKey(value) !== foldKey(tag.label)) : [...tags, tag.label]); }}
               >
-                #{tag}
+                #{tag.label} {tag.count}/{tag.documentCount}
               </button>
             ))}
-            {!tags.length && <span className="empty-text">暂无标签</span>}
+            {!globalTags.length && <span className="empty-text">暂无标签</span>}
+          </div>
+          <div className="tag-list">
+            {(["all", "open", "done"] as const).map((task) => (
+              <button key={task} className={classNames("tag-pill", taskFilter === task && "selected")} onClick={() => { setSidebarView("all"); setTaskFilter(task); }}>
+                {task === "all" ? "全部" : task === "open" ? "未完成" : "已完成"}
+              </button>
+            ))}
           </div>
         </div>
 
@@ -2852,7 +3645,11 @@ function App() {
           <button title="标签" onClick={() => { const el = document.querySelector(".sidebar-section"); if (el) el.scrollIntoView({ behavior: "smooth" }); }}>
             <Tag size={16} />
           </button>
-          <button title="iCloud 备份" onClick={backupToCloud}>
+          <button title="备份设置" onClick={() => {
+            const bridge = window.bike ?? window.localOutline;
+            void bridge?.getBackupStatus?.().then((status) => setBackupStatus(status as typeof backupStatus));
+            setShowBackupSettings(true);
+          }}>
             <Cloud size={16} />
           </button>
           <button
@@ -2911,11 +3708,7 @@ function App() {
       <section className="workspace">
         <header className="topbar">
           <div className="title-block">
-            <input
-              className="title-input"
-              value={activeDocument.title}
-              onChange={(event) => updateTitle(event.target.value)}
-            />
+            <DocumentTitleInput className="title-input" value={activeDocument.title} onCommit={updateTitle} />
             <div className="breadcrumb">
               {focusNode ? (
                 <>
@@ -3013,7 +3806,13 @@ function App() {
                 <PanelRight size={17} />
               </button>
             )}
-            <button className="icon-button" onClick={duplicateDocument} title="复制文档">
+            <button className="icon-button" type="button" onClick={() => travelNavigation(-1)} title="后退">
+            <ChevronLeft size={17} />
+          </button>
+          <button className="icon-button" type="button" onClick={() => travelNavigation(1)} title="前进">
+            <ChevronRight size={17} />
+          </button>
+          <button className="icon-button" onClick={duplicateDocument} title="复制文档">
               <Copy size={17} />
             </button>
             <button className="icon-button danger" onClick={() => setShowConfirmDelete(true)} title="删除文档">
@@ -3052,6 +3851,7 @@ function App() {
             <Download size={16} />
             导出 MD
           </button>
+          <button onClick={() => exportActive("markdown", true)}>带元数据</button>
           <button onClick={() => exportActive("opml")}>OPML</button>
           <button onClick={() => exportActive("freemind")}>FreeMind</button>
           <button onClick={() => exportActive("html")}>HTML</button>
@@ -3080,7 +3880,7 @@ function App() {
             {selectedTag && mode !== "markdown" && (
               <div className="filter-banner">
                 <Tag size={15} />
-                #{selectedTag} 命中 {tagHits.length} 个主题
+                {selectedTags.map((tag) => `#${tag}`).join(" + ")} 命中 {tagHits.length} 个主题
                 <button onClick={() => setSelectedTag(null)}>
                   <X size={14} />
                 </button>
@@ -3088,12 +3888,7 @@ function App() {
             )}
 
             {mode === "outline" && !focusNode && (
-              <input
-                className="document-heading-input"
-                value={activeDocument.title}
-                onChange={(event) => updateTitle(event.target.value)}
-                aria-label="文档标题"
-              />
+              <DocumentTitleInput className="document-heading-input" value={activeDocument.title} ariaLabel="文档标题" onCommit={updateTitle} />
             )}
 
             {mode === "outline" && (
@@ -3113,6 +3908,13 @@ function App() {
                 onUpdateNodes={setActiveNodes}
                 onAiAction={handleStructuredAiAction}
                 isAiBusy={(id) => Boolean(aiBusyKey?.startsWith(`structured:${id}:`))}
+                onSuggestLinks={(query) => workspace ? suggestLinkTargets(workspace, query) : { items: [], requiresExplicit: false, highlight: -1 }}
+                onBindLink={bindNodeLink}
+                onCreateLink={createLinkedDocument}
+                onPublishLabel={publishNodeLabel}
+                onLabelFocus={(id, value) => labelBaselineRef.current.set(id, value)}
+                onFollowLink={(raw, source) => followWikiLink(raw, { ...source, documentId: activeDocument.id })}
+                locatedNodeId={locatedNodeId}
               />
             )}
 
@@ -3123,9 +3925,11 @@ function App() {
                 rootTargetId={focusNode?.id ?? null}
                 viewportResetKey={focusNode?.id ?? activeDocument.id}
                 activeNodeId={activeNodeId}
+                locatedNodeId={location.documentId === activeDocument.id ? locatedNodeId : null}
+                locationVersion={location.documentId === activeDocument.id ? location.version : 0}
                 onSelect={setActiveNodeId}
                 onTitle={updateTitle}
-                onText={handleNodeText}
+                onText={(id, value) => publishNodeLabel(id, findNode(activeDocument.nodes, id)?.text ?? value, value)}
                 onPatch={handleNodePatch}
                 onInsertAfter={insertAfter}
                 onInsertChild={insertChild}
@@ -3138,6 +3942,9 @@ function App() {
                 onRemove={removeActiveNode}
                 onToggleSiblingCollapse={toggleSiblingCollapse}
                 onFocusNode={setFocusNodeId}
+                relations={knowledgeEditable(activeDocument.knowledge) ? activeDocument.knowledge.relations as MindRelation[] : []}
+                showRelations={showRelations}
+                onToggleRelations={() => setShowRelations((value) => !value)}
                 onAiAction={handleStructuredAiAction}
                 isAiBusy={(id) => Boolean(aiBusyKey?.startsWith(`structured:${id}:`))}
               />
@@ -3153,6 +3960,10 @@ function App() {
 
             {mode === "markdown" && (
               <MarkdownView
+                documentId={activeDocument.id}
+                onSuggest={(query) => suggestLinkTargets(workspace, query)}
+                onBind={(text, span, target, mode) => bindNodeLink("", text, span, target, mode, "markdown")}
+                onCreate={(text, query, title) => createLinkedDocument("", text, query, title, "markdown")}
                 value={markdownDraft}
                 viewMode={markdownPaneMode}
                 onChange={handleMarkdownDraftChange}
@@ -3178,6 +3989,9 @@ function App() {
                         onPatch={handleNodePatch}
                         onDraftChange={handleInspectorNoteDraftChange}
                         onCommit={handleInspectorNoteCommit}
+                        onSuggest={(query) => suggestLinkTargets(workspace, query)}
+                        onBind={(text, span, target, mode) => bindNodeLink(activeNode.id, text, span, target, mode, "note")}
+                        onCreate={(text, query, title) => createLinkedDocument(activeNode.id, text, query, title, "note")}
                       />
                     </label>
                     <label className="field">
@@ -3205,21 +4019,29 @@ function App() {
                 )}
               </section>
 
-              <section>
-                <div className="section-title">
-                  <Link2 size={15} />
-                  文档链接
-                </div>
-                <div className="link-list">
-                  {linkRows.map((row, index) => (
-                    <div key={`${row.source}-${row.link}-${index}`} className="link-row">
-                      <span>{row.source}</span>
-                      <strong>[[{row.link}]]</strong>
-                    </div>
-                  ))}
-                  {!linkRows.length && <p className="empty-text">用 [[文档名]] 建立链接</p>}
-                </div>
-              </section>
+              <KnowledgePanel
+                key={activeDocument.id}
+                locked={Boolean(activeDocument.knowledge && !knowledgeEditable(activeDocument.knowledge))}
+                connections={knowledgeConnections}
+                documentBacklinks={knowledgeIndex ? backlinksFor(knowledgeIndex, activeDocument.id) : []}
+                nodeBacklinks={knowledgeIndex && activeNode ? backlinksFor(knowledgeIndex, activeDocument.id, activeNode.id) : []}
+                relations={relationView(activeDocument)}
+                targets={(knowledgeIndex?.nodes ?? []).filter((node) => node.documentId === activeDocument.id).map((node) => ({ id: node.nodeId, label: node.pathLabel }))}
+                activeNodeId={activeNode?.id ?? null}
+                onOpen={openKnowledgeTarget}
+                onOpenNode={(id) => openKnowledgeTarget(activeDocument.id, id)}
+                onFollow={(connection) => {
+                  const span = connection.link ?? connection.reference?.source;
+                  const origin = connection.origin;
+                  if (!span || !origin) return;
+                  if (origin.kind === "markdown") followWikiLink(span.raw, { documentId: activeDocument.id, kind: "markdown", start: span.start, end: span.end });
+                  else if (origin.nodeId && (origin.field === "text" || origin.field === "note")) followWikiLink(span.raw, { documentId: activeDocument.id, kind: "node-field", nodeId: origin.nodeId, field: origin.field, start: span.start, end: span.end });
+                }}
+                onAddRelation={(toNodeId, label) => { if (activeNode) changeRelation("add", { fromNodeId: activeNode.id, toNodeId, label }); }}
+                onDeleteRelation={(id) => { changeRelation("delete", { id }); }}
+                onReverseRelation={(id) => { changeRelation("reverse", { id }); }}
+                onUpdateRelation={(id, patch) => changeRelation("update", { ...patch, id })}
+              />
 
               <section className="hint-panel">
                 <strong>快捷键</strong>
@@ -3254,6 +4076,50 @@ function App() {
         />
       )}
 
+      {showBackupSettings && (
+        <BackupSettingsDialog
+          available={Boolean((window.bike ?? window.localOutline)?.getBackupStatus)}
+          status={backupStatus}
+          onClose={() => setShowBackupSettings(false)}
+          onToggle={(enabled) => {
+            const bridge = window.bike ?? window.localOutline;
+            void bridge?.setBackupAuto?.(enabled).then((status) => {
+              applyBackupStatus(status as typeof backupStatus);
+            });
+          }}
+          onBackupNow={() => void backupToCloud()}
+          onInspect={() => {
+            const bridge = window.bike ?? window.localOutline;
+            void bridge?.inspectBackup?.().then((result) => {
+              showNotice(result.exists ? `外部文件 ${result.paused === "external-change" || (result.fileHash && result.fileHash !== result.baselineHash) ? "与本机基线不同" : "与基线一致"}` : "备份文件还不存在");
+            });
+          }}
+          onLoad={() => void loadCloudBackup()}
+          onReplace={() => {
+            const bridge = window.bike ?? window.localOutline;
+            const current = flushPendingEdits() ?? workspaceRef.current;
+            if (!bridge?.inspectBackup || !bridge.replaceBackupWithLocal || !current) return;
+            void bridge.inspectBackup().then(async (inspected) => {
+              if (!inspected.ok) {
+                showNotice(inspected.error || "无法查看备份");
+                return;
+              }
+              const saved = await saveWorkspace(current);
+              if (!saved.ok || saved.target !== "indexeddb") { showNotice("本机保存未成功，未替换备份"); return; }
+              const replaced = await bridge.replaceBackupWithLocal?.({
+                workspace: current,
+                sourceRevision: getWorkspaceSaveRevision(current),
+                semanticHash: backupContentHash(current),
+                expectedFileHash: inspected.fileHash,
+                ticket: backupTicketRef.current + 1,
+              });
+              showNotice(replaced?.ok ? "已用本机内容替换备份" : replaced?.error || "没有替换备份");
+              const status = await bridge.getBackupStatus?.();
+              if (status) applyBackupStatus(status as typeof backupStatus);
+            });
+          }}
+        />
+      )}
       {showSyncConfig && (
         <SyncConfigDialog
           config={syncConfig}
@@ -3311,6 +4177,10 @@ function App() {
 }
 
 interface MarkdownViewProps {
+  onSuggest: React.ComponentProps<typeof LinkInput>["onSuggest"];
+  onBind: React.ComponentProps<typeof LinkInput>["onBind"];
+  onCreate: React.ComponentProps<typeof LinkInput>["onCreate"];
+  documentId: string;
   value: string;
   viewMode: MarkdownPaneMode;
   onChange: (value: string) => void;
@@ -3655,6 +4525,8 @@ function SyncConfigDialog({
 }
 
 function MarkdownView({
+  onSuggest, onBind, onCreate,
+  documentId,
   value,
   viewMode,
   onChange,
@@ -3905,8 +4777,9 @@ function MarkdownView({
       <div className="markdown-workbench">
         {viewMode !== "preview" && (
           <div className={classNames("markdown-source-wrap", isSourceFocused && Boolean(markdownAiTarget) && "has-ai-target")}>
-            <textarea
-              ref={textareaRef}
+            <LinkInput
+              onSuggest={onSuggest} onBind={onBind} onCreate={onCreate}
+              inputRef={textareaRef}
               className="markdown-source"
               value={value}
               onChange={(event) => {
@@ -3936,16 +4809,20 @@ function MarkdownView({
           </div>
         )}
         {viewMode !== "edit" && (
-          <MarkdownPreview content={value} />
+          <MarkdownPreview content={value} documentId={documentId} />
         )}
       </div>
     </div>
   );
 }
 
-function MarkdownPreview({ content }: { content: string }) {
+function MarkdownPreview({ content, documentId }: { content: string; documentId: string }) {
   const blocks: React.ReactNode[] = [];
   const lines = content.replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n").split("\n");
+  const lineOffsets: number[] = [];
+  let offset = 0;
+  for (const line of lines) { lineOffsets.push(offset); offset += line.length + 1; }
+  const inline = (text: string, key: string, start: number) => renderInlineMarkdown(text, key, { documentId, kind: "markdown", start, end: start + text.length });
   let index = 0;
 
   while (index < lines.length) {
@@ -3981,7 +4858,7 @@ function MarkdownPreview({ content }: { content: string }) {
       const Tag = `h${level}` as keyof JSX.IntrinsicElements;
       blocks.push(
         <Tag key={`heading-${index}`}>
-          {renderInlineMarkdown(heading[2], `heading-${index}`)}
+          {inline(heading[2], `heading-${index}`, lineOffsets[index] + line.indexOf(heading[2], heading[1].length))}
         </Tag>,
       );
       index += 1;
@@ -3989,6 +4866,7 @@ function MarkdownPreview({ content }: { content: string }) {
     }
 
     if (isTableStart(lines, index)) {
+      const tableStart = index;
       const tableLines = [lines[index], lines[index + 1]];
       index += 2;
       while (index < lines.length && lines[index].includes("|") && lines[index].trim()) {
@@ -4003,7 +4881,7 @@ function MarkdownPreview({ content }: { content: string }) {
             <tr>
               {headers.map((cell, cellIndex) => (
                 <th key={`head-${cellIndex}`}>
-                  {renderInlineMarkdown(cell, `table-head-${index}-${cellIndex}`)}
+                  {inline(cell, `table-head-${index}-${cellIndex}`, markdownCellOffset(tableLines[0], headers, cellIndex, lineOffsets[tableStart]))}
                 </th>
               ))}
             </tr>
@@ -4013,7 +4891,7 @@ function MarkdownPreview({ content }: { content: string }) {
               <tr key={`row-${rowIndex}`}>
                 {row.map((cell, cellIndex) => (
                   <td key={`cell-${rowIndex}-${cellIndex}`}>
-                    {renderInlineMarkdown(cell, `table-cell-${index}-${rowIndex}-${cellIndex}`)}
+                    {inline(cell, `table-cell-${index}-${rowIndex}-${cellIndex}`, markdownCellOffset(tableLines[rowIndex + 2], row, cellIndex, lineOffsets[tableStart + rowIndex + 2]))}
                   </td>
                 ))}
               </tr>
@@ -4026,7 +4904,7 @@ function MarkdownPreview({ content }: { content: string }) {
 
     const listItem = line.match(/^(\s*)(?:[-*+]|\d+[.)])\s+(?:\[( |x|X)\]\s+)?(.*)$/);
     if (listItem) {
-      const items: Array<{ indent: number; checked?: boolean; text: string }> = [];
+      const items: Array<{ indent: number; checked?: boolean; text: string; source: LinkOrigin }> = [];
       while (index < lines.length) {
         const item = lines[index].match(/^(\s*)(?:[-*+]|\d+[.)])\s+(?:\[( |x|X)\]\s+)?(.*)$/);
         if (!item) break;
@@ -4034,6 +4912,7 @@ function MarkdownPreview({ content }: { content: string }) {
           indent: item[1].replace(/\t/g, "    ").length,
           checked: item[2] ? item[2].toLowerCase() === "x" : undefined,
           text: item[3],
+          source: { documentId, kind: "markdown", start: lineOffsets[index] + lines[index].length - item[3].length, end: lineOffsets[index] + lines[index].length },
         });
         index += 1;
       }
@@ -4042,16 +4921,17 @@ function MarkdownPreview({ content }: { content: string }) {
     }
 
     if (/^\s{0,3}>\s?/.test(line)) {
-      const quoteLines: string[] = [];
+      const quoteLines: Array<{ text: string; start: number }> = [];
       while (index < lines.length && /^\s{0,3}>\s?/.test(lines[index])) {
-        quoteLines.push(lines[index].replace(/^\s{0,3}>\s?/, ""));
+        const text = lines[index].replace(/^\s{0,3}>\s?/, "");
+        quoteLines.push({ text, start: lineOffsets[index] + lines[index].length - text.length });
         index += 1;
       }
       blocks.push(
         <blockquote key={`quote-${index}`}>
           {quoteLines.map((quoteLine, quoteIndex) => (
             <p key={`quote-line-${quoteIndex}`}>
-              {renderInlineMarkdown(quoteLine, `quote-${index}-${quoteIndex}`)}
+              {inline(quoteLine.text, `quote-${index}-${quoteIndex}`, quoteLine.start)}
             </p>
           ))}
         </blockquote>,
@@ -4059,7 +4939,8 @@ function MarkdownPreview({ content }: { content: string }) {
       continue;
     }
 
-    const paragraphLines = [line.trim()];
+    const paragraphStart = index;
+    const paragraphLines = [line];
     index += 1;
     while (
       index < lines.length &&
@@ -4070,12 +4951,12 @@ function MarkdownPreview({ content }: { content: string }) {
       !/^\s{0,3}>\s?/.test(lines[index]) &&
       !isTableStart(lines, index)
     ) {
-      paragraphLines.push(lines[index].trim());
+      paragraphLines.push(lines[index]);
       index += 1;
     }
     blocks.push(
       <p key={`paragraph-${index}`}>
-        {renderInlineMarkdown(paragraphLines.join(" "), `paragraph-${index}`)}
+        {inline(paragraphLines.join("\n"), `paragraph-${index}`, lineOffsets[paragraphStart])}
       </p>,
     );
   }
@@ -4086,6 +4967,18 @@ function MarkdownPreview({ content }: { content: string }) {
     </div>
   );
 }
+
+// Transformed table text without an exact source span fails closed.
+const markdownCellOffset = (row: string, cells: string[], index: number, offset: number) => {
+  let cursor = 0;
+  for (let i = 0; i <= index; i++) {
+    const found = row.indexOf(cells[i], cursor);
+    if (found < 0) return -1;
+    if (i === index) return offset + found;
+    cursor = found + cells[i].length;
+  }
+  return -1;
+};
 
 const splitMarkdownTableRow = (row: string) =>
   splitEscapedPipe(row.trim().replace(/^\|/, "").replace(/\|$/, "")).map((cell) => cell.trim());
@@ -4126,12 +5019,13 @@ const isTableStart = (lines: string[], index: number) =>
 
 interface MarkdownPreviewListItem {
   text: string;
+  source: LinkOrigin;
   checked?: boolean;
   children: MarkdownPreviewListItem[];
 }
 
 const buildMarkdownPreviewList = (
-  items: Array<{ indent: number; checked?: boolean; text: string }>,
+  items: Array<{ indent: number; checked?: boolean; text: string; source: LinkOrigin }>,
 ) => {
   const roots: MarkdownPreviewListItem[] = [];
   const stack: Array<{ indent: number; children: MarkdownPreviewListItem[] }> = [
@@ -4145,6 +5039,7 @@ const buildMarkdownPreviewList = (
 
     const node: MarkdownPreviewListItem = {
       text: item.text,
+      source: item.source,
       checked: item.checked,
       children: [],
     };
@@ -4169,7 +5064,7 @@ const renderMarkdownPreviewList = (
           {item.checked !== undefined && (
             <input type="checkbox" checked={item.checked} readOnly />
           )}
-          <span>{renderInlineMarkdown(item.text, `${keyPrefix}-${itemIndex}`)}</span>
+          <span>{renderInlineMarkdown(item.text, `${keyPrefix}-${itemIndex}`, item.source)}</span>
         </span>
         {item.children.length > 0 &&
           renderMarkdownPreviewList(item.children, `${keyPrefix}-${itemIndex}-children`)}
@@ -4178,7 +5073,31 @@ const renderMarkdownPreviewList = (
   </ul>
 );
 
-const renderInlineMarkdown = (text: string, keyPrefix: string): React.ReactNode[] => {
+const renderInlineMarkdown = (text: string, keyPrefix: string, source: LinkOrigin): React.ReactNode[] => {
+  const wikiLinks = scanLinks(text);
+  if (wikiLinks.length) {
+    const linked: React.ReactNode[] = [];
+    let cursor = 0;
+    wikiLinks.forEach((link, index) => {
+      if (link.start > cursor) linked.push(...renderInlineMarkdown(text.slice(cursor, link.start), `${keyPrefix}-${index}`, { ...source, start: source.start + cursor }));
+      linked.push(
+        <button
+          key={`${keyPrefix}-wiki-${link.start}`}
+          type="button"
+          className="wiki-link-chip"
+          onClick={(event) => {
+            event.preventDefault();
+            openWikiLinkHandler?.(link.raw, { ...source, start: source.start < 0 ? -1 : source.start + link.start, end: source.start + link.end });
+          }}
+        >
+          {link.label}
+        </button>,
+      );
+      cursor = link.end;
+    });
+    if (cursor < text.length) linked.push(...renderInlineMarkdown(text.slice(cursor), `${keyPrefix}-end`, { ...source, start: source.start + cursor }));
+    return linked;
+  }
   const nodes: React.ReactNode[] = [];
   const tokenPattern =
     /(!\[([^\]]*)\]\(([^)]+)\)|\[([^\]]+)\]\(([^)]+)\)|`([^`]+)`|\*\*([^*]+)\*\*|__([^_]+)__|~~([^~]+)~~|\*([^*]+)\*|_([^_]+)_)/g;
@@ -4247,6 +5166,13 @@ interface OutlineViewProps {
   onUpdateNodes: (nodes: OutlineNode[]) => void;
   onAiAction: (action: AiNodeAction, targetId: StructuredAiTargetId) => void;
   isAiBusy: (id: StructuredAiTargetId) => boolean;
+  onSuggestLinks?: (query: string) => { items: Suggestion[]; requiresExplicit: boolean; highlight: number };
+  onBindLink?: (nodeId: string, text: string, source: { start: number; end: number; raw: string }, target: { documentId: string; nodeId?: string }, labelMode: "auto" | "custom") => void;
+  onCreateLink?: (nodeId: string, text: string, query: { start: number; end: number }, title: string) => void;
+  onPublishLabel?: (nodeId: string, previous: string, next: string) => void;
+  onLabelFocus?: (nodeId: string, text: string) => void;
+  onFollowLink?: (raw: string, source: Omit<LinkOrigin, "documentId">) => void;
+  locatedNodeId?: string | null;
 }
 
 interface OutlineNodeRowProps {
@@ -4270,6 +5196,13 @@ interface OutlineNodeRowProps {
   dropZone: OutlineDropZone | null;
   onAiAction: (action: AiNodeAction, targetId: StructuredAiTargetId) => void;
   isAiBusy: boolean;
+  onSuggestLinks?: (query: string) => { items: Suggestion[]; requiresExplicit: boolean; highlight: number };
+  onBindLink?: (nodeId: string, text: string, source: { start: number; end: number; raw: string }, target: { documentId: string; nodeId?: string }, labelMode: "auto" | "custom") => void;
+  onCreateLink?: (nodeId: string, text: string, query: { start: number; end: number }, title: string) => void;
+  onPublishLabel?: (nodeId: string, previous: string, next: string) => void;
+  onLabelFocus?: (nodeId: string, text: string) => void;
+  onFollowLink?: (raw: string, source: Omit<LinkOrigin, "documentId">) => void;
+  located?: boolean;
 }
 
 const OutlineNodeRow = React.memo(function OutlineNodeRow({
@@ -4293,9 +5226,19 @@ const OutlineNodeRow = React.memo(function OutlineNodeRow({
   dropZone,
   onAiAction,
   isAiBusy,
+  onSuggestLinks,
+  onBindLink,
+  onCreateLink,
+  onPublishLabel,
+  onLabelFocus,
+  onFollowLink,
+  located,
 }: OutlineNodeRowProps) {
   const [localText, setLocalText] = useState(node.text);
   const committedTextRef = useRef(node.text);
+  const baselineRef = useRef(node.text);
+  const [linkChoices, setLinkChoices] = useState<{ items: Suggestion[]; requiresExplicit: boolean; highlight: number; query: { start: number; end: number } } | null>(null);
+  const [linkPopupStyle, setLinkPopupStyle] = useState<React.CSSProperties>({});
   const [textCellWidth, setTextCellWidth] = useState(0);
   const isFocusedRef = useRef(false);
   const debounceTimerRef = useRef<number | null>(null);
@@ -4364,29 +5307,92 @@ const OutlineNodeRow = React.memo(function OutlineNodeRow({
     };
   }, []);
 
+  const refreshLinkChoices = (value: string, caret: number) => {
+    const query = activeLinkQuery(value, caret);
+    if (!query || !onSuggestLinks) {
+      setLinkChoices(null);
+      return;
+    }
+    const suggestion = onSuggestLinks(query.query ?? "");
+    if (textareaRef.current) {
+      const rect = textareaRef.current.getBoundingClientRect();
+      const pane = textareaRef.current.closest(".editor-pane")?.getBoundingClientRect();
+      const below = Math.min(window.innerHeight, pane?.bottom ?? window.innerHeight) - rect.bottom - 8;
+      const above = rect.top - Math.max(0, pane?.top ?? 0) - 8;
+      const up = below < 160 && above > below;
+      setLinkPopupStyle({ top: up ? "auto" : "100%", bottom: up ? "100%" : "auto", maxHeight: Math.max(80, Math.min(240, up ? above : below)) });
+    }
+    setLinkChoices({ ...suggestion, query });
+  };
+
+  const chooseLink = (item: Suggestion) => {
+    if (!linkChoices) return;
+    if (item.kind === "create") {
+      const inserted = insertLinkAtQuery(localText, linkChoices.query, { documentName: item.title });
+      setLocalText(inserted.text);
+      baselineRef.current = inserted.text;
+      committedTextRef.current = inserted.text;
+      onCreateLink?.(node.id, localText, linkChoices.query, item.title);
+      setLinkChoices(null);
+      return;
+    }
+    const inserted = insertLinkAtQuery(localText, linkChoices.query, {
+      documentName: item.kind === "node" ? item.documentTitle || item.title : item.title,
+      nodeName: item.kind === "node" ? item.title : null,
+    });
+    setLocalText(inserted.text);
+    baselineRef.current = inserted.text;
+    onBindLink?.(node.id, inserted.text, { start: inserted.start, end: inserted.end, raw: inserted.raw }, {
+      documentId: item.documentId || "",
+      ...(item.nodeId ? { nodeId: item.nodeId } : {}),
+    }, inserted.labelMode);
+    setLinkChoices(null);
+  };
+
   const handleChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const val = e.target.value;
     setLocalText(val);
     autoResize(e.target);
-
-    if (debounceTimerRef.current) window.clearTimeout(debounceTimerRef.current);
-    debounceTimerRef.current = window.setTimeout(() => {
-      onText(node.id, val);
-    }, 400);
+    refreshLinkChoices(val, e.target.selectionStart ?? val.length);
   };
 
   const handleBlur = () => {
     isFocusedRef.current = false;
-    if (debounceTimerRef.current) {
-      window.clearTimeout(debounceTimerRef.current);
-      debounceTimerRef.current = null;
-    }
-    onText(node.id, localText);
+    setLinkChoices(null);
+    onPublishLabel?.(node.id, baselineRef.current, localText);
+    baselineRef.current = localText;
   };
 
   const handleFocus = () => {
     isFocusedRef.current = true;
+    baselineRef.current = node.text;
+    onLabelFocus?.(node.id, node.text);
     onSelect(node.id);
+  };
+
+  const handleLinkKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (!linkChoices) return false;
+    if (event.nativeEvent.isComposing) return false;
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      event.stopPropagation();
+      const delta = event.key === "ArrowDown" ? 1 : -1;
+      setLinkChoices((current) => current ? { ...current, highlight: Math.max(-1, Math.min(current.items.length - 1, current.highlight + delta)) } : current);
+      return true;
+    }
+    if (event.key === "Enter") {
+      event.preventDefault();
+      event.stopPropagation();
+      if (linkChoices.highlight >= 0) chooseLink(linkChoices.items[linkChoices.highlight]);
+      return true;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      setLinkChoices(null);
+      return true;
+    }
+    return false;
   };
 
   const handleBulletClick = (event: React.MouseEvent<HTMLButtonElement>) => {
@@ -4406,12 +5412,14 @@ const OutlineNodeRow = React.memo(function OutlineNodeRow({
       className={classNames(
         "outline-row",
         isActive && "active",
+        located && "is-located",
         `node-${normalizeColor(node.color)}`,
         `heading-${node.headingLevel ?? 0}`,
         node.highlight && "is-highlighted",
         dropZone ? `drop-${dropZone}` : false,
       )}
       style={{ "--depth": depth } as React.CSSProperties}
+      data-node-id={node.id}
       onClick={() => onSelect(node.id)}
       onDragOver={(e) => onDragOver(e, node.id)}
       onDragLeave={(e) => onDragLeave(e, node.id)}
@@ -4483,7 +5491,10 @@ const OutlineNodeRow = React.memo(function OutlineNodeRow({
           rows={1}
           onChange={handleChange}
           onDragStart={(event) => event.stopPropagation()}
-          onKeyDown={(event) => onKeyDown(event, node)}
+          onKeyDown={(event) => {
+            if (handleLinkKeyDown(event)) return;
+            onKeyDown(event, node);
+          }}
           onFocus={handleFocus}
           onBlur={handleBlur}
           placeholder="输入主题"
@@ -4504,14 +5515,32 @@ const OutlineNodeRow = React.memo(function OutlineNodeRow({
             表格 {node.table.length}x{node.table[0]?.length ?? 0}
           </span>
         )}
+        {linkChoices && <div className="outline-link-popup" style={linkPopupStyle}>
+          <LinkAutocomplete items={linkChoices.items} highlight={linkChoices.highlight} requiresExplicit={linkChoices.requiresExplicit}
+            onHighlight={(index) => setLinkChoices((current) => current ? { ...current, highlight: index } : current)}
+            onSelect={chooseLink} onCancel={() => setLinkChoices(null)} />
+        </div>}
       </div>
 
       <div className="row-meta">
         {extractTags(localText).map((tag) => (
           <span key={tag}>#{tag}</span>
         ))}
-        {extractLinks(localText).map((link) => (
-          <span key={link}>[[{link}]]</span>
+        {scanLinks(localText).map((link) => (
+          <button
+            key={`${link.start}-${link.raw}`}
+            type="button"
+            className="wiki-link-chip"
+            title="Cmd/Ctrl+点击打开链接"
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={(event) => {
+              if (!(event.metaKey || event.ctrlKey)) return;
+              event.stopPropagation();
+              onFollowLink?.(link.raw, { kind: "node-field", nodeId: node.id, field: "text", start: link.start, end: link.end });
+            }}
+          >
+            {link.raw}
+          </button>
         ))}
       </div>
 
@@ -4686,6 +5715,13 @@ function OutlineView(props: OutlineViewProps) {
           dropZone={dropState?.id === node.id ? dropState.zone : null}
           onAiAction={props.onAiAction}
           isAiBusy={props.isAiBusy(node.id)}
+          onSuggestLinks={props.onSuggestLinks}
+          onBindLink={props.onBindLink}
+          onCreateLink={props.onCreateLink}
+          onPublishLabel={props.onPublishLabel}
+          onLabelFocus={props.onLabelFocus}
+          onFollowLink={props.onFollowLink}
+          located={props.locatedNodeId === node.id}
         />
       ))}
       {menuState && menuNode && (
@@ -4902,6 +5938,8 @@ interface MindMapProps {
   rootTargetId: string | null;
   viewportResetKey: string;
   activeNodeId: string | null;
+  locatedNodeId?: string | null;
+  locationVersion?: number;
   onSelect: (id: string) => void;
   onTitle: (title: string) => void;
   onText: (id: string, text: string) => void;
@@ -4919,6 +5957,9 @@ interface MindMapProps {
   onFocusNode: (id: string) => void;
   onAiAction: (action: AiNodeAction, targetId: StructuredAiTargetId) => void;
   isAiBusy: (id: StructuredAiTargetId) => boolean;
+  relations?: Array<{ id: string; fromNodeId: string; toNodeId: string; label: string }>;
+  showRelations?: boolean;
+  onToggleRelations?: () => void;
 }
 
 interface MindMapItem {
@@ -4938,6 +5979,8 @@ function MindMap({
   rootTargetId,
   viewportResetKey,
   activeNodeId,
+  locatedNodeId = null,
+  locationVersion = 0,
   onSelect,
   onTitle,
   onText,
@@ -4955,9 +5998,14 @@ function MindMap({
   onFocusNode,
   onAiAction,
   isAiBusy,
+  relations = [],
+  showRelations = false,
+  onToggleRelations,
 }: MindMapProps) {
+  const [selectedRelationsOnly, setSelectedRelationsOnly] = useState(false);
   const mapRootId = MINDMAP_ROOT_ID;
   const viewportRef = useRef<HTMLDivElement | null>(null);
+  const lastLocationRef = useRef(0);
   const dragRef = useRef<{
     pointerId: number;
     startX: number;
@@ -4970,6 +6018,7 @@ function MindMap({
   const [viewport, setViewport] = useState({ scale: 1, x: 0, y: 0 });
   const [dragging, setDragging] = useState(false);
   const [editingNodeId, setEditingNodeId] = useState<string | null>(null);
+  const [editingDraft, setEditingDraft] = useState("");
   const [contextMenu, setContextMenu] = useState<{
     nodeId: string;
     x: number;
@@ -4990,6 +6039,10 @@ function MindMap({
     [nodes, title],
   );
   const layout = useMemo(() => createMindMapLayout(mapNodes), [mapNodes]);
+  const visibleRelations = useMemo(() => {
+    const ids = new Set(layout.items.map((item) => item.node.id));
+    return relations.filter((edge) => ids.has(edge.fromNodeId) && ids.has(edge.toNodeId) && (!selectedRelationsOnly || edge.fromNodeId === activeNodeId || edge.toNodeId === activeNodeId));
+  }, [layout, relations, selectedRelationsOnly, activeNodeId]);
   const renderedItems = useMemo(() => {
     if (!editingNodeId) return layout.items;
     const editingItems = layout.items.filter((item) => item.node.id === editingNodeId);
@@ -5007,6 +6060,15 @@ function MindMap({
   const centeredViewport = () => {
     const rect = viewportRef.current?.getBoundingClientRect();
     if (!rect) return { scale: 1, x: 0, y: 0 };
+    const root = layout.items.find((item) => item.node.id === mapRootId);
+    if (root) {
+      const { scale } = centerMindMapItem(rect, root, 1);
+      return {
+        scale,
+        x: clampNumber((rect.width - layout.width * scale) / 2, 24 - root.x * scale, rect.width - 24 - (root.x + root.width) * scale),
+        y: clampNumber((rect.height - layout.height * scale) / 2, 24 - root.y * scale, rect.height - 24 - (root.y + root.height) * scale),
+      };
+    }
     return {
       scale: 1,
       x: Math.max(32, (rect.width - layout.width) / 2),
@@ -5017,6 +6079,20 @@ function MindMap({
   useEffect(() => {
     setViewport(centeredViewport());
   }, [viewportResetKey]);
+
+  useEffect(() => {
+    if (!locationVersion || lastLocationRef.current === locationVersion) return;
+    if (locatedNodeId && locatedNodeId !== activeNodeId && locatedNodeId !== rootTargetId) return;
+    const id = !locatedNodeId || locatedNodeId === rootTargetId ? mapRootId : locatedNodeId;
+    const item = layout.items.find((item) => item.node.id === id);
+    const element = viewportRef.current;
+    if (!item || !element) return;
+    lastLocationRef.current = locationVersion;
+    element.closest(".editor-pane")?.scrollTo({ top: 0 });
+    const bounds = element.getBoundingClientRect();
+    setViewport((current) => centerMindMapItem(bounds, item, current.scale));
+    if (locatedNodeId) element.focus({ preventScroll: true });
+  }, [locationVersion, locatedNodeId, layout, activeNodeId, rootTargetId]);
 
   useEffect(() => {
     const element = viewportRef.current;
@@ -5247,6 +6323,9 @@ function MindMap({
         >
           <RotateCcw size={16} />
         </button>
+        <button type="button" className={classNames("map-text-control", showRelations && "selected")} onClick={onToggleRelations} title="显示关系线">关系</button>
+        {showRelations && <><button type="button" className={classNames("map-text-control", selectedRelationsOnly && "selected")} onClick={() => setSelectedRelationsOnly((value) => !value)}>仅选中主题</button>
+          <span className="relation-count" role="status">共 {relations.length} 条，显示 {Math.min(200, visibleRelations.length)} 条，隐藏 {relations.length - visibleRelations.length} 条{visibleRelations.length > 200 ? `，另有 ${visibleRelations.length - 200} 条超过绘制上限，请筛选` : ""}</span></>}
       </div>
 
       <div
@@ -5265,6 +6344,26 @@ function MindMap({
           role="img"
           aria-label={`${title} 思维导图`}
         >
+          {showRelations && visibleRelations.slice(0, 200).map((relation) => {
+            const from = layout.items.find((item) => item.node.id === relation.fromNodeId);
+            const to = layout.items.find((item) => item.node.id === relation.toNodeId);
+            if (!from || !to) return null;
+            const x1 = from.x + from.width / 2;
+            const y1 = from.y + from.height;
+            const x2 = to.x + to.width / 2;
+            const y2 = to.y;
+            return (
+              <g key={relation.id} className="mindmap-relation-group">
+                <path className="mindmap-relation" d={`M ${x1} ${y1} C ${x1} ${y1 + 36}, ${x2} ${y2 - 36}, ${x2} ${y2}`} markerEnd="url(#relation-arrow)" />
+                <text className="mindmap-relation-label" x={(x1 + x2) / 2} y={(y1 + y2) / 2}>{relation.label}</text>
+              </g>
+            );
+          })}
+          <defs>
+            <marker id="relation-arrow" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+              <path d="M0,0 L6,3 L0,6" fill="currentColor" />
+            </marker>
+          </defs>
           {layout.edges.map((edge) => (
             <path
               key={`${edge.from.node.id}-${edge.to.node.id}`}
@@ -5279,6 +6378,7 @@ function MindMap({
           {renderedItems.map((item) => (
             <foreignObject
               key={item.node.id}
+              data-node-id={item.node.id}
               className="map-node-object"
               x={item.x}
               y={item.y}
@@ -5291,6 +6391,7 @@ function MindMap({
                   return;
                 }
                 if (!isRootNode(item.node.id)) onSelect(item.node.id);
+                setEditingDraft(isRootNode(item.node.id) ? title : item.node.text);
                 setEditingNodeId(item.node.id);
               }}
               onContextMenu={(event) => {
@@ -5323,15 +6424,16 @@ function MindMap({
                   <div className="map-node-edit-wrap">
                     <textarea
                       autoFocus
-                      value={isRootNode(item.node.id) ? title : item.node.text}
+                      value={editingDraft}
                       placeholder="输入文字"
-                      onChange={(event) => setMapNodeText(item.node.id, event.target.value)}
+                      onChange={(event) => setEditingDraft(event.target.value)}
                       onClick={(event) => event.stopPropagation()}
                       onPointerDown={(event) => event.stopPropagation()}
                       onKeyDown={(event) => {
                         if (event.nativeEvent.isComposing) return;
                         if (event.key === "Enter") {
                           event.preventDefault();
+                          setMapNodeText(item.node.id, editingDraft);
                           setEditingNodeId(null);
                         }
                         if (event.key === "Escape") {
@@ -5339,7 +6441,10 @@ function MindMap({
                           setEditingNodeId(null);
                         }
                       }}
-                      onBlur={() => setEditingNodeId(null)}
+                      onBlur={() => {
+                        setMapNodeText(item.node.id, editingDraft);
+                        setEditingNodeId(null);
+                      }}
                     />
                     <AiInlineMenu
                       busy={isAiBusy(isRootNode(item.node.id) ? rootActionTargetId() : item.node.id)}

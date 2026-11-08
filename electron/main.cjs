@@ -14,6 +14,7 @@ const {
 } = require("./update-checker.cjs");
 const { resolveDevServer } = require("./dev-server.cjs");
 const { editCommandForInput } = require("./edit-shortcuts.cjs");
+const { createBackupService, MESSAGES: backupMessages } = require("./backup-service.cjs");
 
 const devServer = resolveDevServer({ env: process.env, isPackaged: app.isPackaged });
 if (devServer.warning) console.warn(devServer.warning);
@@ -25,7 +26,9 @@ const stampedBackupPrefix = "bike-workspace-";
 const legacyCloudFolderName = "LocalOutline";
 const legacyWorkspaceFilename = "localoutline-workspace.json";
 let coreModulePromise;
+let backupServicePromise;
 let mainWindow = null;
+let quitting = false;
 const contentSecurityPolicy = [
   "default-src 'self'",
   "script-src 'self'",
@@ -88,12 +91,44 @@ const providerErrorMessage = (data) => {
   return undefined;
 };
 
+
+const backupService = () => {
+  backupServicePromise ??= (async () => {
+    const service = createBackupService({
+      fs,
+      path,
+      getDirectory: () => iCloudDirectory(),
+      workspaceFilename,
+      stampedPrefix: stampedBackupPrefix,
+      maxStamped: maxStampedBackups,
+      lock: withWorkspaceWriteLock,
+      writeAtomic: writeFileAtomically,
+      hash: hashContent,
+      now: () => Date.now(),
+      readSettings: () => fs.readFile(path.join(app.getPath("userData"), "backup-settings.json"), "utf8").catch((error) => {
+        if (error?.code === "ENOENT") return "";
+        throw error;
+      }),
+      writeSettings: (value) => fs.writeFile(path.join(app.getPath("userData"), "backup-settings.json"), value),
+      migrate: migrateWorkspacePayload,
+    });
+    await service.load();
+    return service;
+  })();
+  return backupServicePromise;
+};
+
+const backupResult = (result) => ({
+  ...result,
+  error: result?.ok ? undefined : result?.error || backupMessages[result?.code] || "备份失败",
+});
+
 const createWindow = () => {
   const window = new BrowserWindow({
     width: 1366,
     height: 960,
-    minWidth: 980,
-    minHeight: 640,
+    minWidth: 1366,
+    minHeight: 960,
     title: "Bike",
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
@@ -102,7 +137,29 @@ const createWindow = () => {
       sandbox: true,
     },
   });
+  let allowWindowClose = false;
+  let closing = false;
   mainWindow = window;
+  window.on("close", (event) => {
+    if (allowWindowClose) return;
+    event.preventDefault();
+    if (closing) return;
+    closing = true;
+    let settled = false;
+    const finish = (reply) => {
+      if (reply?.sender && reply.sender !== window.webContents) return;
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      ipcMain.removeListener("backup-flush-done", finish);
+      allowWindowClose = true;
+      window.close();
+    };
+    const timeout = setTimeout(finish, 3000);
+    ipcMain.on("backup-flush-done", finish);
+    if (window.webContents.isDestroyed()) finish();
+    else window.webContents.send("backup-flush-request");
+  });
   window.webContents.on("before-input-event", (event, input) => {
     const command = editCommandForInput(input);
     if (!command) return;
@@ -422,8 +479,12 @@ app.whenReady().then(() => {
   createWindow();
 });
 
+app.on("before-quit", () => {
+  quitting = true;
+});
+
 app.on("window-all-closed", () => {
-  if (process.platform !== "darwin") app.quit();
+  if (process.platform !== "darwin" || quitting) app.quit();
 });
 
 app.on("activate", () => {
@@ -432,45 +493,99 @@ app.on("activate", () => {
 
 ipcMain.handle("save-icloud-backup", async (_event, payload) => {
   try {
-    const request = isRecord(payload) && "workspace" in payload
-      ? payload
-      : { workspace: payload };
-    const expectedRevision = typeof request.expectedRevision === "string" && request.expectedRevision.trim()
-      ? request.expectedRevision
-      : undefined;
-    const workspace = await migrateWorkspacePayload(request.workspace);
-    const directory = await iCloudDirectory();
-    await fs.mkdir(directory, { recursive: true });
-    const latestPath = path.join(directory, workspaceFilename);
-    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-    const stampedPath = path.join(directory, `${stampedBackupPrefix}${stamp}.json`);
-    const content = JSON.stringify(workspace, null, 2);
-    const nextRevision = hashContent(content);
-    await withWorkspaceWriteLock(latestPath, async () => {
-      const existingRaw = await fs.readFile(latestPath, "utf8").catch((error) => {
-        if (error?.code === "ENOENT") return null;
-        throw error;
-      });
-      const existingRevision = existingRaw ? hashContent(existingRaw) : undefined;
-      if (
-        existingRevision &&
-        existingRevision !== nextRevision &&
-        existingRevision !== expectedRevision
-      ) {
-        throw new Error("iCloud 文件有外部修改，已取消覆盖。请先“载入备份”确认最新内容后再备份。");
+    const request = isRecord(payload) && "workspace" in payload ? payload : { workspace: payload };
+    const service = await backupService();
+    if (typeof request.expectedRevision === "string" && request.expectedRevision.trim()) {
+      const inspected = await service.inspect();
+      if (inspected.ok && inspected.exists && !inspected.baselineHash && inspected.fileHash === request.expectedRevision) {
+        await service.acceptBaseline(request.expectedRevision);
       }
-      await writeFileAtomically(stampedPath, content);
-      await writeFileAtomically(latestPath, content);
-    });
-    pruneStampedBackups(directory).catch((error) => {
-      console.warn("Failed to prune old iCloud backups:", error);
-    });
-    return { ok: true, path: latestPath, revision: nextRevision };
+    }
+    return backupResult(await service.enqueue({
+      workspace: request.workspace,
+      ticket: Number.isInteger(request.ticket) ? request.ticket : undefined,
+      sourceRevision: request.sourceRevision,
+      semanticHash: request.semanticHash,
+      manual: true,
+      wait: true,
+    }));
   } catch (error) {
-    return {
-      ok: false,
-      error: error instanceof Error ? error.message : String(error),
-    };
+    return { ok: false, code: "write-failed", error: error instanceof Error ? error.message : String(error) };
+  }
+});
+
+ipcMain.handle("backup-status", async () => {
+  try {
+    const service = await backupService();
+    return { ok: true, ...service.status() };
+  } catch (error) {
+    return { ok: false, code: "unavailable", error: error instanceof Error ? error.message : String(error) };
+  }
+});
+
+ipcMain.handle("backup-set-auto", async (_event, payload) => {
+  try {
+    const service = await backupService();
+    return { ok: true, ...(await service.setAuto(isRecord(payload) && payload.enabled === true)) };
+  } catch (error) {
+    return { ok: false, code: "write-failed", error: error instanceof Error ? error.message : String(error) };
+  }
+});
+ipcMain.handle("backup-pause-source", async () => {
+  try { return { ok: true, ...(await (await backupService()).pauseSource()) }; }
+  catch (error) { return { ok: false, code: "write-failed", error: String(error) }; }
+});
+
+ipcMain.handle("backup-enqueue", async (_event, payload) => {
+  try {
+    const request = isRecord(payload) ? payload : {};
+    const service = await backupService();
+    return backupResult(await service.enqueue({
+      workspace: request.workspace,
+      ticket: Number.isInteger(request.ticket) ? request.ticket : undefined,
+      sourceRevision: request.sourceRevision,
+      semanticHash: request.semanticHash,
+      allocateNext: request.allocateNext === true,
+      resumeSource: request.resumeSource === true,
+      manual: request.manual === true,
+      wait: request.wait !== false,
+    }));
+  } catch (error) {
+    return { ok: false, code: "write-failed", error: error instanceof Error ? error.message : String(error) };
+  }
+});
+
+ipcMain.handle("backup-inspect", async () => {
+  try {
+    return await (await backupService()).inspect();
+  } catch (error) {
+    return { ok: false, code: "unavailable", error: error instanceof Error ? error.message : String(error) };
+  }
+});
+
+ipcMain.handle("backup-replace-local", async (_event, payload) => {
+  try {
+    const request = isRecord(payload) ? payload : {};
+    return backupResult(await (await backupService()).replaceWithLocal({
+      workspace: request.workspace,
+      expectedFileHash: typeof request.expectedFileHash === "string" ? request.expectedFileHash : null,
+      sourceRevision: request.sourceRevision,
+      semanticHash: request.semanticHash,
+      ticket: Number.isInteger(request.ticket) ? request.ticket : undefined,
+    }));
+  } catch (error) {
+    return { ok: false, code: "write-failed", error: error instanceof Error ? error.message : String(error) };
+  }
+});
+
+ipcMain.handle("backup-accept-baseline", async (_event, payload) => {
+  try {
+    const hashValue = isRecord(payload) && typeof payload.hash === "string" ? payload.hash : "";
+    if (!hashValue) return { ok: false, code: "write-failed", error: "缺少备份基线" };
+    if (!payload.workspace || !Number.isSafeInteger(payload.sourceRevision)) return { ok: false, code: "stale-source", error: backupMessages["stale-source"] };
+    return await (await backupService()).acceptBaseline(hashValue, { workspace: payload.workspace, sourceRevision: payload.sourceRevision, semanticHash: payload.semanticHash });
+  } catch (error) {
+    return { ok: false, code: "write-failed", error: error instanceof Error ? error.message : String(error) };
   }
 });
 

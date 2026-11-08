@@ -6,9 +6,11 @@ declare const __RELEASE_PAGE_URL__: string;
 interface BikeDesktopBridge {
   saveICloudBackup: (payload: unknown) => Promise<{
     ok: boolean;
+    code?: string;
     path?: string;
     revision?: string;
     error?: string;
+    ticket?: number;
   }>;
   loadICloudBackup: () => Promise<{
     ok: boolean;
@@ -17,6 +19,15 @@ interface BikeDesktopBridge {
     revision?: string;
     error?: string;
   }>;
+  getBackupStatus?: () => Promise<Record<string, unknown>>;
+  setBackupAuto?: (enabled: boolean) => Promise<Record<string, unknown>>;
+  pauseBackup?: () => Promise<Record<string, unknown>>;
+  enqueueBackup?: (payload: unknown) => Promise<{ ok: boolean; code?: string; path?: string; revision?: string; error?: string; ticket?: number }>;
+  inspectBackup?: () => Promise<{ ok: boolean; exists?: boolean; path?: string; fileHash?: string | null; baselineHash?: string | null; paused?: string | null; error?: string; code?: string }>;
+  replaceBackupWithLocal?: (payload: unknown) => Promise<{ ok: boolean; code?: string; path?: string; revision?: string; error?: string }>;
+  acceptBackupBaseline?: (hash: string, saved?: { workspace: unknown; sourceRevision?: number; semanticHash?: string }) => Promise<Record<string, unknown>>;
+  onBackupFlush?: (callback: () => void) => () => void;
+  finishBackupFlush?: () => void;
   checkForUpdates?: () => Promise<{
     ok: boolean;
     currentVersion: string;

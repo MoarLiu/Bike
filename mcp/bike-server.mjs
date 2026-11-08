@@ -192,6 +192,7 @@ export const createBikeMcpServer = async ({
         documentId: z.string().min(1),
         format: z.enum(["compact", "json", "markdown"]).optional().default("compact"),
         maxDepth: z.number().int().min(0).max(20).optional().default(6),
+        metadata: z.boolean().optional().default(false),
       },
       annotations: {
         readOnlyHint: true,
@@ -229,6 +230,7 @@ export const createBikeMcpServer = async ({
       inputSchema: {
         documentId: z.string().min(1),
         format: z.enum(["json", "markdown"]).optional().default("json"),
+        metadata: z.boolean().optional().default(false),
       },
       annotations: {
         readOnlyHint: true,
