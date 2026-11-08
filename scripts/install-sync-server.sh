@@ -22,9 +22,15 @@ esac
 warn "提示：install-sync-server.sh 已更名为 install.sh，建议改用："
 warn "  curl -fsSL ${RAW_BASE}/scripts/install.sh | bash"
 
-script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -f "${script_dir}/install.sh" ]]; then
-  exec bash "${script_dir}/install.sh" "${action}" "${@:2}"
+# Only use a sibling install.sh when this shim runs from a file. When piped
+# (curl ... | bash), BASH_SOURCE is empty and dirname would point at the current
+# directory, which could run an unrelated install.sh found there.
+script_path="${BASH_SOURCE[0]:-}"
+if [[ -n "${script_path}" && -f "${script_path}" ]]; then
+  script_dir="$(cd "$(dirname "${script_path}")" && pwd)"
+  if [[ -f "${script_dir}/install.sh" ]]; then
+    exec bash "${script_dir}/install.sh" "${action}" "${@:2}"
+  fi
 fi
 
 if command -v curl >/dev/null 2>&1; then

@@ -21,7 +21,7 @@
     "start:web": "npm run build && npm run serve:web",
     "start:sync": "npm run serve:sync",
     "start:full": "npm run build && concurrently -k \"npm run serve:web\" \"npm run serve:sync\"",
-    "electron:dev": "concurrently -k \"vite --host 127.0.0.1\" \"wait-on http://127.0.0.1:5173 && electron .\"",
+    "electron:dev": "concurrently -k \"vite --host 127.0.0.1\" \"wait-on http://127.0.0.1:5173 && VITE_DEV_SERVER_URL=http://127.0.0.1:5173 electron .\"",
     "electron:start": "vite build && electron .",
     "electron:test": "node --test electron/*.test.mjs",
     "electron:dist:mac": "npm run build && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac --arm64"

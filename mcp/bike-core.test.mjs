@@ -143,19 +143,21 @@ test("summarizes and lists workspace documents", async () => {
   assert.equal(documents[0].nodeCount, 3);
 });
 
-test("uses Swift native backup path when Electron backup is absent on macOS", async () => {
+test("ignores retired Swift native .backups paths on macOS", async () => {
   const homeDir = await fs.mkdtemp(path.join(os.tmpdir(), "bike-home-"));
-  const swiftBackupPath = path.join(
+  const cloudDocsDirectory = path.join(
     homeDir,
     "Library",
     "Mobile Documents",
     "com~apple~CloudDocs",
-    "Bike",
-    ".backups",
-    "bike-workspace.json",
   );
-  await fs.mkdir(path.dirname(swiftBackupPath), { recursive: true });
-  await fs.writeFile(swiftBackupPath, "{}", "utf8");
+  for (const retiredBackupPath of [
+    path.join(cloudDocsDirectory, "Bike", ".backups", "bike-workspace.json"),
+    path.join(cloudDocsDirectory, "LocalOutline", ".backups", "localoutline-workspace.json"),
+  ]) {
+    await fs.mkdir(path.dirname(retiredBackupPath), { recursive: true });
+    await fs.writeFile(retiredBackupPath, "{}", "utf8");
+  }
 
   const config = await loadMcpConfig({
     env: {},
@@ -163,7 +165,28 @@ test("uses Swift native backup path when Electron backup is absent on macOS", as
     platform: "darwin",
   });
 
-  assert.equal(config.workspacePath, swiftBackupPath);
+  assert.equal(
+    config.workspacePath,
+    path.join(cloudDocsDirectory, "Bike", "bike-workspace.json"),
+  );
+});
+
+test("uses the ~/.bike workspace path on non-macOS platforms", async () => {
+  const homeDir = await fs.mkdtemp(path.join(os.tmpdir(), "bike-home-"));
+
+  for (const platform of ["linux", "win32"]) {
+    const config = await loadMcpConfig({
+      env: { APPDATA: path.join(homeDir, "AppData", "Roaming") },
+      homeDir,
+      platform,
+    });
+
+    assert.equal(
+      config.workspacePath,
+      path.join(homeDir, ".bike", "bike-workspace.json"),
+      platform,
+    );
+  }
 });
 
 test("falls back to legacy workspace path when renamed Bike path is absent", async () => {

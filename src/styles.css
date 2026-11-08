@@ -314,6 +314,12 @@ button:disabled {
   background: var(--surface-raised);
 }
 
+.loading-error-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .shell {
   display: grid;
   grid-template-columns: var(--sidebar-width) minmax(0, 1fr);

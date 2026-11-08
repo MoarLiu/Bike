@@ -97,7 +97,7 @@ Web Sync 设备密钥明文保存在本机应用配置中，不读取系统密�
 
 ## MCP 服务
 
-1.2.0 增加了只读 MCP 服务，1.3.0 增加受控写入能力，方便 Codex、Claude 等 agent 读取和整理本地大纲。MCP 默认读取工作区 JSON 文件，macOS 上会优先使用 Electron 备份路径；如果该文件不存在，会自动尝试 Swift Native 备份路径。
+1.2.0 增加了只读 MCP 服务，1.3.0 增加受控写入能力，方便 Codex、Claude 等 agent 读取和整理本地大纲。MCP 默认读取工作区 JSON 文件，macOS 上会优先使用 Electron 备份路径；如果该文件不存在，会兼容尝试改名前的旧版 `LocalOutline/localoutline-workspace.json` 路径。其他平台默认读取 `~/.bike/bike-workspace.json`。
 
 启动 MCP 服务：
 

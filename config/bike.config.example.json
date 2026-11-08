@@ -7,7 +7,9 @@
     "sessionSecret": "运行 npm run auth:hash -- \"你的登录密码\" 后，把输出的 sessionSecret 填到这里",
     "sessionMaxAgeHours": 168,
     "secureCookies": false,
-    "trustProxyHeaders": false
+    "trustProxyHeaders": false,
+    "trustedProxyCount": 1,
+    "sessionStatePath": ""
   },
   "web": {
     "defaultSyncServerUrl": ""

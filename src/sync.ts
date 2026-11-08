@@ -14,6 +14,8 @@ export type SyncState = {
   documentRevisions: Record<string, number>;
   documentFingerprints: Record<string, string>;
   deletedDocumentRevisions: Record<string, number>;
+  // Server document order after the last successful sync: the merge base.
+  documentOrder: string[] | null;
   lastSyncedAt: string | null;
 };
 
@@ -126,8 +128,14 @@ export const emptySyncState = (serverUrl: string): SyncState => ({
   documentRevisions: {},
   documentFingerprints: {},
   deletedDocumentRevisions: {},
+  documentOrder: null,
   lastSyncedAt: null,
 });
+
+const documentOrderOrNull = (value: unknown): string[] | null =>
+  Array.isArray(value) && value.every((id) => typeof id === "string")
+    ? [...value]
+    : null;
 
 export const loadSyncState = (serverUrl: string): SyncState => {
   const normalizedServerUrl = normalizeSyncServerUrl(serverUrl);
@@ -154,6 +162,7 @@ export const loadSyncState = (serverUrl: string): SyncState => {
         parsed.deletedDocumentRevisions && typeof parsed.deletedDocumentRevisions === "object"
           ? parsed.deletedDocumentRevisions as Record<string, number>
           : {},
+      documentOrder: documentOrderOrNull(parsed.documentOrder),
       lastSyncedAt:
         typeof parsed.lastSyncedAt === "string" ? parsed.lastSyncedAt : null,
     };
@@ -353,6 +362,7 @@ const cloneSyncState = (state: SyncState): SyncState => ({
   documentRevisions: { ...state.documentRevisions },
   documentFingerprints: { ...state.documentFingerprints },
   deletedDocumentRevisions: { ...state.deletedDocumentRevisions },
+  documentOrder: documentOrderOrNull(state.documentOrder),
   lastSyncedAt: state.lastSyncedAt,
 });
 
@@ -394,6 +404,60 @@ const orderedDocuments = (
   return [...ordered, ...byId.values()];
 };
 
+const isRevisionConflict = (error: unknown) =>
+  error instanceof SyncApiError && error.status === 409;
+
+const sameSequence = (left: string[], right: string[]) =>
+  left.length === right.length && left.every((id, index) => id === right[index]);
+
+const sameRelativeOrder = (left: string[], right: string[]) => {
+  const leftIds = new Set(left);
+  const rightIds = new Set(right);
+  return sameSequence(
+    left.filter((id) => rightIds.has(id)),
+    right.filter((id) => leftIds.has(id)),
+  );
+};
+
+// Adds the ids only `secondary` has right after their nearest preceding
+// neighbour from `secondary`, so a document keeps its place on the side
+// that has it (new documents are inserted at the top, not appended).
+const weaveOrder = (primary: string[], secondary: string[]) => {
+  const result = [...primary];
+  let anchor = -1;
+  for (const id of secondary) {
+    const index = result.indexOf(id);
+    if (index >= 0) {
+      anchor = index;
+      continue;
+    }
+    anchor += 1;
+    result.splice(anchor, 0, id);
+  }
+  return result;
+};
+
+// Three-way merge of the document order. A side "changed" when the relative
+// order of the documents base, local and remote all share differs from base.
+// Only a remote change with no local change adopts the remote order; anything
+// else keeps the local order, so local reorders are never silently dropped.
+const mergeDocumentOrder = (
+  base: string[] | null,
+  local: string[],
+  remote: string[],
+) => {
+  if (!base) return [...local, ...remote.filter((id) => !local.includes(id))];
+  const localIds = new Set(local);
+  const remoteIds = new Set(remote);
+  const common = new Set(base.filter((id) => localIds.has(id) && remoteIds.has(id)));
+  const baseCommon = [...new Set(base)].filter((id) => common.has(id));
+  const unchanged = (order: string[]) =>
+    sameSequence(order.filter((id) => common.has(id)), baseCommon);
+  return unchanged(local) && !unchanged(remote)
+    ? weaveOrder(remote, local)
+    : weaveOrder(local, remote);
+};
+
 const workspaceFromRemote = async (
   config: SyncConfig,
   manifest: SyncManifest,
@@ -432,6 +496,7 @@ export const pullWorkspaceFromRemote = async (
   const manifest = await fetchSyncManifest(normalizedConfig);
   const workspace = await workspaceFromRemote(normalizedConfig, manifest, state);
   state.workspaceRevision = manifest.workspaceRevision;
+  state.documentOrder = [...manifest.documentOrder];
   state.lastSyncedAt = syncTimestamp();
   return { workspace, state, manifest };
 };
@@ -459,6 +524,7 @@ export const pushWorkspaceToRemote = async (
     summary.uploaded += 1;
   }
 
+  // An explicit, user-confirmed overwrite: last writer wins on purpose here.
   manifest = await fetchSyncManifest(normalizedConfig);
   const patchedManifest = await patchRemoteManifest(normalizedConfig, {
     expectedRevision: manifest.workspaceRevision,
@@ -466,6 +532,7 @@ export const pushWorkspaceToRemote = async (
     documentOrder: workspace.documents.map((document) => document.id),
   });
   state.workspaceRevision = patchedManifest.workspaceRevision;
+  state.documentOrder = [...patchedManifest.documentOrder];
   state.lastSyncedAt = syncTimestamp();
   return { state, summary };
 };
@@ -480,13 +547,15 @@ export const syncWorkspaceWithRemote = async (
     ...config,
     serverUrl: normalizeSyncServerUrl(config.serverUrl),
   };
-  const state = {
+  const baseOrder = documentOrderOrNull(previousState.documentOrder);
+  const state: SyncState = {
     ...emptySyncState(normalizedConfig.serverUrl),
     ...previousState,
     serverUrl: normalizedConfig.serverUrl,
     documentRevisions: { ...previousState.documentRevisions },
     documentFingerprints: { ...previousState.documentFingerprints },
     deletedDocumentRevisions: { ...previousState.deletedDocumentRevisions },
+    documentOrder: baseOrder,
   };
   // Downloads are not durable until the caller saves the returned workspace.
   const checkpointState = cloneSyncState(state);
@@ -498,8 +567,42 @@ export const syncWorkspaceWithRemote = async (
       .filter((document) => !document.deletedAt)
       .map((document) => document.id),
   );
+  // The manifest as this sync's own creates, resurrects and deletes leave it:
+  // each bumps workspaceRevision and moves the id like the server does.
+  let expectedWorkspaceRevision = manifest.workspaceRevision;
+  let serverOrder = [...manifest.documentOrder];
+  const notePresenceChange = (id: string, present: boolean) => {
+    expectedWorkspaceRevision += 1;
+    serverOrder = serverOrder.filter((item) => item !== id);
+    if (present) serverOrder.push(id);
+  };
   let documents = [...workspace.documents];
   const localById = () => new Map(documents.map((document) => [document.id, document]));
+  const recordUpload = (uploaded: { revision: number; document: OutlineDocument }) => {
+    documents = documents.map((document) =>
+      document.id === uploaded.document.id ? uploaded.document : document,
+    );
+    recordDocumentState(state, uploaded.document, uploaded.revision);
+    recordDocumentState(checkpointState, uploaded.document, uploaded.revision);
+    checkpointSyncState(checkpointState, options);
+    summary.uploaded += 1;
+  };
+  // Edits win over deletes: bring a remotely deleted document back with the
+  // local copy. A conflict leaves its sync state untouched, so the next round
+  // retries against the newer remote revision instead of conflicting forever.
+  const resurrect = async (local: OutlineDocument, deletedRevision: number) => {
+    let uploaded: Awaited<ReturnType<typeof putRemoteDocument>>;
+    try {
+      uploaded = await putRemoteDocument(normalizedConfig, local, deletedRevision);
+    } catch (error) {
+      if (!isRevisionConflict(error)) throw error;
+      summary.conflicts.push(`${local.title}：远端已删除，恢复本机版本时远端又有变化，将在下次同步重试`);
+      return;
+    }
+    notePresenceChange(local.id, true);
+    recordUpload(uploaded);
+  };
+  const unchangedRemoteDeletions: SyncDocumentSummary[] = [];
 
   for (const remote of manifest.documents) {
     const local = localById().get(remote.id);
@@ -508,33 +611,29 @@ export const syncWorkspaceWithRemote = async (
     const localChanged = Boolean(local && knownFingerprint !== documentFingerprint(local));
 
     if (remote.deletedAt) {
-      recordDeletedState(state, remote.id, remote.revision);
-      if (!local) continue;
-      if (documents.length === 1) {
-        summary.conflicts.push(`${local.title}：远端已删除，但本机至少需要保留一个文档`);
-        continue;
-      }
-      if (knownRevision && !localChanged) {
-        documents = documents.filter((document) => document.id !== remote.id);
-        summary.deleted += 1;
+      if (!local) {
+        recordDeletedState(state, remote.id, remote.revision);
+      } else if (localChanged) {
+        await resurrect(local, remote.revision);
       } else {
-        summary.conflicts.push(`${local.title}：远端已删除，本机也有改动`);
+        // Provably unchanged since the last sync: the delete wins, unless it
+        // would leave this device without documents (decided after downloads).
+        unchangedRemoteDeletions.push(remote);
       }
       continue;
     }
 
     if (!local) {
-      if (knownRevision) {
-        if (knownRevision === remote.revision) {
-          const deleted = await deleteRemoteDocument(normalizedConfig, remote.id, remote.revision);
-          recordDeletedState(state, remote.id, deleted.revision);
-          recordDeletedState(checkpointState, remote.id, deleted.revision);
-          checkpointSyncState(checkpointState, options);
-          summary.deleted += 1;
-        } else {
-          summary.conflicts.push(`${remote.title}：本机已删除，但远端有更新`);
-        }
+      if (knownRevision === remote.revision) {
+        const deleted = await deleteRemoteDocument(normalizedConfig, remote.id, remote.revision);
+        notePresenceChange(remote.id, false);
+        recordDeletedState(state, remote.id, deleted.revision);
+        recordDeletedState(checkpointState, remote.id, deleted.revision);
+        checkpointSyncState(checkpointState, options);
+        summary.deleted += 1;
       } else {
+        // New remotely, or changed there since this device deleted it: remote
+        // edits win over the local delete, so the document is restored.
         const downloaded = await fetchRemoteDocument(normalizedConfig, remote.id);
         documents.push(downloaded.document);
         recordDocumentState(state, downloaded.document, downloaded.revision);
@@ -555,14 +654,7 @@ export const syncWorkspaceWithRemote = async (
 
     if (knownRevision === remote.revision) {
       if (localChanged) {
-        const uploaded = await putRemoteDocument(normalizedConfig, local, knownRevision);
-        documents = documents.map((document) =>
-          document.id === uploaded.document.id ? uploaded.document : document,
-        );
-        recordDocumentState(state, uploaded.document, uploaded.revision);
-        recordDocumentState(checkpointState, uploaded.document, uploaded.revision);
-        checkpointSyncState(checkpointState, options);
-        summary.uploaded += 1;
+        recordUpload(await putRemoteDocument(normalizedConfig, local, knownRevision));
       } else {
         recordDocumentState(state, local, remote.revision);
       }
@@ -581,24 +673,29 @@ export const syncWorkspaceWithRemote = async (
     }
   }
 
+  for (const remote of unchangedRemoteDeletions) {
+    const local = localById().get(remote.id);
+    if (!local) continue;
+    if (documents.length > 1) {
+      documents = documents.filter((document) => document.id !== remote.id);
+      recordDeletedState(state, remote.id, remote.revision);
+      summary.deleted += 1;
+    } else {
+      // The device must keep at least one document; keep it on the server too.
+      await resurrect(local, remote.revision);
+    }
+  }
+
   for (const local of documents) {
     if (remoteById.has(local.id)) continue;
     if (remoteLiveIds.has(local.id)) continue;
     const uploaded = await putRemoteDocument(normalizedConfig, local, null);
-    documents = documents.map((document) =>
-      document.id === uploaded.document.id ? uploaded.document : document,
-    );
-    recordDocumentState(state, uploaded.document, uploaded.revision);
-    recordDocumentState(checkpointState, uploaded.document, uploaded.revision);
-    checkpointSyncState(checkpointState, options);
-    summary.uploaded += 1;
+    notePresenceChange(local.id, true);
+    recordUpload(uploaded);
   }
 
   const localOrder = workspace.documents.map((document) => document.id);
-  const preferredOrder = [
-    ...localOrder,
-    ...manifest.documentOrder.filter((id) => !localOrder.includes(id)),
-  ];
+  const preferredOrder = mergeDocumentOrder(baseOrder, localOrder, manifest.documentOrder);
   const ordered = orderedDocuments(documents, preferredOrder);
   const activeDocumentId = ordered.some((document) => document.id === workspace.activeDocumentId)
     ? workspace.activeDocumentId
@@ -610,17 +707,28 @@ export const syncWorkspaceWithRemote = async (
     documents: ordered,
   };
 
-  if (!summary.conflicts.length && nextWorkspace.documents.length) {
-    const latestManifest = await fetchSyncManifest(normalizedConfig);
-    const patchedManifest = await patchRemoteManifest(normalizedConfig, {
-      expectedRevision: latestManifest.workspaceRevision,
-      activeDocumentId: nextWorkspace.activeDocumentId,
-      documentOrder: nextWorkspace.documents.map((document) => document.id),
-    });
-    state.workspaceRevision = patchedManifest.workspaceRevision;
-  } else {
-    state.workspaceRevision = manifest.workspaceRevision;
+  // Guard the order with the revision this sync observed (plus its own
+  // presence changes), and only write it when the server's order differs.
+  const desiredOrder = ordered.map((document) => document.id);
+  let recordedOrder = serverOrder;
+  if (desiredOrder.length && !sameRelativeOrder(desiredOrder, serverOrder)) {
+    try {
+      const patchedManifest = await patchRemoteManifest(normalizedConfig, {
+        expectedRevision: expectedWorkspaceRevision,
+        activeDocumentId,
+        documentOrder: desiredOrder,
+      });
+      expectedWorkspaceRevision = patchedManifest.workspaceRevision;
+      recordedOrder = patchedManifest.documentOrder;
+    } catch (error) {
+      if (!isRevisionConflict(error)) throw error;
+      // Another device changed the manifest meanwhile. Keep the document
+      // results; the base stays the order this sync saw, so the next round
+      // merges against that device's change instead of overwriting it.
+    }
   }
+  state.documentOrder = [...recordedOrder];
+  state.workspaceRevision = expectedWorkspaceRevision;
   state.lastSyncedAt = syncTimestamp();
   return { workspace: nextWorkspace, state, summary };
 };

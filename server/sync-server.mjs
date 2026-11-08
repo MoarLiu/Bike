@@ -2,7 +2,15 @@ import { readFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { isPbkdf2Hash, verifyPassword } from "./password.mjs";
+import { isPbkdf2Hash } from "./password.mjs";
+import {
+  bearerTokenFrom,
+  createDeviceTokenGuard,
+  normalizeOptionalBoolean,
+  normalizeTrustedProxyCount,
+  resolveClientAddress,
+  tooManyAuthFailuresPayload,
+} from "./request-guards.mjs";
 import { handleSyncApi, sendJson } from "./sync-api.mjs";
 import { createSyncStore } from "./sync-store.mjs";
 
@@ -70,6 +78,16 @@ const readConfig = async () => {
       deviceTokenHashes,
       maxBodyBytes: Number(sync.maxBodyBytes || 10 * 1024 * 1024),
     },
+    proxy: {
+      trustProxyHeaders: normalizeOptionalBoolean(
+        parsed.trustProxyHeaders ?? sync.trustProxyHeaders,
+        "trustProxyHeaders",
+      ),
+      trustedProxyCount: normalizeTrustedProxyCount(
+        parsed.trustedProxyCount ?? sync.trustedProxyCount,
+        "trustedProxyCount",
+      ),
+    },
     cors: {
       enabled: cors.enabled !== false,
       allowedOrigins: normalizeOrigins(cors.allowedOrigins),
@@ -94,17 +112,7 @@ const corsHeadersFor = (request, config) => {
   };
 };
 
-const isApiAuthenticated = async (request, config) => {
-  const authorization = String(request.headers.authorization || "");
-  const match = authorization.match(/^Bearer\s+(.+)$/i);
-  if (!match || !config.sync.deviceTokenHashes.length) return false;
-  for (const hash of config.sync.deviceTokenHashes) {
-    if (await verifyPassword(match[1], hash)) return true;
-  }
-  return false;
-};
-
-const handleRequest = async (request, response, config, syncStore) => {
+const handleRequest = async (request, response, config, syncStore, deviceTokenGuard) => {
   const url = new URL(request.url, "http://localhost");
   const corsHeaders = corsHeadersFor(request, config);
 
@@ -135,7 +143,21 @@ const handleRequest = async (request, response, config, syncStore) => {
     return;
   }
 
-  if (!(await isApiAuthenticated(request, config))) {
+  const auth = await deviceTokenGuard.authenticate(
+    bearerTokenFrom(request),
+    resolveClientAddress(request, config.proxy),
+  );
+  if (auth.limited) {
+    sendJson(response, 429, tooManyAuthFailuresPayload, {
+      ...corsHeaders,
+      ...(corsHeaders["Access-Control-Allow-Origin"]
+        ? { "Access-Control-Expose-Headers": "Retry-After" }
+        : {}),
+      "Retry-After": String(auth.retryAfterSeconds),
+    });
+    return;
+  }
+  if (!auth.ok) {
     sendJson(response, 401, { error: "unauthorized", message: "Unauthorized" }, corsHeaders);
     return;
   }
@@ -145,13 +167,16 @@ const handleRequest = async (request, response, config, syncStore) => {
 
 const config = await readConfig();
 const syncStore = await createSyncStore(config.sync.databasePath);
+const deviceTokenGuard = createDeviceTokenGuard({
+  tokenHashes: config.sync.deviceTokenHashes,
+});
 
 if (!config.sync.deviceTokenHashes.length) {
   console.warn("警告：同步服务未配置 deviceTokenHashes，API 会拒绝所有同步客户端。");
 }
 
 const server = createServer((request, response) => {
-  handleRequest(request, response, config, syncStore).catch((error) => {
+  handleRequest(request, response, config, syncStore, deviceTokenGuard).catch((error) => {
     console.error(error);
     sendJson(response, 500, { error: "internal_server_error", message: "Internal Server Error" });
   });

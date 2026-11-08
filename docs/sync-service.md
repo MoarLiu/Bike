@@ -86,6 +86,8 @@ npm run start:sync
   "databasePath": "data/bike-sync.sqlite",
   "deviceTokenHashes": [],
   "maxBodyBytes": 10485760,
+  "trustProxyHeaders": false,
+  "trustedProxyCount": 1,
   "cors": {
     "enabled": true,
     "allowedOrigins": [
@@ -122,6 +124,29 @@ npm run start:sync
 ```http
 Authorization: Bearer 你的设备同步密钥
 ```
+
+### 设备密钥校验与限流
+
+设备密钥以 PBKDF2 hash 保存，每次校验都比较耗 CPU。为避免被用来消耗服务器资源或无限次猜测密钥，独立同步服务和 Web 内置同步兼容模式都会：
+
+- 缓存校验成功的密钥（只保存密钥的 SHA-256 摘要，不保存明文）。持续使用的客户端约每小时才重新校验一次；更换或删除 `deviceTokenHashes` 后需要重启服务才会生效。
+- 按客户端地址统计校验失败：10 分钟内失败 10 次后，该客户端再提交未缓存的密钥会在 PBKDF2 计算之前直接收到 `429 Too Many Requests`（带 `Retry-After` 头），直到窗口结束：
+
+```json
+{
+  "error": "too_many_requests",
+  "message": "Too many failed authentication attempts. Try again later."
+}
+```
+
+已经校验成功并缓存的密钥不受影响，所以同一出口 IP 下的正常设备在限流期间仍然可以同步。
+
+独立同步服务默认用 TCP 连接地址识别客户端。部署在反向代理后面时，所有请求看起来都来自代理，一个客户端猜错就会让其他新设备一起被限流；这时可以开启：
+
+- `trustProxyHeaders`：默认 `false`。只有在可信反向代理后面、且代理会写入 `X-Forwarded-For` 时才开启；直接暴露在公网时开启会让客户端伪造来源地址。
+- `trustedProxyCount`：默认 `1`，必须是大于等于 1 的整数。服务端取 `X-Forwarded-For` 从右往左数第 `trustedProxyCount` 个条目作为客户端地址；左侧条目由客户端填写，不会被采用。只有一层反向代理时保持 `1`，有多层可信代理时设为层数。
+
+Web 内置同步兼容模式使用 `config/bike.config.json` 中的 `auth.trustProxyHeaders` 和 `auth.trustedProxyCount`，规则相同，见 [单用户认证部署](./single-user-auth.md)。
 
 ### 只部署 Web 版
 

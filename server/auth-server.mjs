@@ -1,4 +1,4 @@
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
 import { createServer } from "node:http";
@@ -6,6 +6,16 @@ import path from "node:path";
 import { pipeline } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { isPbkdf2Hash, verifyPassword } from "./password.mjs";
+import {
+  bearerTokenFrom,
+  createDeviceTokenGuard,
+  createFailureLimiter,
+  loginAttemptKeys,
+  normalizeTrustedProxyCount,
+  resolveClientAddress,
+  tooManyAuthFailuresPayload,
+} from "./request-guards.mjs";
+import { createSessionStateStore, resolveSessionStatePath } from "./session-state.mjs";
 import { handleSyncApi } from "./sync-api.mjs";
 import { createSyncStore } from "./sync-store.mjs";
 
@@ -22,7 +32,9 @@ const configPath = process.env.BIKE_CONFIG || process.env.LOCAL_OUTLINE_CONFIG
   ? path.resolve(process.env.BIKE_CONFIG || process.env.LOCAL_OUTLINE_CONFIG)
   : defaultConfigPath;
 const cookieName = "bike_session";
-const loginAttempts = new Map();
+const deviceCookieName = "bike_device";
+const deviceCookieMaxAgeSeconds = 180 * 24 * 60 * 60;
+// Loaded from the session state file at startup so logouts survive restarts.
 let sessionRevokedBefore = 0;
 const maxLoginFailures = 8;
 const maxLoginAttemptEntries = 5000;
@@ -115,6 +127,14 @@ const readConfig = async () => {
       sessionMaxAgeHours: Number(auth.sessionMaxAgeHours || 168),
       secureCookies: Boolean(auth.secureCookies),
       trustProxyHeaders: Boolean(auth.trustProxyHeaders),
+      trustedProxyCount: normalizeTrustedProxyCount(
+        auth.trustedProxyCount,
+        "auth.trustedProxyCount",
+      ),
+      sessionStatePath: resolveSessionStatePath({
+        configuredPath: auth.sessionStatePath,
+        projectRoot,
+      }),
     },
     web: {
       defaultSyncServerUrl: String(
@@ -259,15 +279,27 @@ const parseCookies = (request) =>
 const sign = (value, secret) =>
   createHmac("sha256", secret).update(value).digest("base64url");
 
-const sessionCookieOptions = (config) => [
+const signatureMatches = (payload, signature, secret) => {
+  const actualBuffer = Buffer.from(String(signature ?? ""));
+  const expectedBuffer = Buffer.from(sign(payload, secret));
+  return (
+    actualBuffer.length === expectedBuffer.length &&
+    timingSafeEqual(actualBuffer, expectedBuffer)
+  );
+};
+
+const cookieOptions = (config, maxAgeSeconds) => [
   "Path=/",
   "HttpOnly",
   "SameSite=Strict",
-  `Max-Age=${Math.round(config.auth.sessionMaxAgeHours * 3600)}`,
+  `Max-Age=${maxAgeSeconds}`,
   config.auth.secureCookies ? "Secure" : "",
 ]
   .filter(Boolean)
   .join("; ");
+
+const sessionCookieOptions = (config) =>
+  cookieOptions(config, Math.round(config.auth.sessionMaxAgeHours * 3600));
 
 const createSessionToken = (config) => {
   const payload = Buffer.from(
@@ -283,13 +315,7 @@ const createSessionToken = (config) => {
 const verifySessionToken = (token, config) => {
   if (!token || !token.includes(".")) return false;
   const [payload, signature] = token.split(".");
-  const expected = sign(payload, config.auth.sessionSecret);
-  const actualBuffer = Buffer.from(signature);
-  const expectedBuffer = Buffer.from(expected);
-  if (
-    actualBuffer.length !== expectedBuffer.length ||
-    !timingSafeEqual(actualBuffer, expectedBuffer)
-  ) {
+  if (!signatureMatches(payload, signature, config.auth.sessionSecret)) {
     return false;
   }
 
@@ -305,77 +331,66 @@ const verifySessionToken = (token, config) => {
   }
 };
 
-const clientIp = (request, config) => {
-  const source = config.auth.trustProxyHeaders
-    ? request.headers["x-forwarded-for"]
-    : request.socket.remoteAddress;
-  return String(source || request.socket.remoteAddress || "unknown").split(",")[0].trim();
+// Device cookies only mark a browser that has logged in successfully before;
+// they never authenticate anything. They are signed with a key derived from
+// sessionSecret so a device token can never pass as a session token.
+const deviceSigningKey = (config) =>
+  sign("bike-device-cookie-v1", config.auth.sessionSecret);
+
+const createDeviceToken = (config) => {
+  const payload = Buffer.from(
+    JSON.stringify({
+      typ: "device",
+      sub: config.auth.username,
+      id: randomBytes(16).toString("base64url"),
+      iat: Date.now(),
+    }),
+  ).toString("base64url");
+  return `${payload}.${sign(payload, deviceSigningKey(config))}`;
 };
 
-const loginAttemptKeys = (request, username, config) => [
-  { key: `ip:${clientIp(request, config)}:${username}`, scope: "ip" },
-  { key: `user:${username}`, scope: "user" },
-];
+const verifyDeviceToken = (token, username, config) => {
+  if (typeof token !== "string") return null;
+  const [payload, signature, extra] = token.split(".");
+  if (!payload || !signature || extra !== undefined) return null;
+  if (!signatureMatches(payload, signature, deviceSigningKey(config))) return null;
 
-const pruneLoginAttempts = () => {
-  const now = Date.now();
-  for (const [key, attempt] of loginAttempts) {
-    if (now - attempt.firstAt > loginWindowMs && now >= attempt.nextAllowedAt) {
-      loginAttempts.delete(key);
+  try {
+    const parsed = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+    const issuedAt = Number(parsed.iat);
+    if (
+      parsed.typ !== "device" ||
+      parsed.sub !== username ||
+      typeof parsed.id !== "string" ||
+      !parsed.id ||
+      !Number.isFinite(issuedAt) ||
+      Date.now() - issuedAt >= deviceCookieMaxAgeSeconds * 1000
+    ) {
+      return null;
     }
-  }
-  if (loginAttempts.size <= maxLoginAttemptEntries) return;
-  const overflow = loginAttempts.size - maxLoginAttemptEntries;
-  for (const key of [...loginAttempts.entries()]
-    .sort((a, b) => a[1].firstAt - b[1].firstAt)
-    .slice(0, overflow)
-    .map(([key]) => key)) {
-    loginAttempts.delete(key);
+    return { id: parsed.id };
+  } catch {
+    return null;
   }
 };
 
-const loginAttempt = (key) => {
-  pruneLoginAttempts();
-  const now = Date.now();
-  const existing = loginAttempts.get(key);
-  if (!existing || now - existing.firstAt > loginWindowMs) {
-    const fresh = { failures: 0, firstAt: now, nextAllowedAt: 0 };
-    loginAttempts.set(key, fresh);
-    return fresh;
-  }
-  return existing;
-};
+const clientIp = (request, config) => resolveClientAddress(request, config.auth);
 
 const loginDelayMs = (failures) =>
   Math.min(maxLoginDelayMs, Math.max(0, 2 ** Math.max(0, failures - 3) * 1000));
 
-const registerLoginFailure = (keys) => {
-  for (const { key } of keys) {
-    const attempt = loginAttempt(key);
-    attempt.failures += 1;
-    attempt.nextAllowedAt = Date.now() + loginDelayMs(attempt.failures);
-  }
-};
+const loginLimiter = createFailureLimiter({
+  maxFailures: maxLoginFailures,
+  windowMs: loginWindowMs,
+  maxEntries: maxLoginAttemptEntries,
+  delayMs: loginDelayMs,
+});
 
-const clearLoginFailures = (keys) => {
-  keys.forEach(({ key }) => loginAttempts.delete(key));
-};
-
-const loginLimitState = (keys) => {
-  const now = Date.now();
-  let userLimited = false;
-  for (const { key, scope } of keys) {
-    const attempt = loginAttempt(key);
-    const delayed = now < attempt.nextAllowedAt;
-    const exhausted = attempt.failures >= maxLoginFailures;
-    if (scope === "ip" && (delayed || exhausted)) {
-      return { blocked: true, userLimited: false };
-    }
-    if (scope === "user" && (delayed || exhausted)) {
-      userLimited = true;
-    }
-  }
-  return { blocked: false, userLimited };
+const tooManyLoginAttempts = (response) => {
+  send(response, 429, loginPage("登录尝试过多，请稍后再试"), {
+    "Content-Type": "text/html; charset=utf-8",
+    "Retry-After": "30",
+  });
 };
 
 const readRequestBody = (request) =>
@@ -413,15 +428,23 @@ const loginPage = (error = "") =>
 const isAuthenticated = (request, config) =>
   verifySessionToken(parseCookies(request)[cookieName], config);
 
-const isApiAuthenticated = async (request, config) => {
-  if (isAuthenticated(request, config)) return true;
-  const authorization = String(request.headers.authorization || "");
-  const match = authorization.match(/^Bearer\s+(.+)$/i);
-  if (!match || !config.sync.deviceTokenHashes.length) return false;
-  for (const hash of config.sync.deviceTokenHashes) {
-    if (await verifyPassword(match[1], hash)) return true;
+const apiAuthentication = async (request, config, deviceTokenGuard) => {
+  if (isAuthenticated(request, config)) return { ok: true, limited: false };
+  return await deviceTokenGuard.authenticate(
+    bearerTokenFrom(request),
+    clientIp(request, config),
+  );
+};
+
+const revokeSessions = async (sessionState) => {
+  sessionRevokedBefore = Math.max(sessionRevokedBefore, Date.now());
+  try {
+    await sessionState.save(sessionRevokedBefore);
+  } catch (error) {
+    console.error(
+      `无法写入会话状态文件：${sessionState.path}（${error instanceof Error ? error.message : String(error)}）。本次退出登录只在服务重启前有效。`,
+    );
   }
-  return false;
 };
 
 const runtimeConfigMeta = (config) =>
@@ -487,7 +510,13 @@ const serveStatic = async (request, response, config) => {
   });
 };
 
-const handleRequest = async (request, response, config, syncStore) => {
+const handleRequest = async (
+  request,
+  response,
+  config,
+  syncStore,
+  { deviceTokenGuard, sessionState },
+) => {
   const url = new URL(request.url, "http://localhost");
   const authed = isAuthenticated(request, config);
 
@@ -504,39 +533,49 @@ const handleRequest = async (request, response, config, syncStore) => {
     const params = new URLSearchParams(await readRequestBody(request));
     const username = String(params.get("username") || "");
     const password = String(params.get("password") || "");
-    const attemptKeys = loginAttemptKeys(request, username, config);
-    const limit = loginLimitState(attemptKeys);
-    if (limit.blocked) {
-      send(response, 429, loginPage("登录尝试过多，请稍后再试"), {
-        "Content-Type": "text/html; charset=utf-8",
-        "Retry-After": "30",
-      });
+    const device = verifyDeviceToken(
+      parseCookies(request)[deviceCookieName],
+      username,
+      config,
+    );
+    const attemptKeys = loginAttemptKeys({
+      deviceId: device?.id,
+      clientAddress: clientIp(request, config),
+      username,
+    });
+    // Refuse throttled attempts before looking at the password. Letting a
+    // correct password through while throttled would turn 429 into an oracle.
+    if (loginLimiter.check(attemptKeys).limited) {
+      tooManyLoginAttempts(response);
       return;
     }
-    const credentialsValid =
-      username === config.auth.username &&
-      await verifyPassword(password, config.auth.passwordHash);
+    loginLimiter.begin(attemptKeys);
+    let credentialsValid = false;
+    try {
+      credentialsValid =
+        username === config.auth.username &&
+        await verifyPassword(password, config.auth.passwordHash);
+    } finally {
+      loginLimiter.finish(attemptKeys, { failed: !credentialsValid });
+    }
     if (credentialsValid) {
-      clearLoginFailures(attemptKeys);
+      loginLimiter.clear(attemptKeys);
       response.writeHead(302, {
         ...securityHeaders,
         Location: "/",
-        "Set-Cookie": `${cookieName}=${encodeURIComponent(
-          createSessionToken(config),
-        )}; ${sessionCookieOptions(config)}`,
+        "Set-Cookie": [
+          `${cookieName}=${encodeURIComponent(
+            createSessionToken(config),
+          )}; ${sessionCookieOptions(config)}`,
+          `${deviceCookieName}=${encodeURIComponent(
+            createDeviceToken(config),
+          )}; ${cookieOptions(config, deviceCookieMaxAgeSeconds)}`,
+        ],
         "Cache-Control": "no-store",
       });
       response.end();
       return;
     }
-    if (limit.userLimited) {
-      send(response, 429, loginPage("登录尝试过多，请稍后再试"), {
-        "Content-Type": "text/html; charset=utf-8",
-        "Retry-After": "30",
-      });
-      return;
-    }
-    registerLoginFailure(attemptKeys);
     send(response, 401, loginPage("账号或密码不正确"), {
       "Content-Type": "text/html; charset=utf-8",
     });
@@ -552,7 +591,9 @@ const handleRequest = async (request, response, config, syncStore) => {
   }
 
   if (request.method === "POST" && url.pathname === "/auth/logout") {
-    if (authed) sessionRevokedBefore = Date.now();
+    // The device cookie is kept on purpose: it is what lets this browser log
+    // in again while untrusted clients are throttled.
+    if (authed) await revokeSessions(sessionState);
     response.writeHead(302, {
       ...securityHeaders,
       Location: "/login",
@@ -576,7 +617,14 @@ const handleRequest = async (request, response, config, syncStore) => {
       });
       return;
     }
-    if (!(await isApiAuthenticated(request, config))) {
+    const apiAuth = await apiAuthentication(request, config, deviceTokenGuard);
+    if (apiAuth.limited) {
+      sendJson(response, 429, tooManyAuthFailuresPayload, {
+        "Retry-After": String(apiAuth.retryAfterSeconds),
+      });
+      return;
+    }
+    if (!apiAuth.ok) {
       sendJson(response, 401, {
         error: "unauthorized",
         message: "Unauthorized",
@@ -607,12 +655,20 @@ const handleRequest = async (request, response, config, syncStore) => {
 };
 
 const config = await readConfig();
+const sessionState = createSessionStateStore(config.auth.sessionStatePath);
+sessionRevokedBefore = await sessionState.load();
+const deviceTokenGuard = createDeviceTokenGuard({
+  tokenHashes: config.sync.deviceTokenHashes,
+});
 const syncStore = config.sync.enabled
   ? await createSyncStore(config.sync.databasePath)
   : null;
 
 createServer((request, response) => {
-  handleRequest(request, response, config, syncStore).catch((error) => {
+  handleRequest(request, response, config, syncStore, {
+    deviceTokenGuard,
+    sessionState,
+  }).catch((error) => {
     console.error(error);
     send(response, 500, "Internal Server Error", {
       "Content-Type": "text/plain; charset=utf-8",
@@ -621,5 +677,6 @@ createServer((request, response) => {
 }).listen(config.port, config.host, () => {
   console.log(`Bike 已启动：http://${config.host}:${config.port}`);
   console.log(`认证配置：${configPath}`);
+  console.log(`会话状态：${sessionState.path}`);
   if (syncStore) console.log(`同步数据库：${config.sync.databasePath}`);
 });

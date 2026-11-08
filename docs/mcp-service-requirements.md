@@ -147,12 +147,6 @@ Bike 当前权威数据在浏览器 IndexedDB 中，外部 Node.js MCP 进程无
 ~/Library/Mobile Documents/com~apple~CloudDocs/Bike/bike-workspace.json
 ```
 
-Swift 原生版的 JSON 备份默认位置是：
-
-```text
-~/Library/Mobile Documents/com~apple~CloudDocs/Bike/.backups/bike-workspace.json
-```
-
 因此，MVP 不应假设可以直接访问运行中应用的内存状态或 IndexedDB。
 
 ### 6.2 MVP 推荐数据源
@@ -652,7 +646,8 @@ BIKE_MCP_MODE=write
 建议默认路径：
 
 - macOS Electron 备份路径：`~/Library/Mobile Documents/com~apple~CloudDocs/Bike/bike-workspace.json`
-- macOS Swift 原生版备份路径：`~/Library/Mobile Documents/com~apple~CloudDocs/Bike/.backups/bike-workspace.json`
+- macOS 旧版 LocalOutline 备份路径（上一项不存在时回退）：`~/Library/Mobile Documents/com~apple~CloudDocs/LocalOutline/localoutline-workspace.json`
+- 其他平台（如 Linux）：`~/.bike/bike-workspace.json`，兼容旧版 `~/.localoutline/localoutline-workspace.json`。
 - 项目开发路径：通过环境变量显式指定。
 
 ## 13. 安全和隐私
@@ -712,7 +707,7 @@ BIKE_MCP_MODE=write
 ### 14.3 兼容性
 
 - 支持 Node.js LTS。
-- 支持 macOS 优先，后续兼容 Windows。
+- 支持 macOS 优先，同时兼容 Linux。
 - MCP server 与前端共用类型和迁移逻辑，避免数据模型漂移。
 
 ### 14.4 可测试性

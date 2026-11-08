@@ -654,8 +654,10 @@ Usage:
   BIKE_WORKSPACE_PATH=/path/to/bike-workspace.json npm run mcp:bike
 
 Environment:
-  BIKE_WORKSPACE_PATH   Workspace JSON path. On macOS, defaults to the Electron iCloud backup path,
-                                 then falls back to the Swift native .backups path when absent.
+  BIKE_WORKSPACE_PATH   Workspace JSON path. On macOS, defaults to the Electron iCloud backup
+                        (~/Library/Mobile Documents/com~apple~CloudDocs/Bike/bike-workspace.json),
+                        then falls back to the legacy LocalOutline backup when absent.
+                        Other platforms default to ~/.bike/bike-workspace.json.
   BIKE_MCP_CONFIG       Optional JSON config path.
   BIKE_MCP_DEBUG        Set true to show absolute workspace paths in tool results.
   BIKE_MCP_MODE         readonly (default) or write. Real writes require write mode.

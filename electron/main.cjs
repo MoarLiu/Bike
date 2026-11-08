@@ -12,8 +12,11 @@ const {
   DEFAULT_RELEASES_PAGE_URL,
   fetchLatestRelease,
 } = require("./update-checker.cjs");
+const { resolveDevServer } = require("./dev-server.cjs");
 
-const isDev = process.env.VITE_DEV_SERVER_URL || !app.isPackaged;
+const devServer = resolveDevServer({ env: process.env, isPackaged: app.isPackaged });
+if (devServer.warning) console.warn(devServer.warning);
+const isDev = devServer.isDev;
 const maxStampedBackups = 20;
 const cloudFolderName = "Bike";
 const workspaceFilename = "bike-workspace.json";
@@ -126,7 +129,7 @@ const createWindow = () => {
   });
 
   if (isDev) {
-    window.loadURL("http://127.0.0.1:5173");
+    window.loadURL(devServer.url);
   } else {
     window.loadFile(path.join(__dirname, "..", "dist", "index.html"));
   }
@@ -346,7 +349,7 @@ const createSyncRequestUrl = (payload) => {
 const isExternalUrl = (value) => {
   try {
     const url = new URL(value);
-    if (isDev && url.origin === "http://127.0.0.1:5173") return false;
+    if (isDev && url.origin === devServer.origin) return false;
     return url.protocol === "http:" || url.protocol === "https:" || url.protocol === "mailto:" || url.protocol === "tel:";
   } catch {
     return false;
@@ -356,7 +359,7 @@ const isExternalUrl = (value) => {
 const isAllowedAppUrl = (value) => {
   try {
     const url = new URL(value);
-    if (isDev) return url.origin === "http://127.0.0.1:5173";
+    if (isDev) return url.origin === devServer.origin;
     if (url.protocol !== "file:") return false;
     return path.normalize(fileURLToPath(url)) === path.normalize(path.join(__dirname, "..", "dist", "index.html"));
   } catch {

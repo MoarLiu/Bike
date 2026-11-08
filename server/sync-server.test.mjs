@@ -44,7 +44,8 @@ const waitForServer = async (baseUrl, child) => {
 };
 
 const stopServer = async (child) => {
-  if (child.exitCode !== null) return;
+  // A child killed by a signal keeps exitCode === null and sets signalCode.
+  if (child.exitCode !== null || child.signalCode !== null) return;
   child.kill("SIGTERM");
   await new Promise((resolve) => {
     child.once("exit", resolve);
@@ -52,7 +53,7 @@ const stopServer = async (child) => {
   });
 };
 
-const startSyncServer = async (t) => {
+const startSyncServer = async (t, { config = {} } = {}) => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "bike-sync-"));
   const port = await getFreePort();
   const syncToken = "test sync device token";
@@ -77,6 +78,7 @@ const startSyncServer = async (t) => {
           enabled: true,
           allowedOrigins: ["http://127.0.0.1:4173"],
         },
+        ...config,
       },
       null,
       2,
@@ -105,11 +107,12 @@ const startSyncServer = async (t) => {
 const jsonRequest = async (
   baseUrl,
   requestPath,
-  { method = "GET", token, body, origin } = {},
+  { method = "GET", token, body, origin, forwardedFor } = {},
 ) => {
   const headers = {};
   if (token) headers.Authorization = `Bearer ${token}`;
   if (origin) headers.Origin = origin;
+  if (forwardedFor) headers["X-Forwarded-For"] = forwardedFor;
   if (body !== undefined) headers["Content-Type"] = "application/json";
   return await fetch(`${baseUrl}${requestPath}`, {
     method,
@@ -191,4 +194,71 @@ test("standalone sync server stores documents and rejects stale revisions", asyn
   });
   assert.equal(staleResponse.status, 409);
   assert.equal((await readJson(staleResponse)).currentRevision, 1);
+});
+
+test("standalone sync server throttles token guessing per client", async (t) => {
+  const { baseUrl, syncToken } = await startSyncServer(t);
+  const origin = "http://127.0.0.1:4173";
+
+  const verified = await jsonRequest(baseUrl, "/api/sync/manifest", {
+    token: syncToken,
+    origin,
+  });
+  assert.equal(verified.status, 200);
+
+  // Proxy headers are not trusted by default, so varying them changes nothing.
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    const rejected = await jsonRequest(baseUrl, "/api/sync/manifest", {
+      token: `wrong token ${attempt}`,
+      origin,
+      forwardedFor: `10.0.0.${attempt}`,
+    });
+    assert.equal(rejected.status, 401);
+  }
+
+  const limited = await jsonRequest(baseUrl, "/api/sync/manifest", {
+    token: "yet another wrong token",
+    origin,
+    forwardedFor: "10.0.1.1",
+  });
+  assert.equal(limited.status, 429);
+  assert.ok(Number(limited.headers.get("retry-after")) > 0);
+  assert.equal(limited.headers.get("access-control-allow-origin"), origin);
+  assert.equal(limited.headers.get("access-control-expose-headers"), "Retry-After");
+  const body = await readJson(limited);
+  assert.equal(body.error, "too_many_requests");
+  assert.equal(typeof body.message, "string");
+
+  const cached = await jsonRequest(baseUrl, "/api/sync/manifest", {
+    token: syncToken,
+    origin,
+  });
+  assert.equal(cached.status, 200);
+});
+
+test("standalone sync server keys token throttling on the trusted proxy entry", async (t) => {
+  const { baseUrl } = await startSyncServer(t, {
+    config: { trustProxyHeaders: true, trustedProxyCount: 1 },
+  });
+  const proxiedFrom = (spoofed) => `${spoofed}, 203.0.113.50`;
+
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    const rejected = await jsonRequest(baseUrl, "/api/sync/manifest", {
+      token: `wrong token ${attempt}`,
+      forwardedFor: proxiedFrom(`10.0.0.${attempt}`),
+    });
+    assert.equal(rejected.status, 401);
+  }
+
+  const limited = await jsonRequest(baseUrl, "/api/sync/manifest", {
+    token: "yet another wrong token",
+    forwardedFor: proxiedFrom("10.0.1.1"),
+  });
+  assert.equal(limited.status, 429);
+
+  const otherClient = await jsonRequest(baseUrl, "/api/sync/manifest", {
+    token: "wrong token",
+    forwardedFor: "198.51.100.99",
+  });
+  assert.equal(otherClient.status, 401);
 });

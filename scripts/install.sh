@@ -73,7 +73,7 @@ Bike 部署管理脚本
   logs          查看同步服务日志
   health        同步服务健康检查
   uninstall     卸载同步服务，可选择删除安装目录
-  update-script 更新本地管理脚本
+  update-script 从已校验的发布包更新本地管理脚本（版本同 BIKE_VERSION）
   menu          打开管理菜单
 
 环境变量：
@@ -218,7 +218,7 @@ bundled_node_bin() {
 }
 
 install_node_runtime() {
-  local platform arch node_version archive_name node_parent node_dir archive_path node_url
+  local platform arch node_version archive_name node_parent node_dir archive_path node_url checksum_url checksum_path expected_sha
   platform="$(detect_node_platform)"
   arch="$(detect_node_arch)"
   node_version="${BIKE_NODE_VERSION:-$(latest_node_version)}"
@@ -230,12 +230,20 @@ install_node_runtime() {
   node_dir="${node_parent}/node-${node_version}-${platform}-${arch}"
   archive_path="${TMP_DIR}/${archive_name}"
   node_url="${NODE_DIST_BASE}/${node_version}/${archive_name}"
+  checksum_url="${NODE_DIST_BASE}/${node_version}/SHASUMS256.txt"
+  checksum_path="${TMP_DIR}/node-${node_version}-SHASUMS256.txt"
 
   if [[ ! -x "${node_dir}/bin/node" ]]; then
     info "下载内置 Node.js ${node_version}：${node_url}"
-    curl -fL "${node_url}" -o "${archive_path}"
+    curl -fL "${node_url}" -o "${archive_path}" || die "无法下载 Node.js：${node_url}"
+    curl -fsSL "${checksum_url}" -o "${checksum_path}" || die "无法下载 Node.js 校验文件：${checksum_url}"
+    # Exact file-name match: SHASUMS256.txt also lists names that contain this one.
+    expected_sha="$(awk -v asset="${archive_name}" '$2 == asset { print $1; exit }' "${checksum_path}")"
+    [[ -n "${expected_sha}" ]] || die "Node.js 校验文件中没有找到 ${archive_name}。"
+    sha256_check "${expected_sha}" "${archive_path}" >&2 || die "Node.js 下载文件 SHA-256 校验失败：${archive_name}"
     run_or_sudo mkdir -p "${node_parent}"
-    run_or_sudo tar -xJf "${archive_path}" -C "${node_parent}"
+    # Never keep the archive's file owners: root (Sync setup) later runs this node.
+    run_or_sudo tar --no-same-owner -xJf "${archive_path}" -C "${node_parent}"
   fi
 
   NODE_BIN="${node_dir}/bin/node"
@@ -292,6 +300,8 @@ sha256_check() {
   local file="$2"
   local name
   name="$(basename "${file}")"
+  # Some sha256sum builds (e.g. macOS) exit 0 when the checksum line is malformed.
+  [[ "${expected}" =~ ^[0-9A-Fa-f]{64}$ ]] || { err "SHA-256 校验值格式无效：${name}"; return 1; }
   if command -v sha256sum >/dev/null 2>&1; then
     (cd "$(dirname "${file}")" && printf '%s  %s\n' "${expected}" "${name}" | sha256sum -c -)
     return
@@ -329,14 +339,18 @@ ensure_sync_service_user() {
   ensure_system_user "${SYNC_SERVICE_USER}"
 }
 
-refresh_manager_script() {
-  local target="${1:-${MANAGER_PATH}}"
-  if curl -fsSL "${RAW_BASE}/scripts/install.sh" -o "${TMP_DIR}/bike.sh"; then
-    run_or_sudo cp "${TMP_DIR}/bike.sh" "${target}"
-    run_or_sudo chmod +x "${target}"
+resolve_release_tag() {
+  local tag="${VERSION}"
+  if [[ "${tag}" == "latest" ]]; then
+    tag="$(latest_tag)"
   fi
+  [[ -n "${tag}" ]] || die "无法获取最新 Release 版本。"
+  [[ "${tag}" == v* ]] || tag="v${tag}"
+  printf '%s' "${tag}"
 }
 
+# Called as "$(download_release_package ...)": errexit is off inside command
+# substitution, so every failure must stop explicitly.
 download_release_package() {
   local tag="$1"
   local version_number asset_name checksum_name download_url checksum_url archive_path checksum_path expected_sha
@@ -349,16 +363,52 @@ download_release_package() {
   checksum_path="${TMP_DIR}/${checksum_name}"
 
   info "下载 Bike Web/Sync 部署包 ${tag}：${download_url}"
-  curl -fL "${download_url}" -o "${archive_path}"
-  curl -fL "${checksum_url}" -o "${checksum_path}"
+  curl -fL "${download_url}" -o "${archive_path}" || die "无法下载部署包：${download_url}"
+  curl -fL "${checksum_url}" -o "${checksum_path}" || die "无法下载校验文件：${checksum_url}"
 
   expected_sha="$(
     awk -v asset="${asset_name}" '$2 == asset || $2 == "web/" asset { print $1; exit }' "${checksum_path}"
   )"
   [[ -n "${expected_sha}" ]] || die "校验文件中没有找到 ${asset_name}。"
-  sha256_check "${expected_sha}" "${archive_path}" >&2
+  sha256_check "${expected_sha}" "${archive_path}" >&2 || die "部署包 SHA-256 校验失败：${asset_name}"
 
   printf '%s' "${archive_path}"
+}
+
+# Prints the archive member holding the manager script, or nothing (packages before 1.4.3).
+manager_script_member() {
+  tar -tzf "$1" | awk '!found && ($0 == "scripts/install.sh" || $0 == "./scripts/install.sh") { found = $0 } END { if (found != "") print found }'
+}
+
+# The manager script runs with sudo, so it only comes from the verified release
+# package (pinned by BIKE_VERSION), never from the mutable main branch.
+install_manager_script() {
+  local archive_path="$1"
+  local member="$2"
+  local target="${3:-${MANAGER_PATH}}"
+  local stage="${TMP_DIR}/manager-script"
+  rm -rf "${stage}"
+  mkdir -p "${stage}"
+  tar -xzf "${archive_path}" -C "${stage}" "${member}" || die "无法从部署包中提取管理脚本。"
+  [[ -f "${stage}/scripts/install.sh" ]] || die "无法从部署包中提取管理脚本。"
+  run_or_sudo mkdir -p "$(dirname "${target}")"
+  run_or_sudo rm -f "${target}.new"
+  run_or_sudo cp "${stage}/scripts/install.sh" "${target}.new"
+  run_or_sudo chmod 0755 "${target}.new"
+  # Rename instead of overwriting in place: a running bike.sh keeps reading its old copy.
+  run_or_sudo mv -f "${target}.new" "${target}"
+}
+
+update_manager_script() {
+  need_command curl
+  need_command tar
+  local tag archive_path member
+  tag="$(resolve_release_tag)"
+  archive_path="$(download_release_package "${tag}")"
+  member="$(manager_script_member "${archive_path}")"
+  [[ -n "${member}" ]] || die "${tag} 部署包中没有管理脚本 scripts/install.sh，无法更新。请设置 BIKE_VERSION 为 v1.4.3 或更新版本。"
+  install_manager_script "${archive_path}" "${member}" "${MANAGER_PATH}"
+  success "管理脚本已更新为 ${tag}：${MANAGER_PATH}"
 }
 
 install_or_update_files() {
@@ -366,26 +416,22 @@ install_or_update_files() {
   need_command curl
   need_command tar
 
-  local tag archive_path
-  tag="${VERSION}"
-  if [[ "${tag}" == "latest" ]]; then
-    tag="$(latest_tag)"
-  fi
-  [[ -n "${tag}" ]] || die "无法获取最新 Release 版本。"
-  [[ "${tag}" == v* ]] || tag="v${tag}"
+  local tag archive_path manager_member
+  tag="$(resolve_release_tag)"
 
   archive_path="$(download_release_package "${tag}")"
   info "安装到：${INSTALL_DIR}"
   run_or_sudo mkdir -p "${INSTALL_DIR}"
-  run_or_sudo tar -xzf "${archive_path}" -C "${INSTALL_DIR}"
+  # Some packages record a non-root owner; root later runs these scripts.
+  run_or_sudo tar --no-same-owner -xzf "${archive_path}" -C "${INSTALL_DIR}"
   run_or_sudo chmod +x "${INSTALL_DIR}/scripts/setup-sync-server.sh"
 
-  if curl -fsSL "${RAW_BASE}/scripts/setup-sync-server.sh" -o "${TMP_DIR}/setup-sync-server.sh"; then
-    info "刷新安装脚本：${RAW_BASE}/scripts/setup-sync-server.sh"
-    run_or_sudo cp "${TMP_DIR}/setup-sync-server.sh" "${INSTALL_DIR}/scripts/setup-sync-server.sh"
-    run_or_sudo chmod +x "${INSTALL_DIR}/scripts/setup-sync-server.sh"
+  manager_member="$(manager_script_member "${archive_path}")"
+  if [[ -n "${manager_member}" ]]; then
+    install_manager_script "${archive_path}" "${manager_member}" "${MANAGER_PATH}"
+  else
+    warn "${tag} 部署包中没有管理脚本 scripts/install.sh，未更新 ${MANAGER_PATH}。"
   fi
-  refresh_manager_script "${MANAGER_PATH}"
   ensure_node
   if [[ "${create_sync_service_user}" == "1" ]]; then
     ensure_sync_service_user
@@ -567,6 +613,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
 ReadWritePaths=${data_dir}
+StateDirectory=${WEB_SERVICE_NAME}
 
 [Install]
 WantedBy=multi-user.target
@@ -710,7 +757,7 @@ show_menu() {
       10) run_setup logs; press_enter ;;
       11) run_setup health; press_enter ;;
       12) uninstall_action; press_enter ;;
-      13) refresh_manager_script "${MANAGER_PATH}"; success "管理脚本已更新：${MANAGER_PATH}"; press_enter ;;
+      13) update_manager_script; press_enter ;;
       *) err "请输入正确的数字 [0-13]，或输入 q 退出"; press_enter ;;
     esac
   done
@@ -740,7 +787,7 @@ case "${1:-menu}" in
   logs|log) run_setup logs ;;
   health) run_setup health ;;
   uninstall) uninstall_action ;;
-  update-script) refresh_manager_script "${MANAGER_PATH}"; success "管理脚本已更新：${MANAGER_PATH}" ;;
+  update-script) update_manager_script ;;
   menu) show_menu ;;
   -h|--help|help) usage ;;
   *) usage; exit 1 ;;

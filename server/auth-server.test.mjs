@@ -36,11 +36,13 @@ const makePasswordHash = (password) => {
   return `pbkdf2$${iterations}$${salt}$${hash}`;
 };
 
-const waitForServer = async (baseUrl, child) => {
+const waitForServer = async (baseUrl, child, output = []) => {
   const startedAt = Date.now();
   while (Date.now() - startedAt < 5000) {
     if (child.exitCode !== null) {
-      throw new Error(`auth server exited early with code ${child.exitCode}`);
+      throw new Error(
+        `auth server exited early with code ${child.exitCode}\n${output.join("")}`,
+      );
     }
     try {
       const response = await fetch(`${baseUrl}/auth/status`);
@@ -53,7 +55,8 @@ const waitForServer = async (baseUrl, child) => {
 };
 
 const stopServer = async (child) => {
-  if (child.exitCode !== null) return;
+  // A child killed by a signal keeps exitCode === null and sets signalCode.
+  if (child.exitCode !== null || child.signalCode !== null) return;
   child.kill("SIGTERM");
   await new Promise((resolve) => {
     child.once("exit", resolve);
@@ -61,35 +64,68 @@ const stopServer = async (child) => {
   });
 };
 
-const startAuthServer = async (t, { syncEnabled = true } = {}) => {
+// Child stdout can arrive after the first HTTP response, so poll for it.
+const waitForOutput = async (output, expected, timeoutMs = 2000) => {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    const text = output.join("");
+    if (typeof expected === "string" ? text.includes(expected) : expected.test(text)) {
+      return text;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error(`Timed out waiting for server output ${expected}\n${output.join("")}`);
+};
+
+// A fixture owns the temp directory (config, sync database and session state
+// file) and outlives individual server processes, so tests can restart the
+// server against the same state.
+const createAuthFixture = async (t, { syncEnabled = true, auth = {} } = {}) => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "bike-auth-"));
-  const port = await getFreePort();
-  const password = "correct horse battery staple";
-  const syncToken = "test sync device token";
-  const configPath = path.join(directory, "bike.config.json");
+  const fixture = {
+    directory,
+    configPath: path.join(directory, "bike.config.json"),
+    statePath: path.join(directory, "state", "auth-session.json"),
+    password: "correct horse battery staple",
+    syncToken: "test sync device token",
+    syncEnabled,
+    auth,
+    children: [],
+  };
+  t.after(async () => {
+    for (const child of fixture.children) await stopServer(child);
+    await fs.rm(directory, { recursive: true, force: true });
+  });
+  return fixture;
+};
+
+const writeAuthConfig = async (fixture, port) => {
   await fs.writeFile(
-    configPath,
+    fixture.configPath,
     JSON.stringify(
       {
         host: "127.0.0.1",
         port,
         auth: {
           username: "owner",
-          passwordHash: makePasswordHash(password),
+          passwordHash: makePasswordHash(fixture.password),
           sessionSecret: "auth-server-test-secret-32-characters-minimum",
           sessionMaxAgeHours: 1,
           secureCookies: false,
           trustProxyHeaders: true,
+          // Keep session state inside the temp directory, never in data/.
+          sessionStatePath: fixture.statePath,
+          ...fixture.auth,
         },
-        ...(syncEnabled
+        ...(fixture.syncEnabled
           ? {
               sync: {
                 enabled: true,
-                databasePath: path.join(directory, "bike-sync.sqlite"),
+                databasePath: path.join(fixture.directory, "bike-sync.sqlite"),
                 deviceTokenHashes: [
                   {
                     name: "test-device",
-                    hash: makePasswordHash(syncToken),
+                    hash: makePasswordHash(fixture.syncToken),
                   },
                 ],
               },
@@ -101,40 +137,72 @@ const startAuthServer = async (t, { syncEnabled = true } = {}) => {
     ),
     "utf8",
   );
+};
 
+const launchAuthServer = async (fixture, { env = {} } = {}) => {
+  const port = await getFreePort();
+  await writeAuthConfig(fixture, port);
+  const childEnv = { ...process.env, BIKE_CONFIG: fixture.configPath };
+  delete childEnv.STATE_DIRECTORY;
+  Object.assign(childEnv, env);
   const child = spawn(process.execPath, ["server/auth-server.mjs"], {
     cwd: projectRoot,
-    env: { ...process.env, BIKE_CONFIG: configPath },
+    env: childEnv,
     stdio: ["ignore", "pipe", "pipe"],
   });
+  fixture.children.push(child);
   const output = [];
   child.stdout.on("data", (chunk) => output.push(chunk.toString("utf8")));
   child.stderr.on("data", (chunk) => output.push(chunk.toString("utf8")));
-  t.after(async () => {
-    await stopServer(child);
-    await fs.rm(directory, { recursive: true, force: true });
-  });
 
   const baseUrl = `http://127.0.0.1:${port}`;
-  await waitForServer(baseUrl, child);
-  return { baseUrl, output, password, syncToken };
+  await waitForServer(baseUrl, child, output);
+  return { baseUrl, output, stop: () => stopServer(child) };
 };
 
-const login = async (baseUrl, password) => {
-  const response = await postLogin(baseUrl, { password });
+const startAuthServer = async (t, options = {}) => {
+  const fixture = await createAuthFixture(t, options);
+  return { ...fixture, ...(await launchAuthServer(fixture, options)) };
+};
+
+const cookieNamed = (response, name) =>
+  response.headers
+    .getSetCookie()
+    .map((cookie) => cookie.split(";")[0])
+    .find((cookie) => cookie.startsWith(`${name}=`));
+
+const loginCookies = async (baseUrl, password, options = {}) => {
+  const response = await postLogin(baseUrl, { password, ...options });
   assert.equal(response.status, 302);
   assert.equal(response.headers.get("location"), "/");
-  const cookie = response.headers.get("set-cookie")?.split(";")[0];
-  assert.match(cookie ?? "", /^bike_session=/);
-  return cookie;
+  const session = cookieNamed(response, "bike_session");
+  const device = cookieNamed(response, "bike_device");
+  assert.match(session ?? "", /^bike_session=./);
+  assert.match(device ?? "", /^bike_device=./);
+  return { session, device };
+};
+
+const login = async (baseUrl, password, options = {}) =>
+  (await loginCookies(baseUrl, password, options)).session;
+
+const logout = async (baseUrl, cookie) => {
+  const response = await fetch(`${baseUrl}/auth/logout`, {
+    method: "POST",
+    headers: cookie ? { Cookie: cookie } : {},
+    redirect: "manual",
+  });
+  assert.equal(response.status, 302);
+  assert.equal(response.headers.get("location"), "/login");
+  return response;
 };
 
 const postLogin = async (
   baseUrl,
-  { username = "owner", password, forwardedFor } = {},
+  { username = "owner", password, forwardedFor, cookie } = {},
 ) => {
   const headers = {};
   if (forwardedFor) headers["X-Forwarded-For"] = forwardedFor;
+  if (cookie) headers.Cookie = cookie;
   return await fetch(`${baseUrl}/auth/login`, {
     method: "POST",
     headers,
@@ -148,10 +216,15 @@ const status = async (baseUrl, cookie) =>
     headers: cookie ? { Cookie: cookie } : {},
   });
 
-const jsonRequest = async (baseUrl, path, { method = "GET", cookie, token, body } = {}) => {
+const jsonRequest = async (
+  baseUrl,
+  path,
+  { method = "GET", cookie, token, body, forwardedFor } = {},
+) => {
   const headers = {};
   if (cookie) headers.Cookie = cookie;
   if (token) headers.Authorization = `Bearer ${token}`;
+  if (forwardedFor) headers["X-Forwarded-For"] = forwardedFor;
   if (body !== undefined) headers["Content-Type"] = "application/json";
   return await fetch(`${baseUrl}${path}`, {
     method,
@@ -205,7 +278,7 @@ test("anonymous logout does not revoke authenticated sessions", async (t) => {
   assert.equal((await status(baseUrl, cookie)).status, 401);
 });
 
-test("user-scoped login throttling does not lock out valid credentials", async (t) => {
+test("user-scoped login throttling answers untrusted clients before checking the password", async (t) => {
   const { baseUrl, password } = await startAuthServer(t);
 
   const wrong = await postLogin(baseUrl, {
@@ -220,13 +293,221 @@ test("user-scoped login throttling does not lock out valid credentials", async (
   });
   assert.equal(wrongWhileUserLimited.status, 429);
 
-  const valid = await postLogin(baseUrl, {
+  // Same answer for the correct password, so 429 vs 302 is not an oracle.
+  const validWhileUserLimited = await postLogin(baseUrl, {
     password,
     forwardedFor: "203.0.113.12",
   });
-  assert.equal(valid.status, 302);
-  assert.equal(valid.headers.get("location"), "/");
-  assert.match(valid.headers.get("set-cookie") ?? "", /^bike_session=/);
+  assert.equal(validWhileUserLimited.status, 429);
+  assert.equal(validWhileUserLimited.headers.get("set-cookie"), null);
+});
+
+test("trusted device cookie logs in while the user scope is throttled", async (t) => {
+  const { baseUrl, password } = await startAuthServer(t);
+  const { device } = await loginCookies(baseUrl, password, {
+    forwardedFor: "198.51.100.20",
+  });
+
+  const attackerGuess = await postLogin(baseUrl, {
+    password: "not the password",
+    forwardedFor: "203.0.113.10",
+  });
+  assert.equal(attackerGuess.status, 401);
+
+  const untrusted = await postLogin(baseUrl, {
+    password,
+    forwardedFor: "198.51.100.20",
+  });
+  assert.equal(untrusted.status, 429);
+
+  const trusted = await postLogin(baseUrl, {
+    password,
+    forwardedFor: "198.51.100.20",
+    cookie: device,
+  });
+  assert.equal(trusted.status, 302);
+  assert.equal(trusted.headers.get("location"), "/");
+  const session = cookieNamed(trusted, "bike_session");
+  assert.equal((await status(baseUrl, session)).status, 200);
+  const renewedDevice = cookieNamed(trusted, "bike_device");
+  assert.match(renewedDevice ?? "", /^bike_device=./);
+  assert.notEqual(renewedDevice, device);
+
+  const deviceCookie = trusted.headers
+    .getSetCookie()
+    .find((cookie) => cookie.startsWith("bike_device="));
+  assert.match(deviceCookie, /; HttpOnly(;|$)/);
+  assert.match(deviceCookie, /; SameSite=Strict(;|$)/);
+  assert.match(deviceCookie, /; Path=\/(;|$)/);
+  assert.match(deviceCookie, /; Max-Age=15552000(;|$)/);
+});
+
+test("trusted device failures only throttle that device", async (t) => {
+  const { baseUrl, password } = await startAuthServer(t);
+  const { device } = await loginCookies(baseUrl, password, {
+    forwardedFor: "198.51.100.20",
+  });
+
+  const typo = await postLogin(baseUrl, {
+    password: "typo",
+    forwardedFor: "198.51.100.20",
+    cookie: device,
+  });
+  assert.equal(typo.status, 401);
+
+  const deviceRetry = await postLogin(baseUrl, {
+    password,
+    forwardedFor: "198.51.100.20",
+    cookie: device,
+  });
+  assert.equal(deviceRetry.status, 429);
+
+  // The device failure was not charged to the shared user and IP buckets.
+  const untrusted = await postLogin(baseUrl, {
+    password,
+    forwardedFor: "198.51.100.20",
+  });
+  assert.equal(untrusted.status, 302);
+});
+
+test("forged or foreign device cookies are treated as untrusted", async (t) => {
+  const { baseUrl, password } = await startAuthServer(t);
+  const { session, device } = await loginCookies(baseUrl, password, {
+    forwardedFor: "198.51.100.20",
+  });
+
+  const attackerGuess = await postLogin(baseUrl, {
+    password: "not the password",
+    forwardedFor: "203.0.113.10",
+  });
+  assert.equal(attackerGuess.status, 401);
+
+  const [payload, signature] = decodeURIComponent(
+    device.slice("bike_device=".length),
+  ).split(".");
+  const forgedPayload = Buffer.from(
+    JSON.stringify({
+      ...JSON.parse(Buffer.from(payload, "base64url").toString("utf8")),
+      id: "attacker-chosen-device",
+    }),
+  ).toString("base64url");
+  const candidates = [
+    `bike_device=${forgedPayload}.${signature}`,
+    // A session token is signed with a different key and is not a device cookie.
+    `bike_device=${session.slice("bike_session=".length)}`,
+  ];
+  for (const cookie of candidates) {
+    const response = await postLogin(baseUrl, {
+      password,
+      forwardedFor: "198.51.100.20",
+      cookie,
+    });
+    assert.equal(response.status, 429, cookie);
+  }
+
+  // A genuine device cookie only counts for the username it was issued to, so
+  // failures for another username must not be charged to the device bucket.
+  const otherUser = await postLogin(baseUrl, {
+    username: "someone-else",
+    password: "not the password",
+    forwardedFor: "198.51.100.20",
+    cookie: device,
+  });
+  assert.equal(otherUser.status, 401);
+  const trusted = await postLogin(baseUrl, {
+    password,
+    forwardedFor: "198.51.100.20",
+    cookie: device,
+  });
+  assert.equal(trusted.status, 302);
+});
+
+test("logout revocation survives a server restart", async (t) => {
+  const fixture = await createAuthFixture(t);
+
+  const first = await launchAuthServer(fixture);
+  const cookie = await login(first.baseUrl, fixture.password);
+  await first.stop();
+
+  // No logout recorded yet: a restart must not invalidate live sessions.
+  const second = await launchAuthServer(fixture);
+  assert.equal((await status(second.baseUrl, cookie)).status, 200);
+  await logout(second.baseUrl, cookie);
+  assert.equal((await status(second.baseUrl, cookie)).status, 401);
+
+  const state = JSON.parse(await fs.readFile(fixture.statePath, "utf8"));
+  assert.ok(Number.isSafeInteger(state.sessionRevokedBefore));
+  assert.ok(state.sessionRevokedBefore > 0);
+  if (process.platform !== "win32") {
+    assert.equal((await fs.stat(fixture.statePath)).mode & 0o777, 0o600);
+  }
+  assert.deepEqual(await fs.readdir(path.dirname(fixture.statePath)), [
+    "auth-session.json",
+  ]);
+  await second.stop();
+
+  const third = await launchAuthServer(fixture);
+  assert.equal((await status(third.baseUrl, cookie)).status, 401);
+  const fresh = await login(third.baseUrl, fixture.password);
+  assert.equal((await status(third.baseUrl, fresh)).status, 200);
+});
+
+test("unreadable session state revokes sessions issued before startup", async (t) => {
+  const fixture = await createAuthFixture(t);
+
+  const first = await launchAuthServer(fixture);
+  const cookie = await login(first.baseUrl, fixture.password);
+  await first.stop();
+
+  await fs.mkdir(path.dirname(fixture.statePath), { recursive: true });
+  await fs.writeFile(fixture.statePath, "{ not json", "utf8");
+
+  const second = await launchAuthServer(fixture);
+  await waitForOutput(second.output, /会话状态文件已损坏/);
+  assert.equal((await status(second.baseUrl, cookie)).status, 401);
+  const fresh = await login(second.baseUrl, fixture.password);
+  assert.equal((await status(second.baseUrl, fresh)).status, 200);
+
+  await logout(second.baseUrl, fresh);
+  const repaired = JSON.parse(await fs.readFile(fixture.statePath, "utf8"));
+  assert.ok(Number.isSafeInteger(repaired.sessionRevokedBefore));
+});
+
+test("logout still revokes in memory when the session state cannot be written", async (t) => {
+  const fixture = await createAuthFixture(t);
+  // The parent of the state file is a regular file, so mkdir -p fails.
+  const blocker = path.join(fixture.directory, "not-a-directory");
+  await fs.writeFile(blocker, "", "utf8");
+  fixture.statePath = path.join(blocker, "auth-session.json");
+
+  const server = await launchAuthServer(fixture);
+  const cookie = await login(server.baseUrl, fixture.password);
+  const response = await logout(server.baseUrl, cookie);
+  assert.match(response.headers.get("set-cookie") ?? "", /^bike_session=;.*Max-Age=0/);
+  assert.equal((await status(server.baseUrl, cookie)).status, 401);
+  await waitForOutput(server.output, /无法写入会话状态文件/);
+});
+
+test("session state defaults to the first STATE_DIRECTORY entry", async (t) => {
+  const fixture = await createAuthFixture(t, {
+    auth: { sessionStatePath: undefined },
+  });
+  const stateDirectory = path.join(fixture.directory, "systemd-state");
+  const unusedDirectory = path.join(fixture.directory, "unused-state");
+  const expectedPath = path.join(stateDirectory, "auth-session.json");
+
+  const server = await launchAuthServer(fixture, {
+    env: { STATE_DIRECTORY: `${stateDirectory}:${unusedDirectory}` },
+  });
+  // Bail out before logging out if the path is wrong, so the test can never
+  // write into the repository's data/ directory.
+  await waitForOutput(server.output, `会话状态：${expectedPath}`);
+
+  const cookie = await login(server.baseUrl, fixture.password);
+  await logout(server.baseUrl, cookie);
+  const state = JSON.parse(await fs.readFile(expectedPath, "utf8"));
+  assert.ok(state.sessionRevokedBefore > 0);
+  await assert.rejects(fs.access(unusedDirectory));
 });
 
 test("sync API is disabled unless explicitly configured", async (t) => {
@@ -356,6 +637,47 @@ test("sync API accepts configured bearer device tokens", async (t) => {
   });
   assert.equal(accepted.status, 200);
   assert.equal((await readJson(accepted)).workspaceRevision, 0);
+});
+
+test("bearer token guessing is throttled per client while verified tokens keep working", async (t) => {
+  const { baseUrl, syncToken } = await startAuthServer(t);
+  // Only the entry appended by the trusted proxy identifies the client; the
+  // spoofed prefixes below must not give the attacker fresh limiter keys.
+  const proxiedFrom = (spoofed) => `${spoofed}, 203.0.113.50`;
+
+  const verified = await jsonRequest(baseUrl, "/api/sync/manifest", {
+    token: syncToken,
+    forwardedFor: proxiedFrom("198.51.100.1"),
+  });
+  assert.equal(verified.status, 200);
+
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    const rejected = await jsonRequest(baseUrl, "/api/sync/manifest", {
+      token: `wrong token ${attempt}`,
+      forwardedFor: proxiedFrom(`10.0.0.${attempt}`),
+    });
+    assert.equal(rejected.status, 401);
+  }
+
+  const limited = await jsonRequest(baseUrl, "/api/sync/manifest", {
+    token: "yet another wrong token",
+    forwardedFor: proxiedFrom("10.0.1.1"),
+  });
+  assert.equal(limited.status, 429);
+  assert.ok(Number(limited.headers.get("retry-after")) > 0);
+  assert.equal((await readJson(limited)).error, "too_many_requests");
+
+  const cached = await jsonRequest(baseUrl, "/api/sync/manifest", {
+    token: syncToken,
+    forwardedFor: proxiedFrom("10.0.2.2"),
+  });
+  assert.equal(cached.status, 200);
+
+  const otherClient = await jsonRequest(baseUrl, "/api/sync/manifest", {
+    token: "wrong token",
+    forwardedFor: "198.51.100.99",
+  });
+  assert.equal(otherClient.status, 401);
 });
 
 test("sync operation log appends and reads document operations", async (t) => {

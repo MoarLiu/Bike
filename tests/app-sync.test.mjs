@@ -23,6 +23,7 @@ function fixture() {
     workspaceRef: { current: initial },
     syncConfig: { serverUrl: "http://fixture.invalid", token: "fixture", autoSync: true },
     syncState: { documentRevisions: {} },
+    loadSyncState: () => bindings.syncState,
     autoSyncDirtyRef: { current: false },
     flushPendingEdits: () => {
       if (pendingDraft) { bindings.workspaceRef.current = pendingDraft; pendingDraft = undefined; }

@@ -26,6 +26,20 @@ export function loadTypescript(filename) {
   return module.exports;
 }
 
+// Evaluate a fresh, uncached copy of a module, e.g. to give each simulated
+// browser tab its own module state. Its relative imports use the shared cache.
+export function loadTypescriptIsolated(filename) {
+  const resolved = path.resolve(projectRoot, filename);
+  const module = { exports: {} };
+  const require = createRequire(resolved);
+  const code = compile(readFileSync(resolved, "utf8"));
+  const execute = vm.runInThisContext(`(function(require, module, exports) {\n${code}\n})`, { filename: resolved });
+  execute((name) => name.startsWith(".")
+    ? loadTypescript(path.resolve(path.dirname(resolved), `${name}.ts`))
+    : require(name), module, module.exports);
+  return module.exports;
+}
+
 export function loadAppCallback(name, bindings) {
   const filename = path.join(projectRoot, "src/App.tsx");
   const ast = ts.createSourceFile(filename, readFileSync(filename, "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);

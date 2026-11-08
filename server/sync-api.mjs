@@ -33,15 +33,27 @@ export const methodNotAllowed = (response, allow, headers = {}) => {
 
 export const readJsonRequestBody = (request, maxBytes) =>
   new Promise((resolve, reject) => {
-    let body = "";
+    // Collect raw bytes and decode once at the end: decoding per chunk would
+    // split multi-byte UTF-8 characters that straddle chunk boundaries.
+    const chunks = [];
+    let totalBytes = 0;
+    let settled = false;
     request.on("data", (chunk) => {
-      body += chunk;
-      if (body.length > maxBytes) {
+      if (settled) return;
+      const buffer = typeof chunk === "string" ? Buffer.from(chunk, "utf8") : chunk;
+      totalBytes += buffer.length;
+      if (totalBytes > maxBytes) {
+        settled = true;
         request.destroy();
         reject(new SyncValidationError("请求体过大"));
+        return;
       }
+      chunks.push(buffer);
     });
     request.on("end", () => {
+      if (settled) return;
+      settled = true;
+      const body = Buffer.concat(chunks, totalBytes).toString("utf8");
       if (!body.trim()) {
         resolve({});
         return;
@@ -52,7 +64,11 @@ export const readJsonRequestBody = (request, maxBytes) =>
         reject(new SyncValidationError("请求体不是有效 JSON"));
       }
     });
-    request.on("error", reject);
+    request.on("error", (error) => {
+      if (settled) return;
+      settled = true;
+      reject(error);
+    });
   });
 
 export const handleSyncError = (response, error, headers = {}) => {
@@ -89,7 +105,13 @@ export const handleSyncApi = async (
   { headers = {} } = {},
 ) => {
   const url = new URL(request.url, "http://localhost");
-  const pathname = decodeURIComponent(url.pathname);
+  let pathname;
+  try {
+    pathname = decodeURIComponent(url.pathname);
+  } catch {
+    sendJson(response, 400, { error: "invalid_request", message: "URL 编码无效" }, headers);
+    return;
+  }
 
   if (request.method === "GET" && pathname === "/api/sync/manifest") {
     sendJson(response, 200, syncStore.getManifest(), headers);

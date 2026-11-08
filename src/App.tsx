@@ -85,7 +85,17 @@ import {
 import { documentToMarkdown, parseMarkdownDocument } from "./markdown";
 import { firstDocument, migrateWorkspace } from "./migrations";
 import { createStarterWorkspace } from "./sample";
-import { loadWorkspace, saveWorkspace, saveWorkspaceFallback, type WorkspaceSaveResult } from "./storage";
+import {
+  isWorkspacePersisted,
+  loadWorkspace,
+  reloadWorkspaceIf,
+  saveWorkspace,
+  saveWorkspaceFallback,
+  subscribeToWorkspaceChanges,
+  subscribeToWorkspaceConflicts,
+  type WorkspaceSaveResult,
+} from "./storage";
+import { safeMarkdownUrl } from "./safeUrl";
 import {
   loadSyncConfig,
   loadSyncState,
@@ -415,6 +425,13 @@ const nodeContainsId = (node: OutlineNode, id: string): boolean =>
 const firstNodeIdInWorkspace = (workspace: Workspace) =>
   firstNodeId(firstDocument(workspace).nodes);
 
+// Downloads a JSON copy of a workspace before it gets replaced or overwritten.
+const downloadWorkspaceBackup = (workspace: Workspace, reason: string) => {
+  const backup = exportWorkspace(workspace);
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  downloadText(`bike-workspace-before-${reason}-${stamp}.json`, backup.content, backup.mime);
+};
+
 const formatTime = (iso: string) => {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return "时间未知";
@@ -580,6 +597,12 @@ function App() {
   });
   const [showSyncConfig, setShowSyncConfig] = useState(false);
   const [syncBusy, setSyncBusy] = useState(false);
+  // Another tab or window saved over the copy this page was editing: autosave
+  // is paused until the user picks which version to keep.
+  const [storageConflict, setStorageConflict] = useState(false);
+  const storageConflictRef = useRef(false);
+  // Last workspace reloaded from another page's save (that page syncs it).
+  const refreshedWorkspaceRef = useRef<Workspace | null>(null);
   const syncBusyRef = useRef(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const inputRefs = useRef(new Map<string, HTMLTextAreaElement>());
@@ -605,6 +628,8 @@ function App() {
 
   const showSaveResult = useEventCallback((result: WorkspaceSaveResult) => {
     if (!result.ok) {
+      // Conflicts are handled by the storage conflict listener.
+      if (result.conflict) return;
       showNotice(`保存失败：${result.error.message}`);
       return;
     }
@@ -703,12 +728,14 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (!workspace || !ready) return;
+    if (!workspace || !ready || storageConflict) return;
+    // A copy just loaded from (or already written to) IndexedDB has nothing new.
+    if (isWorkspacePersisted(workspace)) return;
     const handle = window.setTimeout(() => {
       saveWorkspace(workspace).then(showSaveResult);
     }, 250);
     return () => window.clearTimeout(handle);
-  }, [workspace, ready]);
+  }, [workspace, ready, storageConflict]);
 
   useEffect(() => {
     if (sidebarView !== "recent") return;
@@ -1073,21 +1100,39 @@ function App() {
 
   useEffect(() => {
     const flushAndPersistFallback = () => {
+      // During an unresolved conflict this page's copy is already outdated; a
+      // snapshot of it could only replace another page's valid one.
+      if (storageConflictRef.current) return;
       const nextWorkspace = flushPendingEditsRef.current() ?? workspaceRef.current;
-      if (nextWorkspace) saveWorkspaceFallback(nextWorkspace);
+      // Only unsaved edits need the synchronous snapshot. Writing a copy that is
+      // already in IndexedDB would leave an outdated snapshot behind for the
+      // next load (for example when another tab saves newer data afterwards).
+      if (nextWorkspace && !isWorkspacePersisted(nextWorkspace)) {
+        saveWorkspaceFallback(nextWorkspace);
+      }
+    };
+
+    const handleBeforeUnload = (event: BeforeUnloadEvent) => {
+      if (storageConflictRef.current && !(window.bike ?? window.localOutline)) {
+        // Closing now drops this page's unsaved edits: let the browser ask.
+        event.preventDefault();
+        event.returnValue = "";
+        return;
+      }
+      flushAndPersistFallback();
     };
 
     const preventFileDropNavigation = (event: DragEvent) => {
       event.preventDefault();
     };
 
-    window.addEventListener("beforeunload", flushAndPersistFallback, { capture: true });
+    window.addEventListener("beforeunload", handleBeforeUnload, { capture: true });
     window.addEventListener("pagehide", flushAndPersistFallback, { capture: true });
     window.addEventListener("dragover", preventFileDropNavigation);
     window.addEventListener("drop", preventFileDropNavigation);
     return () => {
       flushAndPersistFallback();
-      window.removeEventListener("beforeunload", flushAndPersistFallback, { capture: true });
+      window.removeEventListener("beforeunload", handleBeforeUnload, { capture: true });
       window.removeEventListener("pagehide", flushAndPersistFallback, { capture: true });
       window.removeEventListener("dragover", preventFileDropNavigation);
       window.removeEventListener("drop", preventFileDropNavigation);
@@ -1746,25 +1791,118 @@ function App() {
       showNotice(result.error ?? "没有找到可用的 iCloud 备份");
       return;
     }
+    let next: Workspace;
     try {
-      const next = migrateWorkspace(result.payload);
-      replaceWorkspace(next);
-      setActiveNodeId(firstNodeIdInWorkspace(next));
-      setFocusNodeId(null);
-      if (result.revision) {
-        localStorage.setItem(ICLOUD_REVISION_KEY, result.revision);
-        localStorage.removeItem(LEGACY_ICLOUD_REVISION_KEY);
-      }
-      showNotice(`已载入 iCloud 备份：${result.path}`);
+      next = migrateWorkspace(result.payload);
     } catch (error) {
       showNotice(`载入备份失败：${error instanceof Error ? error.message : String(error)}`);
+      return;
     }
+    // Same protection as importing a workspace or pulling from the server:
+    // confirm the replacement and keep a copy of what is being replaced.
+    const confirmed = window.confirm(
+      `载入 iCloud 备份「${result.path ?? "bike-workspace.json"}」（${next.documents.length} 个文档）会替换当前所有文档。继续前会先下载一份当前工作区备份。`,
+    );
+    if (!confirmed) {
+      showNotice("已取消载入备份");
+      return;
+    }
+    const currentWorkspace = flushPendingEdits() ?? workspaceRef.current;
+    if (currentWorkspace) downloadWorkspaceBackup(currentWorkspace, "load-backup");
+    replaceWorkspace(next);
+    setActiveNodeId(firstNodeIdInWorkspace(next));
+    setFocusNodeId(null);
+    if (result.revision) {
+      localStorage.setItem(ICLOUD_REVISION_KEY, result.revision);
+      localStorage.removeItem(LEGACY_ICLOUD_REVISION_KEY);
+    }
+    showNotice(`已载入 iCloud 备份：${result.path}`);
   });
 
   const applySyncedWorkspace = useEventCallback((next: Workspace) => {
     replaceWorkspace(next);
     setActiveNodeId(firstNodeIdInWorkspace(next));
     setFocusNodeId(null);
+  });
+
+  // Another tab or window saved a newer workspace: catch up, but only while this
+  // page has no unsaved edits. With unsaved edits the next save is refused as a
+  // conflict instead, so nothing is overwritten either way.
+  const refreshFromStorage = useEventCallback(async () => {
+    if (!ready || storageConflictRef.current || syncBusyRef.current) return;
+    const current = flushPendingEdits() ?? workspaceRef.current;
+    if (!current || !isWorkspacePersisted(current)) return;
+    const next = await reloadWorkspaceIf(() =>
+      !storageConflictRef.current &&
+      !syncBusyRef.current &&
+      (flushPendingEdits() ?? workspaceRef.current) === current &&
+      isWorkspacePersisted(current),
+    );
+    if (!next) return;
+    refreshedWorkspaceRef.current = next;
+    replaceWorkspace(next);
+    setSyncState(loadSyncState(syncConfig.serverUrl));
+    const activeDocument = next.documents.find((item) => item.id === next.activeDocumentId) ?? next.documents[0];
+    const activeId = activeNodeIdRef.current;
+    if (!activeDocument || !activeId || !findNode(activeDocument.nodes, activeId)) {
+      setActiveNodeId(firstNodeIdInWorkspace(next));
+    }
+  });
+
+  const handleStorageConflict = useEventCallback(() => {
+    const current = flushPendingEdits() ?? workspaceRef.current;
+    if (current && isWorkspacePersisted(current)) {
+      // Nothing unsaved here (e.g. a missed broadcast): just catch up.
+      void refreshFromStorage();
+      return;
+    }
+    storageConflictRef.current = true;
+    setStorageConflict(true);
+  });
+
+  useEffect(() => subscribeToWorkspaceConflicts(handleStorageConflict), []);
+
+  useEffect(() => {
+    if (!ready) return;
+    return subscribeToWorkspaceChanges(() => {
+      void refreshFromStorage();
+    });
+  }, [ready]);
+
+  const reloadAfterConflict = useEventCallback(async () => {
+    const current = flushPendingEdits() ?? workspaceRef.current;
+    if (current && !isWorkspacePersisted(current)) {
+      downloadWorkspaceBackup(current, "reload");
+    }
+    storageConflictRef.current = false;
+    setStorageConflict(false);
+    showNotice("已载入最新内容，本页未保存的修改已下载为备份文件");
+    await initializeWorkspace();
+  });
+
+  const overwriteAfterConflict = useEventCallback(async () => {
+    const current = flushPendingEdits() ?? workspaceRef.current;
+    if (!current) return;
+    const confirmed = window.confirm(
+      "用本页内容覆盖会替换其他标签页或窗口已保存的修改。继续前会先下载一份已保存版本的备份。",
+    );
+    if (!confirmed) return;
+    const latest = await loadWorkspace();
+    if (latest.status === "error") {
+      showNotice(`读取已保存版本失败：${latest.error.message}`);
+      return;
+    }
+    if (latest.status === "loaded") downloadWorkspaceBackup(latest.workspace, "overwrite");
+    // loadWorkspace adopted the latest stored revision, so this save replaces
+    // exactly that version (and is refused again if yet another save lands).
+    const result = await saveWorkspace(current);
+    if (!result.ok) {
+      if (!result.conflict) showNotice(`保存失败：${result.error.message}`);
+      return;
+    }
+    storageConflictRef.current = false;
+    setStorageConflict(false);
+    showNotice("已用本页内容覆盖已保存的工作区");
   });
 
   const syncErrorMessage = (error: unknown) => {
@@ -1783,9 +1921,11 @@ function App() {
     if (syncBusyRef.current) return;
     const currentWorkspace = flushPendingEdits() ?? workspaceRef.current;
     if (!currentWorkspace) return;
+    // Read the sync state from storage rather than React state: another tab may
+    // have synced (and this page reloaded its documents) since it last rendered.
     const activeSync = overrideConfig
       ? persistSyncConfig(overrideConfig)
-      : { config: syncConfig, state: syncState };
+      : { config: syncConfig, state: loadSyncState(syncConfig.serverUrl) };
     if (usesDesktopSyncProxy() && !activeSync.config.token.trim()) {
       if (!options.silent) showNotice("Electron 同步需要设备密钥。");
       return;
@@ -1849,6 +1989,8 @@ function App() {
 
   useEffect(() => {
     if (!workspace || !ready || !syncConfig.autoSync) return;
+    // A copy reloaded from another page's save is that page's to sync.
+    if (workspace === refreshedWorkspaceRef.current) return;
     autoSyncDirtyRef.current = true;
     scheduleAutoSync();
     return () => clearAutoSyncTimer();
@@ -2062,6 +2204,28 @@ function App() {
           <button type="button" onClick={() => initializeWorkspace()}>
             重试
           </button>
+        </section>
+      </main>
+    );
+  }
+
+  if (storageConflict) {
+    return (
+      <main className="loading loading-error">
+        <section>
+          <h1>工作区已在其他标签页或窗口中更新</h1>
+          <p>
+            为避免互相覆盖，本页已暂停自动保存，本页还有未保存的修改。可以载入最新内容（会先下载本页内容的备份），
+            或用本页内容覆盖已保存的版本（会先下载已保存版本的备份）。
+          </p>
+          <div className="loading-error-actions">
+            <button type="button" onClick={() => void reloadAfterConflict()}>
+              载入最新内容
+            </button>
+            <button type="button" onClick={() => void overwriteAfterConflict()}>
+              用本页内容覆盖
+            </button>
+          </div>
         </section>
       </main>
     );
@@ -3435,20 +3599,6 @@ const renderMarkdownPreviewList = (
     ))}
   </ul>
 );
-
-const safeMarkdownUrl = (value: string, kind: "link" | "image") => {
-  const trimmed = value.trim();
-  if (!trimmed) return "";
-  const protocol = trimmed.match(/^([a-z][a-z0-9+.-]*):/i)?.[1]?.toLowerCase();
-  if (!protocol) return trimmed;
-  if (protocol === "http" || protocol === "https" || protocol === "mailto" || protocol === "tel") {
-    return trimmed;
-  }
-  if (kind === "image" && protocol === "data" && /^data:image\//i.test(trimmed)) {
-    return trimmed;
-  }
-  return "";
-};
 
 const renderInlineMarkdown = (text: string, keyPrefix: string): React.ReactNode[] => {
   const nodes: React.ReactNode[] = [];

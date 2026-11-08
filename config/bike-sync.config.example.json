@@ -7,6 +7,8 @@
   "databasePath": "data/bike-sync.sqlite",
   "deviceTokenHashes": [],
   "maxBodyBytes": 10485760,
+  "trustProxyHeaders": false,
+  "trustedProxyCount": 1,
   "cors": {
     "enabled": true,
     "allowedOrigins": [

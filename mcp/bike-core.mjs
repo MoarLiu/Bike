@@ -204,15 +204,13 @@ export const migrateWorkspace = (rawWorkspace) => {
 export const defaultWorkspacePath = ({
   homeDir = os.homedir(),
   platform = process.platform,
-  env = process.env,
 } = {}) => {
-  return defaultWorkspacePathCandidates({ homeDir, platform, env })[0];
+  return defaultWorkspacePathCandidates({ homeDir, platform })[0];
 };
 
 export const defaultWorkspacePathCandidates = ({
   homeDir = os.homedir(),
   platform = process.platform,
-  env = process.env,
 } = {}) => {
   if (platform === "darwin") {
     const baseDirectory = path.join(
@@ -231,24 +229,7 @@ export const defaultWorkspacePathCandidates = ({
     );
     return [
       path.join(baseDirectory, "bike-workspace.json"),
-      path.join(baseDirectory, ".backups", "bike-workspace.json"),
       path.join(legacyBaseDirectory, "localoutline-workspace.json"),
-      path.join(legacyBaseDirectory, ".backups", "localoutline-workspace.json"),
-    ];
-  }
-
-  if (platform === "win32") {
-    return [
-      path.join(
-        env.APPDATA || path.join(homeDir, "AppData", "Roaming"),
-        "Bike",
-        "bike-workspace.json",
-      ),
-      path.join(
-        env.APPDATA || path.join(homeDir, "AppData", "Roaming"),
-        "LocalOutline",
-        "localoutline-workspace.json",
-      ),
     ];
   }
 
@@ -327,7 +308,7 @@ export const loadMcpConfig = async ({
   const workspacePath = configuredWorkspacePath
     ? path.resolve(expandHome(configuredWorkspacePath, homeDir))
     : await firstExistingPath(
-        defaultWorkspacePathCandidates({ homeDir, platform, env }).map((candidate) =>
+        defaultWorkspacePathCandidates({ homeDir, platform }).map((candidate) =>
           path.resolve(expandHome(candidate, homeDir)),
         ),
       );
