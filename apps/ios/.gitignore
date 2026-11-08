@@ -1,6 +1,0 @@
-.DS_Store
-.build/
-DerivedData/
-*.xcuserdata/
-Package.resolved
-dist/

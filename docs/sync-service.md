@@ -96,7 +96,7 @@ npm run start:sync
 }
 ```
 
-`databasePath` 是相对项目根目录的 SQLite 文件路径，也可以写绝对路径。浏览器 Web 版跨端口访问独立同步服务时，需要把 Web 来源加入 `cors.allowedOrigins`；Electron、Swift Native、Android 和 iOS 原生客户端不依赖浏览器 CORS。
+`databasePath` 是相对项目根目录的 SQLite 文件路径，也可以写绝对路径。浏览器 Web 版跨端口访问独立同步服务时，需要把 Web 来源加入 `cors.allowedOrigins`；Electron 客户端通过主进程代理访问，不依赖浏览器 CORS。
 
 如需给移动端使用设备密钥：
 
@@ -315,19 +315,15 @@ Web-only 部署默认不提供同步 API。部署 Web + Sync Server 时，Web �
 - 远端删除且本机未变：删除本机。
 - 两边都改：报告冲突，不覆盖任一边。
 
-## Electron、Swift Native、Android 和 iOS
+## Electron
 
 Electron 本地版复用 Web 前端的同步界面。打包后的 Electron 渲染进程不会直接跨域请求 Web 服务，而是通过 preload 暴露的主进程代理访问同步 API。代理只允许 `/api/sync/manifest`、`/api/documents`、`/api/documents/:id` 和文档 operation log 路径，并把设备密钥作为 Bearer token 发送。Electron 不读取系统密钥串，设备密钥会明文保存在本机应用配置中。
-
-Swift Native 版在设置或侧栏齿轮中配置 Web 地址和设备密钥。Web 地址、设备密钥和同步 revision 状态保存在 UserDefaults。本地仍以 iCloud Drive/Bike 下的 Markdown 文件和 sidecar metadata 作为主存储；同步拉取或双向同步下载远端更新后，会先创建本地快照再写回 Markdown 存储。
-
-Android 和 iOS Companion 也复用同一套文档级 API。Android 使用 SharedPreferences 明文保存设备密钥；iOS 使用 UserDefaults 明文保存设备密钥。两端都支持手动同步、上传、拉取和可配置后台自动同步。
 
 部署好同步服务后，本地客户端连接流程：
 
 1. 运行 `./scripts/setup-sync-server.sh install` 或手动配置 `config/bike-sync.config.json`，生成设备同步密钥。
 2. 启动同步服务，确认 `http://你的同步服务地址/healthz` 可访问。
-3. 在 Web、Electron、Swift Native、Android 或 iOS 中打开 Web Sync 配置，填写同步服务地址和设备同步密钥。
+3. 在 Web 或 Electron 中打开 Web Sync 配置，填写同步服务地址和设备同步密钥。
 4. 第一次初始化可选择“上传”把本机文档推到同步服务，或选择“拉取”把同步服务文档替换到本机。
 5. 后续使用“同步”进行文档级双向交换；发生 revision 冲突时会提示，不会静默覆盖。
 

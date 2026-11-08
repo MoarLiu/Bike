@@ -1,7 +1,6 @@
 node_modules/
 dist/
 release/
-build/win-icon-png/
 config/bike.config.json
 config/bike-sync.config.json
 data/

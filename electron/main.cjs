@@ -35,17 +35,6 @@ const contentSecurityPolicy = [
 ].join("; ");
 
 const iCloudDirectory = async (folderName = cloudFolderName) => {
-  if (process.platform === "win32") {
-    const iCloudRoot = process.env.ICLOUDDRIVE || path.join(os.homedir(), "iCloudDrive");
-    try {
-      const stats = await fs.stat(iCloudRoot);
-      if (!stats.isDirectory()) throw new Error("not a directory");
-    } catch {
-      throw new Error("未找到 iCloud for Windows 的 iCloudDrive 目录，请先安装并登录 iCloud for Windows，或使用“导出工作区”手动保存。");
-    }
-    return path.join(iCloudRoot, folderName);
-  }
-
   if (process.platform !== "darwin") {
     throw new Error("当前平台不支持自动 iCloud 备份，请使用“导出工作区”手动保存。");
   }

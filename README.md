@@ -6,27 +6,21 @@ Bike 是一个本地优先的大纲、思维导图和 Markdown 写作工具。�
 
 | 平台 | 版本 | 状态 | 位置 |
 | --- | --- | --- | --- |
-| Web / Electron Desktop | `1.4.3` | 当前桌面主线 | 根目录 |
-| macOS Swift Native | `1.4.3` | 原生 macOS 客户端 | `native-swift/` |
-| Android Companion | `0.1.14-web-sync` | Mobile beta | `apps/android/` |
-| iOS Companion | `0.1.14` | Mobile beta | `apps/ios/` |
-
-桌面端是完整 Bike 体验；移动端是 companion client，优先服务手机上的快速捕捉、阅读、轻量编辑、AI 生成/润色和 Web Sync，不追求与桌面端完全功能一致。
+| Web | `1.4.3` | 浏览器版本 | 根目录 |
+| Electron macOS Apple Silicon | `1.4.3` | 桌面封装版 | 根目录 |
 
 ## 1.4.3 重点
 
 - 修复同步中断后的重试可能误删远端文档的问题：下载结果保存到本机后，才提交对应同步基线。
 - 同步期间的新编辑会保留在本机；开启自动同步时会安排再次同步，同一篇文档的并发修改仍会报告冲突。
-- 桌面同步保留移动端快捷标记和未知扩展字段。
-- macOS Swift Native 补齐同步故障恢复、拉取保存顺序和字段保留，复制 Markdown 文档时正确使用新标题。
-- 移动端源码修复了旧 Markdown 缓存和同步覆盖新编辑的问题；本次主线发布不包含新的移动端安装包。
+- 桌面同步保留快捷标记和未知扩展字段。
 - 统一安装菜单支持 Web 与 Sync Server 的安装、更新和管理，Web 安装不再修改已有 Sync 数据目录的归属。
 
-完整更新说明见 [Bike 1.4.3](docs/release-1.4.3.md)。本次发布 Electron 与 Swift Native 的 Apple Silicon DMG，以及 Web/Sync Server 部署包；移动端安装包沿用独立发布流程。
+完整更新说明见 [Bike 1.4.3](docs/release-1.4.3.md)。当前维护 Electron Apple Silicon DMG 与 Web/Sync Server 部署包。
 
 ## 同步服务与 AI
 
-Bike 1.4.2 把 Web Sync 从 Web 认证服务中拆成可单独部署的 Sync Server。Web 版默认只托管应用入口和静态资源，数据仍保存在浏览器 IndexedDB；需要多端同步时，可以额外部署同步服务，Electron、Swift Native、Android 和 iOS 填写同步服务地址与设备同步密钥后，可按文档 revision 双向同步，并支持后台自动同步。
+Bike 1.4.2 把 Web Sync 从 Web 认证服务中拆成可单独部署的 Sync Server。Web 版默认只托管应用入口和静态资源，数据仍保存在浏览器 IndexedDB；需要多端同步时，可以额外部署同步服务，Web 与 Electron 填写同步服务地址与设备同步密钥后，可按文档 revision 双向同步，并支持后台自动同步。
 
 这一版新增独立同步服务入口、专用配置模板和 `.sh` 引导脚本。用户可以只部署 Web、部署 Web + Sync Server，或只安装 Sync Server；脚本会引导设置同步端口、用户名、SQLite 路径、CORS 来源和同步密钥，并提供启动、停止、重启、日志、状态和健康检查。
 
@@ -39,7 +33,7 @@ Bike 1.4.x 继续保留 AI 辅助核心编辑流程。你可以在桌面菜单�
 
 AI 能力使用用户自己的接口配置，支持 `chat/completions` 与 `responses` 两类兼容端点。API key 只保存在本机应用配置中，不会写入仓库、README、发布说明或打包产物。
 
-这一版还把 Web Sync 接入 Electron、Swift Native、Android 和 iOS。同步设备密钥按用户要求明文保存在本机应用配置中，不读取系统密钥串，便于理解、迁移和删除。
+Electron 同样接入 Web Sync。同步设备密钥按用户要求明文保存在本机应用配置中，不读取系统密钥串，便于理解、迁移和删除。
 
 ## 核心能力
 
@@ -54,38 +48,12 @@ AI 能力使用用户自己的接口配置，支持 `chat/completions` 与 `resp
 - 检查更新：桌面菜单和应用内入口可检查 GitHub Release，并跳转发布页获取新版本。
 - MCP 服务：把本地工作区暴露为可读取、可搜索、可定位、可导出的结构化上下文，并支持受控写入。
 
-## 平台与范围
-
-| 能力 | Web / Electron | macOS Swift Native | Android Companion | iOS Companion |
-| --- | --- | --- | --- | --- |
-| Workspace v1 JSON | Yes | Yes | Yes | Yes |
-| 未知 JSON 字段保留 | Yes | Yes | Yes | Yes |
-| 文档库 | Yes | Yes | Yes | Yes |
-| 文档重命名 / 删除 / 复制 | Yes | Yes | Yes | Yes |
-| 大纲阅读 | Yes | Yes | Yes | Yes |
-| 轻量大纲编辑 | Yes | Yes | Yes | Yes |
-| AI 生成 / 润色 | Yes | Yes | Yes | Yes |
-| Responses / Chat Completions | Yes | Yes | Yes | Yes |
-| 思维导图 | Yes | Yes | Deferred | Deferred |
-| MCP | Yes | Planned / partial | Deferred | Deferred |
-| 文档级同步 | Manual / Auto Web Sync | Manual / Auto Web Sync | Manual / Auto Web Sync | Manual / Auto Web Sync |
-| 自动同步 | Configurable | Configurable | Configurable | Configurable |
-| 拖拽排序 | Yes | Yes | Deferred | Deferred |
-| 多节点批量操作 | Yes | Yes | Deferred | Deferred |
-| 完整富文本字段编辑 | Yes | Yes | Deferred | Deferred |
-
-更完整的平台能力矩阵见 `docs/mobile/platform-matrix.md`。
-
 ## 项目结构
 
 ```text
 .
 ├── src/                    # Web / Electron 共享前端
 ├── electron/               # Electron 壳
-├── native-swift/           # macOS Swift Native 客户端
-├── apps/
-│   ├── android/            # Android Companion，Kotlin + Jetpack Compose
-│   └── ios/                # iOS Companion，SwiftUI + SwiftPM/Xcode
 ├── server/                 # Web 认证服务、独立同步服务
 ├── mcp/                    # Bike MCP server
 ├── config/                 # 单用户部署配置模板
@@ -115,59 +83,7 @@ macOS Apple Silicon Electron：
 npm run electron:dist:mac
 ```
 
-Windows x64 Electron：
-
-```bash
-npm run electron:dist:win
-```
-
 产物会输出到 `release/`。
-
-Swift Native macOS：
-
-```bash
-cd native-swift
-./scripts/test_all.sh
-./scripts/package_dmg.sh
-```
-
-产物会输出到 `native-swift/release/`。
-
-## 移动端开发
-
-移动端不是桌面端完整替代品，而是用于手机上的快速捕捉、阅读、轻量编辑和 AI 生成/润色。Android 与 iOS 共享 Bike Workspace v1 JSON 语义，并尽量保留桌面端未知字段，避免移动端轻编辑破坏桌面端数据。
-
-移动端当前不包含脑图视图、MCP、拖拽排序、多选批量大纲操作和完整富文本字段编辑。
-
-Android 本地验证：
-
-```bash
-cd apps/android
-JAVA_HOME=/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home \
-PATH=/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home/bin:$PATH \
-ANDROID_HOME=/opt/homebrew/share/android-commandlinetools \
-./gradlew testDebugUnitTest assembleDebug
-```
-
-iOS 本地验证：
-
-```bash
-cd apps/ios
-swift build
-swift run BikeCoreChecks
-xcodebuild -project BikeiOS.xcodeproj \
-  -scheme BikeiOS \
-  -destination 'generic/platform=iOS Simulator' \
-  -derivedDataPath /tmp/BikeIOSXcodeDerived \
-  build CODE_SIGNING_ALLOWED=NO
-```
-
-移动端封版资产通过 GitHub Releases 分发。当前 beta 使用 `mobile-v0.1.14` 标签：
-
-- Android：debug keystore 签名的 APK，可用于侧载 beta 测试。
-- iOS：Simulator `.app` 可用于模拟器测试；`iphoneos` IPA 目前未签名，真机安装需要 Apple Developer 证书和 provisioning profile。
-
-APK、IPA、dSYM、zip 等发布产物不要提交到 git；发布时附上 release notes 与 SHA-256 校验值。
 
 ## 数据与隐私
 
@@ -177,13 +93,7 @@ Bike 默认把数据保存在本机。Web/Electron 版使用 IndexedDB，macOS �
 ~/Library/Mobile Documents/com~apple~CloudDocs/Bike/bike-workspace.json
 ```
 
-Swift Native 版的 JSON 备份路径：
-
-```text
-~/Library/Mobile Documents/com~apple~CloudDocs/Bike/.backups/bike-workspace.json
-```
-
-移动端使用各自平台的本地存储保存工作区、同步配置与 AI 配置。Web Sync 设备密钥明文保存在本机应用配置中，不读取系统密钥串。API key、单用户部署配置、本机工作区文件、移动端签名文件、keystore、provisioning profile 都不应该提交到仓库。项目已经忽略 `config/bike.config.json`、`release/`、`dist/`、Swift/Android 构建目录和常见临时文件。
+Web Sync 设备密钥明文保存在本机应用配置中，不读取系统密钥串。API key、单用户部署配置、本机工作区文件和签名文件都不应该提交到仓库。项目已经忽略 `config/bike.config.json`、`release/`、`dist/` 和常见临时文件。
 
 ## MCP 服务
 
@@ -371,7 +281,6 @@ npm run start:full
 ## 发布规则
 
 - 桌面端 release 使用 `v1.x.x` 标签。
-- 移动端 beta release 使用 `mobile-v0.x.x` 标签。
 - 不提交构建产物、签名文件、证书、密钥、工作区 JSON 或本机路径。
 - GitHub Release 必须包含 release notes 和 SHA-256 校验文件。
 
@@ -379,4 +288,4 @@ npm run start:full
 
 - 增加版本历史、节点级反向链接、附件本地库和更完整的 PDF/图片导出。
 - 为 MCP 写入增加应用内控制面板、写入审计日志和快照恢复 UI。
-- 完成正式代码签名、notarization、stapling、Windows 签名、Android release keystore 和 iOS Developer signing 流程。
+- 完成 macOS 正式代码签名、notarization 和 stapling 流程。
