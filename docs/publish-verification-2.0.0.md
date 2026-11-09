@@ -67,4 +67,14 @@
 
 ## 远端发布状态
 
-本地正式制品已通过，接下来对相同源码提交执行候选分支 CI，通过后快进 main、创建 v2.0.0 并发布附件，再记录公开下载校验结果。
+源码提交为 `e2628a7b9c57e27bb4abff6847772447f640d322`，`v2.0.0` 指向该提交。main 已快进到该版本，随后仅追加本文的发布证据。发布页面为 [Bike 2.0.0](https://github.com/MoarLiu/Bike/releases/tag/v2.0.0)，公开时间为 2026-11-10 03:06（Asia/Shanghai），GitHub 标记为最新正式版。
+
+- [候选分支 CI](https://github.com/MoarLiu/Bike/actions/runs/42678708894) 的 Linux、macOS 和 Node 兼容性三项作业全部通过。
+- [main CI](https://github.com/MoarLiu/Bike/actions/runs/42679125036) 的 Linux、macOS 和 Node 兼容性三项作业全部通过。
+- [v2.0.0 标签 CI](https://github.com/MoarLiu/Bike/actions/runs/42679130460) 的 Linux、macOS 和 Node 兼容性三项作业全部通过。
+
+9 个 Release 附件已通过公开 URL 重新下载，长度和 SHA-256 与本地正式制品逐一一致。DMG/ZIP 的 GitHub 服务端摘要、两个 blockmap、独立摘要文件、总清单和更新元数据均已核对。公开下载的 DMG 再次通过完整性、严格签名、UI 及 2.0 双进程回归，公开部署归档再次通过 Node 22.13.0 的 11 项干净安装和升级检查。远端源码树和 CHANGELOG 与发布提交一致。
+
+首次并行上传遇到连接重置。核对远端后改用草稿分批上传，在所有附件完成并校验后公开发布。最终公开下载及运行时验收通过，相关日志位于 verification/。
+
+本版按用户授权完成发布。真实 AI/provider、实际 MCP 客户端配置、两台物理 Mac 及验收记录所列手工系统集成继续由用户后续补测。签名、公证及自动替换边界沿用前述说明。
