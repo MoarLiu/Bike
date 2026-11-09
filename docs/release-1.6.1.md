@@ -31,4 +31,4 @@
 - `Bike-Web-1.6.1-sync-server.tar.gz`：Web/Sync/MCP 部署包，包含共享模块及 MCP 依赖的文件锁模块。
 - `Bike-1.6.1-arm64.dmg.sha256`、`SHA256SUMS-1.6.1.txt`：摘要校验。
 
-完整证据见 [候选验收](candidate-1.6.1.md)，最终提交、远端 CI 与资产核验见发布验证记录。
+完整证据见 [候选验收](candidate-1.6.1.md)，最终提交、远端 CI 与资产核验见 [发布验证](publish-verification-1.6.1.md)。
