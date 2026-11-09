@@ -208,6 +208,7 @@ export const mergeNodes = (nodes: OutlineNode[], sourceId: string, targetId: str
     for (const key of ["bold", "italic", "underline", "strike", "highlight"] as const) node[key] = node[key] || source[key];
     for (const key of ["icon", "imageName", "imageAlt", "codeBlock", "codeLanguage"] as const) node[key] = node[key] ?? source[key];
     node.table = node.table ?? source.table?.map((row) => [...row]);
+    if (source.attachmentRefs?.length) node.attachmentRefs = [...(node.attachmentRefs ?? []), ...source.attachmentRefs];
     node.children = [...node.children, ...source.children];
   });
 };

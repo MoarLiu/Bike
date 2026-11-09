@@ -4,6 +4,7 @@ import {
   SyncValidationError,
   SyncPayloadTooLargeError,
   SyncBusyError,
+  SyncCapabilityError,
 } from "./sync-store.mjs";
 
 const securityHeaders = {
@@ -80,6 +81,10 @@ export const readJsonRequestBody = (request, maxBytes) =>
   });
 
 export const handleSyncError = (response, error, headers = {}) => {
+  if (error instanceof SyncCapabilityError) {
+    sendJson(response, 426, { error: "client_upgrade_required", message: error.message, requiredCapabilities: ["attachments-v1"] }, headers);
+    return true;
+  }
   if (error instanceof SyncPayloadTooLargeError) {
     const socket = response.req?.socket;
     response.once?.("finish", () => {
@@ -230,6 +235,7 @@ export const handleSyncApi = async (
         id,
         expectedRevision: body.expectedRevision,
         document: body.document,
+        capabilities: body.capabilities,
       });
       sendJson(response, 200, {
         revision: result.revision,

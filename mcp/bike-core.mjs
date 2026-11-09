@@ -13,12 +13,13 @@ import {
 import { documentToMarkdown as renderDocumentMarkdown } from "../shared/bike-markdown.mjs";
 import { assertDocumentBudget, assertTextBudget, assertTreeBudget, assertValueBudget, assertWorkspaceBudget, MAX_DOCUMENT_BYTES } from "../shared/bike-limits.mjs";
 import { assertRegularWriteTarget, isProcessAlive } from "../electron/workspace-lock.cjs";
+import { validateDocumentAttachments, workspaceFormatVersion } from "../shared/bike-attachments.mjs";
 
 export const SERVER_NAME = "bike";
 export const SERVER_DISPLAY_NAME = "Bike MCP";
 export const DEFAULT_DOCUMENT_TITLE = "未命名文档";
 export const DEFAULT_NODE_TEXT = "未命名主题";
-export const CURRENT_WORKSPACE_VERSION = 1;
+export const CURRENT_WORKSPACE_VERSION = 2;
 
 const VALID_COLORS = new Set(["plain", "blue", "green", "amber", "rose"]);
 const DEFAULT_LIMIT = 20;
@@ -157,6 +158,7 @@ export const migrateDocument = (rawDocument, usedIds = new Set()) => {
   if (!isRecord(rawDocument)) throw new Error("导入文件不是有效文档");
   if (!Array.isArray(rawDocument.nodes)) throw new Error("文档缺少有效主题数组，原文件已保留");
   assertTreeBudget(rawDocument.nodes, { maxDepth: 10_000 });
+  validateDocumentAttachments(rawDocument);
 
   const now = new Date().toISOString();
   const updatedAt = textOr(rawDocument.updatedAt, now);
@@ -194,7 +196,7 @@ export const migrateWorkspace = (rawWorkspace) => {
   if (!isRecord(rawWorkspace) || !Array.isArray(rawWorkspace.documents)) {
     throw new Error("导入文件不是有效工作区");
   }
-  if (rawWorkspace.version !== undefined && rawWorkspace.version !== CURRENT_WORKSPACE_VERSION) throw new Error("工作区版本暂不支持，原文件已保留");
+  if (rawWorkspace.version !== undefined && rawWorkspace.version !== 1 && rawWorkspace.version !== CURRENT_WORKSPACE_VERSION) throw new Error("工作区版本暂不支持，原文件已保留");
 
   const usedIds = new Set();
   const documents = rawWorkspace.documents.map((document, index) => {
@@ -215,7 +217,7 @@ export const migrateWorkspace = (rawWorkspace) => {
 
   const workspace = {
     ...rawWorkspace,
-    version: CURRENT_WORKSPACE_VERSION,
+    version: rawWorkspace.version === 2 ? 2 : 1,
     activeDocumentId,
     documents,
   };
@@ -259,6 +261,7 @@ export const migrateWorkspace = (rawWorkspace) => {
   } else {
     delete workspace.trash;
   }
+  if (workspaceFormatVersion(workspace) !== workspace.version) throw new Error("附件数据需要 version 2 工作区，原文件已保留");
   return workspace;
 };
 
@@ -1823,6 +1826,8 @@ const fieldsForNode = (entry) => ({
   icon: entry.node.icon,
   imageName: entry.node.imageName,
   imageAlt: entry.node.imageAlt,
+  attachmentRefs: entry.node.attachmentRefs,
+  attachmentAvailability: entry.node.attachmentRefs?.length ? "unknown" : undefined,
   table: entry.node.table,
   codeBlock: entry.node.codeBlock,
   codeLanguage: entry.node.codeLanguage,
@@ -1912,6 +1917,8 @@ const compactDocument = (snapshot, document, maxDepth = 6) => {
     createdAt: document.createdAt,
     updatedAt: document.updatedAt,
     markdownUpdatedAt: document.markdownUpdatedAt,
+    attachments: document.attachments,
+    attachmentAvailability: document.attachments ? "unknown" : undefined,
     nodeCount,
     topLevelNodeCount: document.nodes.length,
     maxDepth: boundedDepth,

@@ -354,6 +354,10 @@ Electron 本地版复用 Web 前端的同步界面。打包后的 Electron 渲�
 
 ## 后续演进
 
+1.7.0 开发版在 manifest 返回 `capabilities: ["attachments-v1"]`。含附件文档的 PUT 请求同时声明相同能力。服务在事务内检查新文档及已存文档，旧客户端创建或覆盖附件文档时返回 `426 client_upgrade_required`，继续执行原有 revision CAS。
+
+先升级服务端再使用附件文档同步。附件清单和引用随文档传输，二进制原文件通过工作区 ZIP 迁移或补齐。客户端连接尚未提供能力保护的旧服务时，会在上传附件文档前停止并提示升级。
+
 1.6.1 为 JSON 请求返回结构化 `413 payload_too_large`，响应含 `maxBytes`；客户端应调整文档大小或服务端限制后再重试。`maxBodyBytes` 必须为数值整数，最高 64 MiB，默认 10 MiB。数据库争写超过有界等待后返回 `503 database_busy` 和 `Retry-After: 1`，revision CAS 仍然生效。
 
 `GET /api/documents/:id/operations?after=0&limit=100` 每页最多 500 条、最多约 2 MiB；默认 100 条。读取端必须在 `hasMore` 为 true 时用返回的 `nextAfter` 继续请求，不能把单页视为完整日志。现阶段 tombstone 和 operations 不物理清理，长期部署需要监控数据库磁盘增长。

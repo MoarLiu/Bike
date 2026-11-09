@@ -3,6 +3,7 @@ const uid = () => createId("node");
 const createNode = (text = "") => ({ id: uid(), text, note: "", checked: false, collapsed: false, color: "plain", children: [] });
 import { codeMask, createId, scanLinks } from "./bike-knowledge.mjs";
 import { assertTextBudget, assertTreeBudget, MAX_DOCUMENT_NODES } from "./bike-limits.mjs";
+import { isPreviewableImage } from "./bike-attachments.mjs";
 export const DEFAULT_DOCUMENT_TITLE = "未命名文档";
 export const DEFAULT_NODE_TEXT = "未命名主题";
 const nodeChildren = (node) => Array.isArray(node.children) ? node.children : [];
@@ -158,7 +159,12 @@ const tableToMarkdown = (table, indent = "") => {
     const separator = `${indent}| ${Array.from({ length: columnCount }, () => "---").join(" | ")} |`;
     return [cells[0], separator, ...cells.slice(1)];
 };
-const nodeToMarkdown = (node, listDepth, insideList) => {
+const attachmentMarkdown = (node, items, indent = "") => (node.attachmentRefs ?? []).map((ref) => {
+    const marker = isPreviewableImage(items[ref.assetId]) ? "!" : "";
+    const label = markdownInlineForExport(marker ? ref.alt || ref.name : ref.name);
+    return `${indent}${marker}[${label}](bike-attachment:${ref.assetId})`;
+});
+const nodeToMarkdown = (node, listDepth, insideList, attachmentItems) => {
     const lines = [];
     const text = markdownInlineForExport(node.text);
     const headingLevel = node.headingLevel ?? 0;
@@ -170,6 +176,7 @@ const nodeToMarkdown = (node, listDepth, insideList) => {
         if (node.imageName) {
             lines.push(`![${markdownInlineForExport(node.imageAlt || node.imageName)}](${node.imageName})`);
         }
+        lines.push(...attachmentMarkdown(node, attachmentItems));
         if (node.table)
             lines.push(...tableToMarkdown(node.table));
         if (typeof node.codeBlock === "string") {
@@ -186,6 +193,7 @@ const nodeToMarkdown = (node, listDepth, insideList) => {
     if (node.imageName) {
         lines.push(`${childIndent}![${markdownInlineForExport(node.imageAlt || node.imageName)}](${node.imageName})`);
     }
+    lines.push(...attachmentMarkdown(node, attachmentItems, childIndent));
     if (node.table)
         lines.push(...tableToMarkdown(node.table, childIndent));
     if (typeof node.codeBlock === "string") {
@@ -202,7 +210,7 @@ export const documentToMarkdown = (document) => {
     const stack = document.nodes.map((node) => ({ node, depth: 0, inside: false })).reverse();
     while (stack.length) {
         const { node, depth, inside } = stack.pop();
-        const rendered = nodeToMarkdown(node, depth, inside);
+        const rendered = nodeToMarkdown(node, depth, inside, document.attachments?.items ?? {});
         body.push(...rendered.lines);
         const children = nodeChildren(node);
         for (let i = children.length - 1; i >= 0; i--) stack.push({ node: children[i], depth: rendered.childDepth, inside: rendered.childInside });
@@ -247,6 +255,7 @@ const listItemMatch = (line) => {
 };
 const quoteLineMatch = (line) => line.match(/^([ \t]*)>\s?(.*)$/);
 const imageBlockMatch = (line) => line.match(/^([ \t]*)!\[([^\]]*)\]\(([^)]+)\)\s*$/);
+const managedAttachmentMatch = (line) => line.match(/^[ \t]*(!?)\[((?:\\.|[^\]\\])*)\]\(bike-attachment:(sha256:[a-f0-9]{64})\)\s*$/u);
 const tableDelimiterLine = (line) => {
     const cells = splitTableRow(line);
     return cells.length > 0 && cells.every((cell) => /^:?-{3,}:?$/.test(cell));
@@ -295,6 +304,7 @@ const nextSpecialBlock = (lines, index) => {
         listItemMatch(line) ||
         quoteLineMatch(line) ||
         imageBlockMatch(line) ||
+        managedAttachmentMatch(line) ||
         isTableStart(lines, index) ||
         /^\s{0,3}(```|~~~)/.test(line));
 };
@@ -483,6 +493,22 @@ const parseMarkdown = (content, previousDocument) => {
             index = table.nextIndex;
             continue;
         }
+        const managed = managedAttachmentMatch(line);
+        if (managed && previousDocument?.attachments?.items?.[managed[3]]) {
+            const label = unescapeMarkdownInline(managed[2]);
+            if (!lastNode) attachOrCreateBlock(label || "附件", "");
+            lastNode.attachmentRefs = [...(lastNode.attachmentRefs ?? []), {
+                assetId: managed[3], name: label || "附件",
+                ...(managed[1] ? { alt: label } : {}),
+            }];
+            index += 1;
+            continue;
+        }
+        if (managed && !managed[1]) {
+            attachOrCreateBlock(unescapeMarkdownInline(line.trim()), "");
+            index += 1;
+            continue;
+        }
         const image = imageBlockMatch(line);
         if (image) {
             const alt = unescapeMarkdownInline(image[2].trim());
@@ -651,8 +677,19 @@ const reuseMarkdownNodeIds = (previous, parsed, content) => {
     };
     visit(previous.nodes, parsed);
     for (const [node, old] of matches) {
+        const previousRefs = new Map();
+        for (const ref of old.attachmentRefs ?? []) {
+            const group = previousRefs.get(ref.assetId) ?? [];
+            group.push(ref);
+            previousRefs.set(ref.assetId, group);
+        }
+        const attachmentRefs = node.attachmentRefs?.map((ref) => {
+            const previous = previousRefs.get(ref.assetId)?.shift();
+            return previous ? { ...previous, ...ref, ...(ref.alt !== undefined ? { name: previous.name } : {}) } : ref;
+        });
         Object.assign(node, { ...old, ...node, id: old.id, collapsed: old.collapsed, color: old.color,
             bold: old.bold, italic: old.italic, underline: old.underline, strike: old.strike, highlight: old.highlight, icon: old.icon });
+        if (old.attachmentRefs || attachmentRefs) node.attachmentRefs = attachmentRefs ?? [];
     }
 };
 export const parseMarkdownToNodes = (content, previousDocument) => {

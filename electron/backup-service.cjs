@@ -53,6 +53,7 @@ const createBackupService = ({
   requireSavedSources = false,
   readPending = async () => null,
   writePending = async () => {},
+  prepareAssets = async () => {},
 }) => {
   let settings = defaultSettings();
   let pending = null;
@@ -217,6 +218,7 @@ const createBackupService = ({
           await persist();
           return finish({ ok: false, code: "external-change", revision: existingHash, ticket: job.ticket });
         }
+        await prepareAssets(job.workspace, directory, nextHash);
         if (existingHash === nextHash) {
           if (job.resolutionEpoch !== resolutionEpoch) return finish({ ok: false, code: "stale-source", ticket: job.ticket });
           settings.baselineHash = nextHash;
@@ -408,6 +410,7 @@ const createBackupService = ({
         await persist();
         return finish({ ok: false, code: "external-change", revision: existingHash, ticket });
       }
+      await prepareAssets(migrated, directory, nextHash);
       if (existing != null) {
         const stamp = new Date(now()).toISOString().replace(/[:.]/g, "-");
         await writeAtomic(path.join(directory, `${stampedPrefix}external-${stamp}.json`), existing);

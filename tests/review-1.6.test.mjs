@@ -8,6 +8,7 @@ import path from "node:path";
 import vm from "node:vm";
 import ts from "typescript";
 import * as k from "../shared/bike-knowledge.mjs";
+import * as attachments from "../shared/bike-attachments.mjs";
 import { loadAppCallback, loadTypescript, projectRoot } from "./helpers/typescript.mjs";
 import { createBackupService } from "../electron/backup-service.cjs";
 import { WorkspaceStore, setNodeCheckedForMcp } from "../mcp/bike-core.mjs";
@@ -238,7 +239,9 @@ function topLevel(name, bindings, filename = "src/App.tsx") {
 
 function fixture(value) {
   const notices = [];
-  const b = { ...k, ...tree, ...md, ...history, ...migrations, ...ids,
+  const b = { ...k, ...tree, ...md, ...history, ...migrations, ...ids, ...attachments,
+    cleanupBusyRef: { current: false },
+    updateInstallRef: { current: null },
     ...loadTypescript("src/documentSignature.ts"),
     assertTreeBudget: () => {},
     ready: true, backupStatus: { auto: true }, backupLocalPauseRef: { current: null },

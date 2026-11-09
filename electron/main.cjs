@@ -1,6 +1,8 @@
-const { app, BrowserWindow, dialog, ipcMain, Menu, shell, session } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain, Menu, shell, session, nativeImage } = require("electron");
+const { installAttachmentIpc } = require("./attachment-ipc.cjs");
+const { createAttachmentService } = require("./attachment-service.cjs");
 const { verifySavedBackupSource } = require("./backup-source.cjs");
-const { isTrustedIpcSender, configuredNetworkRequest, safeReleaseUrl } = require("./ipc-guard.cjs");
+const { isTrustedIpcSender, configuredNetworkRequest } = require("./ipc-guard.cjs");
 const { requestJson } = require("./network-proxy.cjs");
 const crypto = require("node:crypto");
 const fs = require("node:fs/promises");
@@ -13,8 +15,8 @@ const {
 } = require("./workspace-lock.cjs");
 const {
   DEFAULT_RELEASES_PAGE_URL,
-  fetchLatestRelease,
 } = require("./update-checker.cjs");
+const { createUpdateController, requestInstallPreparation } = require("./app-updater.cjs");
 const { resolveDevServer } = require("./dev-server.cjs");
 const { editCommandForInput } = require("./edit-shortcuts.cjs");
 const { createBackupService, MESSAGES: backupMessages } = require("./backup-service.cjs");
@@ -120,6 +122,13 @@ const backupService = () => {
       }),
       writeSettings: (value) => writeFileAtomically(path.join(app.getPath("userData"), "backup-settings.json"), value),
       migrate: migrateWorkspacePayload,
+      prepareAssets: async (workspace, directory, revision) => {
+        if (workspace.version !== 2) return;
+        const assets = await attachmentIpc.library().copyWorkspaceAssets(workspace, path.join(directory, "attachments"));
+        const manifestDirectory = path.join(directory, "attachment-manifests");
+        await fs.mkdir(manifestDirectory, { recursive: true, mode: 0o700 });
+        await writeFileAtomically(path.join(manifestDirectory, `${revision}.json`), JSON.stringify({ version: 1, revision, assets }));
+      },
       verifySavedSource: async (receipt) => {
         const origin = mainWindow;
         const valid = await verifySavedBackupSource({ ...receipt, window: origin, migrate: migrateWorkspacePayload, hash: hashContent });
@@ -231,68 +240,65 @@ const openApiConfig = () => {
   focusedAppWindow()?.webContents.send("open-api-config");
 };
 
-const checkForUpdates = async () => {
-  const currentVersion = app.getVersion();
-  try {
-    const result = await fetchLatestRelease({ currentVersion });
-    return { ...result, releaseUrl: safeReleaseUrl(result.releaseUrl) };
-  } catch (error) {
-    return {
-      ok: false,
-      currentVersion,
-      latestVersion: "",
-      updateAvailable: false,
-      releaseUrl: DEFAULT_RELEASES_PAGE_URL,
-      error: error instanceof Error ? error.message : String(error),
-    };
-  }
+let updateController;
+let updateFlow;
+const updates = () => {
+  if (updateController) return updateController;
+  const { autoUpdater } = require("electron-updater");
+  autoUpdater.logger = null;
+  updateController = createUpdateController({
+    updater: autoUpdater,
+    currentVersion: app.getVersion(),
+    supported: app.isPackaged && process.platform === "darwin",
+    onState: (state) => {
+      if (mainWindow && !mainWindow.webContents.isDestroyed()) mainWindow.webContents.send("update-state", state);
+    },
+    prepareInstall: () => requestInstallPreparation({
+      ipcMain, window: mainWindow,
+      isTrusted: (event, window) => isTrustedIpcSender(event, window, isAllowedAppUrl),
+    }),
+  });
+  return updateController;
 };
-
 const showMessageBox = (window, options) =>
   window ? dialog.showMessageBox(window, options) : dialog.showMessageBox(options);
-
-const showUpdateDialog = async () => {
-  const result = await checkForUpdates();
-  const window = focusedAppWindow();
-  if (!result.ok) {
-    await showMessageBox(window, {
-      type: "warning",
-      buttons: ["好", "打开发布页"],
-      defaultId: 0,
-      cancelId: 0,
-      title: "检查更新",
-      message: "检查更新失败",
-      detail: `${result.error}\n\n当前版本：${result.currentVersion}`,
-    }).then(({ response }) => {
-      if (response === 1) shell.openExternal(result.releaseUrl || DEFAULT_RELEASES_PAGE_URL);
+const runUpdateDialog = async () => {
+  const service = updates();
+  let state = await service.check();
+  const reportError = async () => {
+    await showMessageBox(focusedAppWindow(), { type: "warning", buttons: ["好"], title: "应用更新", message: state.error || "更新未完成，请稍后重试" });
+  };
+  if (["error", "unsupported"].includes(state.status)) {
+    await reportError();
+  } else if (state.status === "not-available") {
+    await showMessageBox(focusedAppWindow(), { type: "info", buttons: ["好"], title: "检查更新", message: "已是最新版本", detail: `当前版本 ${state.currentVersion}` });
+  } else if (state.status === "available") {
+    const choice = await showMessageBox(focusedAppWindow(), {
+      type: "info", buttons: ["下载更新", "稍后"], defaultId: 0, cancelId: 1,
+      title: "应用更新", message: `发现新版本 ${state.latestVersion}`,
+      detail: `当前版本 ${state.currentVersion}\n更新将在应用内下载，完成后可选择重启安装。`,
     });
-    return result;
+    if (choice.response === 0) {
+      state = await service.download();
+      if (state.error) await reportError();
+    }
   }
-
-  if (!result.updateAvailable) {
-    await showMessageBox(window, {
-      type: "info",
-      buttons: ["好"],
-      defaultId: 0,
-      title: "检查更新",
-      message: "已是最新版本",
-      detail: `当前版本：${result.currentVersion}`,
+  if (state.status === "downloaded") {
+    const choice = await showMessageBox(focusedAppWindow(), {
+      type: "info", buttons: ["重启并安装", "稍后"], defaultId: 0, cancelId: 1,
+      title: "应用更新", message: `更新 ${state.latestVersion} 已下载`, detail: "重启前会保存当前工作区。",
     });
-    return result;
+    if (choice.response === 0) {
+      state = await service.install();
+      if (state.error) await reportError();
+    }
   }
-
-  await showMessageBox(window, {
-    type: "info",
-    buttons: ["打开发布页", "稍后"],
-    defaultId: 0,
-    cancelId: 1,
-    title: "检查更新",
-    message: `发现新版本 ${result.latestVersion}`,
-    detail: `当前版本：${result.currentVersion}\n最新版本：${result.latestVersion}\n${result.releaseName ? `\n${result.releaseName}` : ""}`,
-  }).then(({ response }) => {
-    if (response === 0) shell.openExternal(result.releaseUrl || DEFAULT_RELEASES_PAGE_URL);
-  });
-  return result;
+  return { ...state, ok: !state.error };
+};
+const showUpdateDialog = () => {
+  updateFlow ??= runUpdateDialog().catch(() => ({ ok: false, status: "error", currentVersion: app.getVersion(), error: "更新未完成，请稍后重试" }))
+    .finally(() => { updateFlow = undefined; });
+  return updateFlow;
 };
 
 const installApplicationMenu = () => {
@@ -525,6 +531,7 @@ const registerIpc = (channel, handler) => ipcMain.handle(channel, async (event, 
   if (!isTrustedIpcSender(event, mainWindow, isAllowedAppUrl)) return { ok: false, status: 403, code: "untrusted-sender", error: "请求来源无效，请重新打开 Bike" };
   return handler(event, payload);
 });
+const attachmentIpc = installAttachmentIpc({ registerIpc, app, dialog, nativeImage, shell, getWindow: () => mainWindow, migrate: migrateWorkspacePayload });
 const savedNetworkConfig = async (kind) => {
   const { AI_CONFIG_KEY, LEGACY_AI_CONFIG_KEY } = await import("../shared/bike-settings.mjs");
   const script = kind === "sync" ? 'JSON.parse(localStorage.getItem("bike-sync-config") || "null")'
@@ -638,7 +645,12 @@ registerIpc("load-icloud-backup", async () => {
       .then(() => currentPath)
       .catch(() => legacyPath);
     const raw = await fs.readFile(latestPath, "utf8");
-    return { ok: true, payload: JSON.parse(raw), path: latestPath, revision: hashContent(raw) };
+    const payload = await migrateWorkspacePayload(JSON.parse(raw));
+    if (payload.version === 2) {
+      const cloudAssets = createAttachmentService({ directory: path.join(path.dirname(latestPath), "attachments") });
+      await cloudAssets.copyWorkspaceAssets(payload, path.join(app.getPath("userData"), "attachments"));
+    }
+    return { ok: true, payload, path: latestPath, revision: hashContent(raw) };
   } catch (error) {
     return {
       ok: false,
@@ -647,7 +659,7 @@ registerIpc("load-icloud-backup", async () => {
   }
 });
 
-registerIpc("check-for-updates", async () => checkForUpdates());
+registerIpc("check-for-updates", async () => showUpdateDialog());
 
 registerIpc("invoke-sync-request", async (_event, payload) => {
   const deadline = Date.now() + 60_000;

@@ -26,6 +26,19 @@ const edit = (base, text, updatedAt = new Date().toISOString()) => ({
 });
 const textOf = (value) => value.documents[0].nodes[0].text;
 
+test("v1 to v2 save atomically retains the pre-attachment workspace", async (t) => {
+  const b = browser(t);
+  b.seedDb(workspace("before attachments"), { savedAt: OLD, revision: 1 });
+  const tab = b.tab();
+  const base = await tab.loadWorkspace();
+  const next = { ...base.workspace, version: 2 };
+  assert.deepEqual(await tab.saveWorkspace(next), { ok: true, target: "indexeddb" });
+  assert.deepEqual(await tab.loadPreAttachmentWorkspace(), base.workspace);
+  assert.equal(b.stored().version, 2);
+  assert.equal(b.storedMeta().revision, 2);
+  await b.done();
+});
+
 // Each tab is an independent instance of src/storage.ts over shared fakes.
 function browser(t, options) {
   const env = installFakeBrowserStorage(t, options);

@@ -47,6 +47,6 @@ test("deep and wide documents are rejected without discarding the other document
   assert.equal(original.documents[0].nodes[0].id, "safe");
   const wide = [{ ...topic("wide"), children: Array.from({ length: 200_000 }, (_, i) => topic(`wide-${i}`)) }];
   assert.throws(() => assertTreeBudget(wide), /主题数/);
-  assert.throws(() => migrateWorkspace({ ...original, version: 2 }), /版本.*不支持/);
+  assert.throws(() => migrateWorkspace({ ...original, version: 3 }), /版本.*不支持/);
   assert.throws(() => migrateWorkspace({ ...original, documents: [...original.documents, null] }), /第 2 个文档/);
 });

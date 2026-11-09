@@ -40,6 +40,20 @@ try {
   if (!home.ok || !(await home.text()).includes('id="root"')) throw new Error('built web app unavailable');
   const put = await fetch(`http://127.0.0.1:${p}/api/documents/candidate`, { method: 'PUT', headers: { Authorization: 'Bearer fixture-device', 'Content-Type': 'application/json' }, body: JSON.stringify({ expectedRevision: null, document: { id: 'candidate', title: 'Candidate', nodes: [] } }) });
   if (!put.ok) throw new Error('candidate upload failed: ' + await put.text());
+  const manifest = await fetch(`http://127.0.0.1:${p}/api/sync/manifest`, { headers: { Authorization: 'Bearer fixture-device' } });
+  if (!(await manifest.json()).capabilities?.includes('attachments-v1')) throw new Error('attachment capability is unavailable');
+  const assetId = `sha256:${'a'.repeat(64)}`;
+  const attached = {
+    id: 'candidate-attached', title: 'Attached',
+    nodes: [{ id: 'attached-node', text: 'File', children: [], attachmentRefs: [{ assetId, name: 'fixture.txt' }] }],
+    attachments: { version: 1, items: { [assetId]: { mediaType: 'application/octet-stream', byteLength: 1 } } },
+  };
+  const attachmentUrl = `http://127.0.0.1:${p}/api/documents/${attached.id}`;
+  const attachmentHeaders = { Authorization: 'Bearer fixture-device', 'Content-Type': 'application/json' };
+  const attachmentPut = await fetch(attachmentUrl, { method: 'PUT', headers: attachmentHeaders, body: JSON.stringify({ expectedRevision: null, document: attached, capabilities: ['attachments-v1'] }) });
+  if (!attachmentPut.ok) throw new Error('attachment metadata upload failed');
+  const legacyPut = await fetch(attachmentUrl, { method: 'PUT', headers: attachmentHeaders, body: JSON.stringify({ expectedRevision: 1, document: { id: attached.id, title: 'Old client', nodes: [] } }) });
+  if (legacyPut.status !== 426) throw new Error('old-client overwrite was not rejected');
   await stop();
   // Re-extract the deployment archive over an existing installation. Preserve
   // real data/config, then prove revision CAS still sees the previous database.
@@ -48,9 +62,12 @@ try {
   const read = await fetch(`http://127.0.0.1:${p}/api/documents/candidate`, { headers: { Authorization: 'Bearer fixture-device' } });
   const body = await read.json();
   if (body.revision !== 1 || body.document.title !== 'Candidate') throw new Error('upgrade lost existing data');
+  const attachmentRead = await fetch(attachmentUrl, { headers: { Authorization: 'Bearer fixture-device' } });
+  const attachmentBody = await attachmentRead.json();
+  if (attachmentBody.revision !== 1 || attachmentBody.document.nodes[0].attachmentRefs[0].assetId !== assetId) throw new Error('upgrade or old-client write lost attachment metadata');
   await stop();
   const modes = {};
   for (const file of ['config/candidate.json', 'data/candidate.sqlite']) modes[file] = (await fs.stat(path.join(directory, file))).mode & 0o777;
   if (Object.values(modes).some((mode) => mode !== 0o600)) throw new Error('private file modes changed');
-  console.log(JSON.stringify({ runtime: process.version, platform: process.platform, checks: ['clean archive extraction', 'production dependency install', 'MCP entry, shared file-lock dependency and stdio smoke', 'real login Secure cookie', 'built Web page', 'Sync upload', 'archive upgrade and restart preserves revision and content', 'private config/database permissions'], modes }, null, 2));
+  console.log(JSON.stringify({ runtime: process.version, platform: process.platform, checks: ['clean archive extraction', 'production dependency install', 'MCP entry, shared file-lock dependency and stdio smoke', 'real login Secure cookie', 'built Web page', 'Sync upload', 'attachment capability and HTTP 426 for old-client overwrite', 'archive upgrade and restart preserves revision, content and attachment metadata', 'private config/database permissions'], modes }, null, 2));
 } finally { if (child) { child.kill('SIGTERM'); await new Promise((resolve) => child.once('exit', resolve)); } await fs.rm(directory, { recursive: true, force: true }); }

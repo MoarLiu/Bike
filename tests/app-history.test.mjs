@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { loadAppCallback, loadTypescript } from "./helpers/typescript.mjs";
+import * as attachments from "../shared/bike-attachments.mjs";
 
 const editHistory = loadTypescript("src/editHistory.ts");
 const signatures = loadTypescript("src/documentSignature.ts");
@@ -24,8 +25,11 @@ function fixture() {
     ...knowledge,
     ...editHistory,
     ...signatures,
+    ...attachments,
     assertTreeBudget: () => {},
     workspaceRef: { current: workspace },
+    cleanupBusyRef: { current: false },
+    updateInstallRef: { current: null },
     backupLocalPauseRef: { current: null },
     backupScheduleRef: { current: knowledge.createBackupSchedule() },
     backupPayloadsRef: { current: new Map() },

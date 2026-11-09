@@ -76,6 +76,19 @@ export async function verifyBrowser() {
     assert.equal(formats.note, 'line 1\nline 2\t末尾'); assert.deepEqual(formats.table, [['', 'A|B'], ['C', '']]);
     assert.equal(formats.code, '<code>中文</code>'); assert.deepEqual(formats.exactNodes, formats.originalNodes); assert.deepEqual(formats.extension, { keep: true }); assert.equal(formats.freemindText, 'Topic'); assert.equal(formats.freemindLoss, true);
     results.push('real DOMParser OPML and FreeMind roundtrip, metadata Markdown exact tree and extension roundtrip');
+    const interopSamples = await Promise.all(['opml', 'md'].map(async (extension) => ({ extension, content: await fs.readFile(path.join(root, 'tests/fixtures', `outline-interop.${extension}`), 'utf8') })));
+    const importedSamples = await page.evaluate(async (samples) => {
+      const { importDocument } = await import('/src/exporters.ts');
+      return samples.map(({ content, extension }) => {
+        const document = importDocument(content, `sample.${extension}`);
+        return { title: document.title, roots: document.nodes.length, note: document.nodes[0].note, checked: document.nodes[0].children[0].checked, url: document.nodes[0].children[1].text };
+      });
+    }, interopSamples);
+    for (const sample of importedSamples) {
+      assert.equal(sample.title, '导入兼容样本 😀'); assert.equal(sample.roots, 2);
+      assert.equal(sample.note, '第一行\n第二行'); assert.equal(sample.checked, true); assert.equal(sample.url, 'https://example.com/阅读');
+    }
+    results.push('handwritten OPML and Markdown interchange fixtures preserve nested outlines, multiline notes, tasks, URLs and Unicode');
 
     const calls = [];
     await page.route('**/api/**', async (route) => {
@@ -132,8 +145,8 @@ export async function verifyElectron() {
     page.on('dialog', (dialog) => dialog.accept());
     await importSample(page);
     await save(page);
-    const info = await app.evaluate(({ app, BrowserWindow, Menu }) => ({ versions: process.versions, version: app.getVersion(), size: BrowserWindow.getAllWindows()[0].getSize(), menuRoles: Menu.getApplicationMenu().items.flatMap((item) => item.submenu?.items.map((entry) => entry.role) ?? []) }));
-    assert.equal(info.version, '1.6.1');
+    const info = await app.evaluate(({ app, BrowserWindow, Menu }) => ({ versions: process.versions, version: app.getVersion(), arch: process.arch, runningUnderARM64Translation: app.runningUnderARM64Translation, size: BrowserWindow.getAllWindows()[0].getSize(), menuRoles: Menu.getApplicationMenu().items.flatMap((item) => item.submenu?.items.map((entry) => entry.role) ?? []) }));
+    assert.equal(info.version, JSON.parse(await fs.readFile(path.join(root, 'package.json'), 'utf8')).version);
     assert.ok(!info.menuRoles.includes('reload') && !info.menuRoles.includes('toggledevtools'));
     const blocked = await page.evaluate(async () => {
       window.__cspProbe = false;

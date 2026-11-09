@@ -1,4 +1,5 @@
 export type ViewMode = "outline" | "mindmap" | "presentation" | "markdown";
+import type { AttachmentRef, DocumentAttachments } from "../shared/bike-attachments.mjs";
 
 export interface OutlineNode {
   id: string;
@@ -16,6 +17,7 @@ export interface OutlineNode {
   icon?: string;
   imageName?: string;
   imageAlt?: string;
+  attachmentRefs?: AttachmentRef[];
   table?: string[][];
   codeBlock?: string;
   codeLanguage?: string;
@@ -31,6 +33,7 @@ export interface OutlineDocument {
   markdownSource?: string;
   markdownUpdatedAt?: string;
   isShortcut?: boolean;
+  attachments?: DocumentAttachments;
   knowledge?: {
     version: number;
     references?: unknown[];
@@ -48,7 +51,7 @@ export interface TrashEntry {
 }
 
 export interface Workspace {
-  version: 1;
+  version: 1 | 2;
   activeDocumentId: string;
   documents: OutlineDocument[];
   trash?: TrashEntry[];

@@ -1,6 +1,7 @@
 import { mkdir, chmod, open } from "node:fs/promises";
 import path from "node:path";
 import { assertDocumentBudget, assertValueBudget } from "../shared/bike-limits.mjs";
+import { validateDocumentAttachments } from "../shared/bike-attachments.mjs";
 
 const singletonWorkspaceId = "default";
 let DatabaseSync;
@@ -31,6 +32,9 @@ export class SyncValidationError extends Error {
 }
 export class SyncPayloadTooLargeError extends Error {
   constructor(maxBytes) { super(`请求体超过 ${Math.floor(maxBytes / 1024 / 1024)} MiB 上限`); this.name = "SyncPayloadTooLargeError"; this.statusCode = 413; this.maxBytes = maxBytes; }
+}
+export class SyncCapabilityError extends SyncValidationError {
+  constructor() { super("此文档包含附件，请升级客户端后再写入"); this.statusCode = 426; }
 }
 export class SyncBusyError extends Error {
   constructor() { super("同步数据库暂时被占用，请稍后重试"); this.name = "SyncBusyError"; this.statusCode = 503; }
@@ -74,7 +78,7 @@ const validateDocument = (id, document) => {
   if (!Array.isArray(document.nodes)) {
     throw new SyncValidationError("document.nodes must be an array");
   }
-  try { assertDocumentBudget(document); } catch (error) { throw new SyncValidationError(error.message); }
+  try { assertDocumentBudget(document); validateDocumentAttachments(document); } catch (error) { throw new SyncValidationError(error.message); }
   return document;
 };
 
@@ -294,6 +298,7 @@ export const createSyncStore = async (databasePath, { busyTimeoutMs = 1500 } = {
       activeDocumentId: normalized.activeDocumentId,
       documentOrder: normalized.documentOrder,
       documents,
+      capabilities: ["attachments-v1"],
     };
   };
 
@@ -309,10 +314,15 @@ export const createSyncStore = async (databasePath, { busyTimeoutMs = 1500 } = {
     };
   };
 
-  const putDocument = ({ id, expectedRevision, document }) => transaction(() => {
+  const putDocument = ({ id, expectedRevision, document, capabilities = [] }) => transaction(() => {
     const safeExpectedRevision = normalizeExpectedRevision(expectedRevision);
     const safeDocument = validateDocument(id, document);
     const existing = db.prepare("SELECT * FROM documents WHERE id = ?").get(id);
+    const previous = existing ? parseJson(existing.document_json, null) : null;
+    if ((safeDocument.attachments || previous?.attachments) &&
+        (!Array.isArray(capabilities) || !capabilities.includes("attachments-v1"))) {
+      throw new SyncCapabilityError();
+    }
     const stampedAt = typeof safeDocument.updatedAt === "string" && safeDocument.updatedAt
       ? safeDocument.updatedAt
       : now();

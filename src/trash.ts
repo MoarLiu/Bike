@@ -2,6 +2,7 @@ import type { OutlineDocument, TrashEntry, Workspace } from "./types";
 import { uuid } from "./id";
 import { flattenNodes } from "./tree";
 import { remapCollidingIds, knowledgeEditable } from "./knowledge";
+import { workspaceFormatVersion } from "../shared/bike-attachments.mjs";
 
 export const TRASH_LIMIT = 100;
 export const TRASH_TTL_MS = 30 * 24 * 60 * 60 * 1000;
@@ -109,14 +110,9 @@ export const retainLocalTrash = (before: Workspace, after: Workspace): Workspace
     }],
   );
   if (!removed.length && before.trash === undefined) return after;
-  if (!removed.length) {
-    const retained = pruneTrash(before.trash);
-    if (retained.length === before.trash?.length) {
-      return after.trash === before.trash ? after : { ...after, trash: before.trash };
-    }
-  }
-  return {
-    ...after,
-    trash: pruneTrash([...removed, ...(before.trash ?? [])]).slice(0, TRASH_LIMIT),
-  };
+  const pruned = pruneTrash([...removed, ...(before.trash ?? [])]).slice(0, TRASH_LIMIT);
+  const trash = !removed.length && pruned.length === before.trash?.length ? before.trash : pruned;
+  const retained = after.trash === trash ? after : { ...after, trash };
+  const version = workspaceFormatVersion(retained);
+  return retained.version === version ? retained : { ...retained, version };
 };

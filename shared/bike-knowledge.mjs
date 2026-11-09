@@ -1,5 +1,6 @@
 // Shared by the Electron renderer, tests, and MCP. No DOM and no app imports.
 import { markdownLinkOrigins, markdownTextForExport, rewriteMarkdownLabel } from "./bike-markdown.mjs";
+import { validateDocumentAttachments } from "./bike-attachments.mjs";
 
 export const KNOWLEDGE_VERSION = 1;
 export const MAX_METADATA_BYTES = 2 * 1024 * 1024;
@@ -1690,7 +1691,7 @@ export const readBikeMetadata = (markdown) => {
   const matches = [...source.matchAll(METADATA_PATTERN)].filter(standalone);
   if (envelope && (!matches.length || matches[0].index < envelope.start || matches[0].index >= envelope.end)) return { status: "invalid", error: "Bike 元数据字段无效" };
   if (!loose.length && !matches.length) return { status: "absent", body: source };
-  if (matches.length === 1 && matches[0][1] !== String(KNOWLEDGE_VERSION)) {
+  if (matches.length === 1 && !["1", "2"].includes(matches[0][1])) {
     return { status: "unknown-version", version: Number(matches[0][1]) };
   }
   if (loose.length !== 1 || matches.length !== 1) {
@@ -1712,7 +1713,7 @@ export const readBikeMetadata = (markdown) => {
   } catch {
     return { status: "invalid", error: "Bike 元数据不是有效 JSON" };
   }
-  if (!isRecord(payload) || payload.v !== 1 || typeof payload.documentId !== "string" || !Array.isArray(payload.nodes) || typeof payload.digest !== "string") {
+  if (!isRecord(payload) || payload.v !== Number(match[1]) || typeof payload.documentId !== "string" || !Array.isArray(payload.nodes) || typeof payload.digest !== "string") {
     return { status: "invalid", error: "Bike 元数据字段不完整" };
   }
   if (jsonDepth(payload) > 8) return { status: "invalid", error: "Bike 元数据嵌套过深" };
@@ -1747,10 +1748,12 @@ const flattenIdentity = (nodes) => {
 };
 
 export const encodeBikeMetadata = (document, body) => {
+  validateDocumentAttachments(document);
+  const metadataVersion = document.attachments ? 2 : 1;
   if (document.knowledge && !knowledgeEditable(document.knowledge)) throw new Error("当前版本无法无损导出这份知识数据，请使用 JSON 导出保留原数据");
   const { id, title, nodes, knowledge, markdownSource, markdownUpdatedAt, updatedAt, ...documentAttributes } = document;
   const payload = {
-    v: KNOWLEDGE_VERSION,
+    v: metadataVersion,
     documentId: document.id,
     title: document.title,
     documentAttributes,
@@ -1773,7 +1776,7 @@ export const encodeBikeMetadata = (document, body) => {
     error.code = "too-large";
     throw error;
   }
-  return `<!-- bike:document:v1 ${bytesToBase64Url(encoded)} -->`;
+  return `<!-- bike:document:v${metadataVersion} ${bytesToBase64Url(encoded)} -->`;
 };
 
 const stripLossyTrailer = (body) => {

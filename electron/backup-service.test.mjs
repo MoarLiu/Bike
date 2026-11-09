@@ -125,7 +125,7 @@ test("backup queue writes W2 after W1 and rejects a stale ticket", async () => {
 });
 
 
-function memoryService() {
+function memoryService({ prepareAssets } = {}) {
   const files = new Map();
   let settings = "";
   let currentNow = 0;
@@ -156,6 +156,7 @@ function memoryService() {
     readSettings: async () => settings,
     writeSettings: async (value) => { settings = value; },
     migrate: async (workspace) => workspace,
+    prepareAssets,
     verifySavedSource: async ({ ownerId, sourceRevision, workspace }) => {
       const saved = savedSources.get(ownerId);
       return saved?.sourceRevision === sourceRevision && JSON.stringify(saved.workspace) === JSON.stringify(workspace);
@@ -172,6 +173,23 @@ function memoryService() {
   });
   return { service, files, timers, savedSources, setNow: (value) => { currentNow = value; } };
 }
+
+test("attachment preparation finishes before JSON commits and failure preserves the last complete backup", async () => {
+  let fail = false;
+  const prepared = [];
+  const { service, files } = memoryService({ prepareAssets: async (workspace) => {
+    prepared.push(workspace.id);
+    if (fail) throw new Error("missing attachment");
+  } });
+  const first = await service.enqueue({ workspace: { id: "complete" }, manual: true, ticket: 1, wait: true });
+  assert.equal(first.ok, true);
+  const original = files.get("/icloud/bike-workspace.json");
+  fail = true;
+  const failed = await service.enqueue({ workspace: { id: "incomplete" }, manual: true, ticket: 2, wait: true });
+  assert.equal(failed.ok, false);
+  assert.equal(files.get("/icloud/bike-workspace.json"), original);
+  assert.deepEqual(prepared, ["complete", "incomplete"]);
+});
 
 test("forged revisions and old-window baselines cannot cancel or raise the normal backup floor", async () => {
   const { service, files, savedSources } = memoryService();

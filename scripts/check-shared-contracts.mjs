@@ -18,6 +18,7 @@ try {
     'bike-knowledge': ['insertLinkAtQuery', 'buildKnowledgeIndex', 'searchKnowledge', 'suggestLinkTargets', 'renameTarget', 'copiedKnowledgeFragment', 'moveSubtreeConnections', 'remapCollidingIds', 'attachReference', 'finalizeMarkdownExport', 'expandAncestors', 'createBackupSchedule', 'reduceBackupSchedule'],
     'bike-markdown': ['markdownSourceMap', 'markdownTableCells', 'parseMarkdownToNodes', 'markdownLinkOrigins'],
     'bike-limits': ['assertTreeBudget', 'assertValueBudget'],
+    'bike-attachments': ['workspaceAttachmentAssets', 'workspaceFormatVersion', 'collectAttachmentRefs', 'validateAttachmentMetadata'],
   };
   for (const [module, names] of Object.entries(api)) {
     const raw = await fs.readFile(path.join(root, 'shared', module + '.d.mts'), 'utf8');

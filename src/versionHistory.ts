@@ -3,6 +3,7 @@ import { countNodes } from "./tree";
 import { documentSignature } from "./documentSignature";
 import { migrateDocument } from "./migrations";
 import { uuid } from "./id";
+import { workspaceAttachmentAssets } from "../shared/bike-attachments.mjs";
 
 export type SnapshotReason = "auto" | "manual" | "before-restore" | "sync";
 
@@ -74,6 +75,33 @@ const openDb = () =>
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error);
   });
+
+export const listHistoryAttachmentIds = async (): Promise<string[]> => {
+  const db = await openDb();
+  try {
+    return await new Promise((resolve, reject) => {
+      const ids = new Set<string>();
+      const tx = db.transaction(STORE_NAME, "readonly");
+      const cursor = tx.objectStore(STORE_NAME).openCursor();
+      let failure: unknown;
+      cursor.onsuccess = () => {
+        try {
+          const item = cursor.result;
+          if (!item) return;
+          if (typeof item.key !== "string" || !item.key.startsWith("document:")) throw new Error("历史记录键无效");
+          for (const snapshot of readSnapshots(item.value, item.key.slice(9))) {
+            for (const asset of workspaceAttachmentAssets({ documents: [snapshot.document] })) ids.add(asset.assetId);
+          }
+          if (ids.size > 100_000) throw new Error("历史附件保护清单超过扫描预算");
+          item.continue();
+        } catch (error) { failure = error; tx.abort(); }
+      };
+      tx.oncomplete = () => resolve([...ids]);
+      tx.onerror = () => reject(failure ?? tx.error);
+      tx.onabort = () => reject(failure ?? tx.error);
+    });
+  } finally { db.close(); }
+};
 
 export const createSnapshot = (
   document: OutlineDocument,

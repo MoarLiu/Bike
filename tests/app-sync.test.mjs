@@ -57,6 +57,7 @@ function fixture() {
     window: { confirm: () => true },
     exportWorkspace: () => ({ content: "{}", mime: "application/json" }),
     downloadText: () => {},
+    downloadWorkspaceBackup: async () => {},
   };
   return {
     bindings, initial, remote, started, saves, states, notices,

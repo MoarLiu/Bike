@@ -101,6 +101,27 @@ const makeStore = async ({ mode = "readonly" } = {}) => {
   });
 };
 
+test("MCP v2 reads expose attachment identity and text writes preserve it", async (t) => {
+  const store = await makeStore({ mode: "write" });
+  t.after(() => fs.rm(path.dirname(store.config.workspacePath), { recursive: true, force: true }));
+  const workspace = sampleWorkspace();
+  const assetId = `sha256:${"a".repeat(64)}`;
+  workspace.version = 2;
+  workspace.documents[0].attachments = { version: 1, items: { [assetId]: { byteLength: 3, mediaType: "application/octet-stream" } } };
+  workspace.documents[0].nodes[0].attachmentRefs = [{ assetId, name: "原文件.bin" }];
+  await fs.writeFile(store.config.workspacePath, JSON.stringify(workspace));
+  const snapshot = await store.load();
+  const compact = getDocument(snapshot, { documentId: workspace.documents[0].id }).content;
+  assert.deepEqual(compact.attachments, workspace.documents[0].attachments);
+  assert.equal(compact.attachmentAvailability, "unknown");
+  const before = structuredClone(workspace.documents[0].nodes[0].attachmentRefs);
+  await updateNodeForMcp(store, { documentId: workspace.documents[0].id, nodeId: workspace.documents[0].nodes[0].id, note: "agent 修改", expectedRevision: snapshot.revision, dryRun: false });
+  const saved = JSON.parse(await fs.readFile(store.config.workspacePath, "utf8"));
+  assert.equal(saved.version, 2);
+  assert.deepEqual(saved.documents[0].nodes[0].attachmentRefs, before);
+  assert.deepEqual(saved.documents[0].attachments, workspace.documents[0].attachments);
+});
+
 const makeChain = (prefix, depth) => {
   const root = {
     id: `${prefix}_0`,

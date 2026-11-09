@@ -8,6 +8,7 @@ data/
 npm-debug.log*
 *.local
 .playwright-cli/
+output/playwright/
 *.zip
 .claude/
 .review-test/

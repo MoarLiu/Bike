@@ -1,0 +1,45 @@
+name: Signed macOS candidate
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  signed-arm64:
+    runs-on: macos-latest
+    timeout-minutes: 45
+    environment: macos-release
+    env:
+      CSC_LINK: ${{ secrets.MAC_CERTIFICATE_P12 }}
+      CSC_KEY_PASSWORD: ${{ secrets.MAC_CERTIFICATE_PASSWORD }}
+      CSC_NAME: ${{ secrets.MAC_SIGNING_IDENTITY }}
+      APPLE_KEYCHAIN_PROFILE: bike-ci-notary
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22.13.0
+          cache: npm
+      - run: npm ci
+      - name: Configure notarization credentials
+        env:
+          NOTARY_KEY_P8: ${{ secrets.NOTARY_KEY_P8 }}
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER: ${{ secrets.NOTARY_ISSUER }}
+        run: |
+          umask 077
+          test -n "$CSC_LINK" && test -n "$CSC_NAME" && test -n "$NOTARY_KEY_P8"
+          printf '%s' "$NOTARY_KEY_P8" > "$RUNNER_TEMP/bike-notary.p8"
+          xcrun notarytool store-credentials "$APPLE_KEYCHAIN_PROFILE" --key "$RUNNER_TEMP/bike-notary.p8" --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER"
+      - run: npm run electron:dist:signed
+      - name: Verify packaged attachment and update flows
+        env:
+          BIKE_ELECTRON_EXECUTABLE: ${{ github.workspace }}/release/mac-arm64/Bike.app/Contents/MacOS/Bike
+        run: |
+          npm run test:attachments-runtime
+          npm run test:updates-runtime
+      - name: Remove temporary notarization key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/bike-notary.p8"

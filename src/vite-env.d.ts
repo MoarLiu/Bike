@@ -3,7 +3,29 @@
 declare const __APP_VERSION__: string;
 declare const __RELEASE_PAGE_URL__: string;
 
+interface BikeUpdateState {
+  status: "idle" | "checking" | "available" | "not-available" | "downloading" | "downloaded" | "preparing" | "installing" | "error" | "unsupported";
+  currentVersion: string;
+  latestVersion?: string;
+  updateAvailable?: boolean;
+  progress?: number;
+  error?: string;
+}
+
 interface BikeDesktopBridge {
+  openAttachment?: (assetId: string, name: string) => Promise<{ ok: boolean; error?: string }>;
+  scanAttachments?: (protectedAssets: string[]) => Promise<{ ok: boolean; error?: string; ticket?: string; candidates?: Array<{ assetId: string; byteLength: number }>; byteLength?: number; protectedCount?: number }>;
+  cleanAttachments?: (protectedAssets: string[], ticket: string) => Promise<{ ok: boolean; error?: string; moved?: number; removed?: number }>;
+  importAttachments?: (payload: { requestId: string; choose?: boolean; files?: Array<{ name: string; bytes: ArrayBuffer }> }) => Promise<{
+    ok: boolean; cancelled?: boolean; error?: string;
+    assets?: Array<{ assetId: string; name: string; metadata: import("../shared/bike-attachments.mjs").AttachmentMetadata }>;
+    failures?: Array<{ name: string; error: string }>;
+  }>;
+  cancelAttachmentImport?: (requestId: string) => Promise<unknown>;
+  readAttachment?: (assetId: string, thumbnail?: boolean) => Promise<{ ok: boolean; error?: string; dataUrl?: string; previewable?: boolean; metadata?: import("../shared/bike-attachments.mjs").AttachmentMetadata }>;
+  saveAttachment?: (assetId: string, name: string) => Promise<{ ok: boolean; error?: string; cancelled?: boolean; path?: string }>;
+  exportWorkspaceArchive?: (workspace: unknown, readable?: { name: "document.md" | "index.html"; content: string }) => Promise<{ ok: boolean; error?: string; cancelled?: boolean; path?: string; attachmentCount?: number }>;
+  importWorkspaceArchive?: () => Promise<{ ok: boolean; error?: string; cancelled?: boolean; workspace?: unknown; attachmentCount?: number }>;
   saveICloudBackup: (payload: unknown) => Promise<{
     ok: boolean;
     code?: string;
@@ -28,16 +50,9 @@ interface BikeDesktopBridge {
   acceptBackupBaseline?: (hash: string, saved?: { workspace: unknown; sourceRevision?: number; semanticHash?: string; ticket?: number }) => Promise<Record<string, unknown>>;
   onBackupFlush?: (callback: () => void) => () => void;
   finishBackupFlush?: () => void;
-  checkForUpdates?: () => Promise<{
-    ok: boolean;
-    currentVersion: string;
-    latestVersion: string;
-    updateAvailable: boolean;
-    releaseName?: string;
-    releaseUrl?: string;
-    publishedAt?: string;
-    error?: string;
-  }>;
+  checkForUpdates?: () => Promise<BikeUpdateState & { ok: boolean }>;
+  onUpdateState?: (callback: (state: BikeUpdateState) => void) => () => void;
+  onPrepareUpdate?: (callback: () => Promise<{ ok: boolean }>) => () => void;
   invokeAiProvider?: (payload: {
     requestId?: string;
     endpoint: "chat_completions" | "responses";

@@ -39,6 +39,31 @@ async function fixture(t) {
   };
 }
 
+test("attachment sync refuses a legacy server before uploading and downloads v2 metadata from a capable server", async (t) => {
+  const { store, beforeRequest } = await fixture(t);
+  const assetId = `sha256:${"a".repeat(64)}`;
+  const item = document("attached", "attachment");
+  item.attachments = { version: 1, items: { [assetId]: { mediaType: "application/octet-stream", byteLength: 1 } } };
+  item.nodes[0].attachmentRefs = [{ assetId, name: "file.bin" }];
+  const before = JSON.stringify(item);
+  const getManifest = store.getManifest;
+  store.getManifest = () => {
+    const { capabilities, ...legacy } = getManifest();
+    return legacy;
+  };
+  let uploads = 0;
+  beforeRequest(({ method }) => { if (method === "PUT") uploads++; });
+  await assert.rejects(sync.putRemoteDocument(config, item, null), (error) => error.status === 426);
+  assert.equal(uploads, 0);
+  assert.equal(store.getDocument(item.id), null);
+  assert.equal(JSON.stringify(item), before);
+  store.getManifest = getManifest;
+  await sync.putRemoteDocument(config, item, null);
+  const downloaded = await sync.pullWorkspaceFromRemote(config);
+  assert.equal(downloaded.workspace.version, 2);
+  assert.deepEqual(downloaded.workspace.documents[0].nodes[0].attachmentRefs, item.nodes[0].attachmentRefs);
+});
+
 test("failed sync checkpoints uploads without acknowledging an unapplied new download", async (t) => {
   const { store, failWhen } = await fixture(t);
   const a = document("A", "remote only", "2026-09-02T00:00:00.000Z");

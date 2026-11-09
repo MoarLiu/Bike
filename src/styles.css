@@ -1007,6 +1007,33 @@ button:disabled {
   font-size: 12px;
 }
 
+.attachment-items { display: grid; gap: 8px; min-width: 0; }
+.attachment-items.compact { max-width: 300px; }
+.attachment-item { display: block; min-width: 0; max-width: 100%; font-size: 12px; color: var(--text); }
+.attachment-thumbnail { display: block; padding: 0; border: 0; background: transparent; max-width: 100%; }
+.attachment-thumbnail img { display: block; max-width: 100%; max-height: 240px; object-fit: contain; border-radius: 6px; }
+.attachment-item.compact .attachment-thumbnail img { height: 76px; max-width: 230px; }
+.attachment-caption { display: flex; align-items: center; gap: 6px; min-width: 0; padding-block: 4px; }
+.attachment-caption > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.attachment-caption button, .attachment-error button { display: inline-flex; align-items: center; padding: 3px; min-height: 20px; border: 0; background: transparent; color: inherit; }
+.attachment-error { display: flex; gap: 5px; color: var(--text-soft); overflow-wrap: anywhere; }
+.attachment-item.compact .attachment-error { max-height: 34px; overflow: hidden; }
+.attachment-editor { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--border); }
+.attachment-panel > button { margin: 4px 5px 4px 0; }
+.attachment-panel .field { margin-block: 8px; }
+.attachment-panel .field input { width: 100%; min-width: 0; }
+.attachment-migration-download { font-size: 11px; color: var(--text-soft); }
+.attachment-preview-dialog { max-width: 94vw; max-height: 94vh; padding: 14px; border: 1px solid var(--border); border-radius: 12px; background: var(--panel, white); color: var(--text); }
+.attachment-preview-dialog::backdrop { background: rgba(0, 0, 0, .55); }
+.attachment-preview-dialog header { display: flex; align-items: center; justify-content: space-between; gap: 20px; margin-bottom: 10px; }
+.attachment-preview-dialog > img { display: block; max-width: 88vw; max-height: 78vh; object-fit: contain; }
+.map-node:has(.attachment-items) { flex-direction: column; gap: 6px; padding: 8px; }
+.map-node .attachment-items.compact { height: 116px; flex-shrink: 0; }
+.map-node .attachment-caption { max-width: 240px; }
+.map-node .attachment-items > small { font-size: 10px; }
+.slide-content > .attachment-items, .slide-point-container > .attachment-items { max-width: 440px; margin-block: 12px; }
+.slide-content .attachment-thumbnail img { max-height: 200px; }
+
 .separator {
   display: block;
   width: 1px;
@@ -1483,6 +1510,7 @@ textarea.markdown-source:focus {
   font-weight: 720;
 }
 
+.attachment-panel .field input,
 .field textarea,
 .field select {
   width: 100%;
@@ -1496,6 +1524,8 @@ textarea.markdown-source:focus {
     border-color 140ms ease,
     box-shadow 140ms ease;
 }
+
+.attachment-panel .field input { min-height: 36px; padding: 7px 10px; }
 
 .field textarea {
   min-height: 116px;
@@ -1512,6 +1542,7 @@ textarea.markdown-source:focus {
   padding: 0 34px 0 10px;
 }
 
+.attachment-panel .field input:focus,
 .field textarea:focus,
 .field select:focus {
   border-color: #d8d4ee;

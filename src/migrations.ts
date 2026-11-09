@@ -2,8 +2,9 @@ import type { OutlineDocument, OutlineNode, TrashEntry, Workspace } from "./type
 import { createNode, normalizeColor, uid } from "./tree";
 import { uuid } from "./id";
 import { assertDocumentBudget, assertWorkspaceBudget } from "../shared/bike-limits.mjs";
+import { validateDocumentAttachments, workspaceFormatVersion } from "../shared/bike-attachments.mjs";
 
-export const CURRENT_WORKSPACE_VERSION = 1;
+export const CURRENT_WORKSPACE_VERSION = 2;
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
@@ -87,6 +88,7 @@ export const migrateDocument = (
   if (!isRecord(rawDocument)) throw new Error("导入文件不是有效文档");
   if (!Array.isArray(rawDocument.nodes)) throw new Error("文档缺少有效的主题数组，原数据未被替换");
   assertDocumentBudget(rawDocument);
+  validateDocumentAttachments(rawDocument as unknown as OutlineDocument);
 
   const now = new Date().toISOString();
   const updatedAt = textOr(rawDocument.updatedAt, now);
@@ -157,7 +159,7 @@ export const migrateWorkspace = (rawWorkspace: unknown): Workspace => {
   if (!isRecord(rawWorkspace) || !Array.isArray(rawWorkspace.documents)) {
     throw new Error("导入文件不是有效工作区");
   }
-  if (rawWorkspace.version !== undefined && rawWorkspace.version !== CURRENT_WORKSPACE_VERSION) {
+  if (rawWorkspace.version !== undefined && rawWorkspace.version !== 1 && rawWorkspace.version !== CURRENT_WORKSPACE_VERSION) {
     throw new Error(`工作区版本 ${String(rawWorkspace.version)} 暂不支持，原数据已保留`);
   }
   assertWorkspaceBudget(rawWorkspace);
@@ -181,7 +183,7 @@ export const migrateWorkspace = (rawWorkspace: unknown): Workspace => {
 
   const workspace: Workspace = {
     ...rawWorkspace,
-    version: CURRENT_WORKSPACE_VERSION,
+    version: rawWorkspace.version === 2 ? 2 : 1,
     activeDocumentId,
     documents,
   };
@@ -189,6 +191,9 @@ export const migrateWorkspace = (rawWorkspace: unknown): Workspace => {
     const trash = migrateTrash(rawWorkspace.trash);
     if (trash.length) workspace.trash = trash;
     else delete workspace.trash;
+  }
+  if (workspaceFormatVersion(workspace) !== workspace.version) {
+    throw new Error("附件数据需要 version 2 工作区，请通过升级流程载入，原数据已保留");
   }
   return workspace;
 };

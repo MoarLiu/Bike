@@ -12,6 +12,8 @@ import {
 import { finalizeMarkdownExport, readBikeMetadata, restoreMarkdownIdentity, readableRelations } from "./knowledge";
 import pdfFontUrl from "./assets/NotoSansSC-ChineseSimplified.ttf?url";
 import { assertDocumentBudget, assertTextBudget, assertWorkspaceBudget, MAX_DOCUMENT_NODES, MAX_DESKTOP_DEPTH } from "../shared/bike-limits.mjs";
+import { validateDocumentAttachments, isPreviewableImage, workspaceAttachmentAssets } from "../shared/bike-attachments.mjs";
+import { loadAttachmentImage, rasterImageBytes } from "./attachmentImages";
 
 const xmlText = (value: string) => Array.from(value).map((character) => {
   const code = character.codePointAt(0)!;
@@ -131,17 +133,24 @@ const freemindNode = (node: OutlineNode, depth = 1): string => {
   ].join("\n");
 };
 
-const htmlNode = (node: OutlineNode): string => {
+const htmlNode = (node: OutlineNode, images = false, items: OutlineDocument["attachments"] = undefined): string => {
   const children = nodeChildren(node);
   const childHtml = children.length
-    ? `<ul>${children.map(htmlNode).join("")}</ul>`
+    ? `<ul>${children.map((child) => htmlNode(child, images, items)).join("")}</ul>`
     : "";
   const checked = node.checked ? " data-checked=\"true\"" : "";
   const note = nodeNote(node) ? `<p>${escapeXml(nodeNote(node))}</p>` : "";
   const code = typeof node.codeBlock === "string" ? `<pre><code>${escapeXml(node.codeBlock)}</code></pre>` : "";
   const table = node.table?.length ? `<table>${node.table.map((row) => `<tr>${row.map((cell) => `<td>${escapeXml(cell)}</td>`).join("")}</tr>`).join("")}</table>` : "";
   const image = node.imageName ? `<p>图片引用：${escapeXml(node.imageName)}</p>` : "";
-  return `<li${checked}><span>${escapeXml(nodeText(node))}</span>${note}${code}${table}${image}${childHtml}</li>`;
+  const attachments = (node.attachmentRefs ?? []).map((ref) => {
+    const url = `attachments/${ref.assetId.slice(7)}`;
+    if (!images) return `<p>附件 ${escapeXml(ref.name)}</p>`;
+    return isPreviewableImage(items?.items[ref.assetId])
+      ? `<figure><img style="max-width:100%;height:auto" src="${url}" alt="${escapeXmlAttribute(ref.alt || ref.name)}"><figcaption>${escapeXml(ref.name)}</figcaption></figure>`
+      : `<p><a href="${url}" download="${escapeXmlAttribute(ref.name)}">${escapeXml(ref.name)}</a></p>`;
+  }).join("");
+  return `<li${checked}><span>${escapeXml(nodeText(node))}</span>${note}${code}${table}${image}${attachments}${childHtml}</li>`;
 };
 
 const printableNode = (node: OutlineNode): string => {
@@ -191,7 +200,7 @@ const relationsHtml = (document: OutlineDocument) => {
 export const exportDocument = (
   document: OutlineDocument,
   format: "json" | "markdown" | "opml" | "freemind" | "html",
-  options?: { metadata?: boolean },
+  options?: { metadata?: boolean; portable?: boolean },
 ) => {
   assertDocumentBudget(document);
   const title = documentTitle(document);
@@ -205,7 +214,8 @@ export const exportDocument = (
   }
 
   if (format === "markdown") {
-    const body = typeof document.markdownSource === "string" ? document.markdownSource : documentToMarkdown(document);
+    let body = typeof document.markdownSource === "string" ? document.markdownSource : documentToMarkdown(document);
+    if (options?.portable) body = body.replace(/bike-attachment:sha256:([a-f0-9]{64})/gu, "attachments/$1");
     const exported = finalizeMarkdownExport(body, document, { metadata: options?.metadata === true });
     return {
       filename: exportFilename(title, options?.metadata ? "bike.md" : "md"),
@@ -261,7 +271,7 @@ export const exportDocument = (
       `<!doctype html>`,
       `<html lang="zh-CN">`,
       `<head><meta charset="UTF-8"><title>${escapeXml(title)}</title></head>`,
-      `<body><h1>${escapeXml(title)}</h1><ul>${document.nodes.map(htmlNode).join("")}</ul>${relationsHtml(document)}</body>`,
+      `<body><h1>${escapeXml(title)}</h1><ul>${document.nodes.map((node) => htmlNode(node, options?.portable, document.attachments)).join("")}</ul>${relationsHtml(document)}</body>`,
       `</html>`,
     ].join(""),
   };
@@ -345,11 +355,22 @@ export const exportDocumentAsPdf = async (outlineDocument: OutlineDocument) => {
   const filename = exportFilename(documentTitle(outlineDocument), "pdf");
   const pdfDocument = await PDFDocument.create();
   pdfDocument.registerFontkit(fontkit);
+  const images = new Map<string, Awaited<ReturnType<typeof pdfDocument.embedPng>>>();
+  let pixels = 0;
+  for (const { assetId, metadata } of workspaceAttachmentAssets({ documents: [outlineDocument] })) {
+    if (!isPreviewableImage(metadata)) continue;
+    pixels += metadata.width! * metadata.height!;
+    if (pixels > 160_000_000) throw new Error("PDF 图片总解码尺寸超过预算，请分篇导出");
+    const source = await loadAttachmentImage(assetId);
+    const bytes = await rasterImageBytes(source);
+    images.set(assetId, metadata.mediaType === "image/jpeg" ? await pdfDocument.embedJpg(bytes) : await pdfDocument.embedPng(bytes));
+  }
   const fontBytes = await fetch(pdfFontUrl).then((response) => {
     if (!response.ok) throw new Error("无法加载 PDF 中文字体");
     return response.arrayBuffer();
   });
-  const font = await pdfDocument.embedFont(fontBytes, { subset: true });
+  // The bundled Noto Sans SC font loses glyphs in fontkit's subset output.
+  const font = await pdfDocument.embedFont(fontBytes, { subset: false });
 
   const pageSize = { width: 595.28, height: 841.89 };
   const margin = { top: 56, right: 52, bottom: 54, left: 52 };
@@ -405,7 +426,7 @@ export const exportDocumentAsPdf = async (outlineDocument: OutlineDocument) => {
   y -= 14;
 
   const drawNode = (node: OutlineNode, depth: number) => {
-    const indent = depth * 18;
+    const indent = Math.min(depth, 12) * 18;
     const x = margin.left + indent;
     const bullet = node.checked ? "☑" : "•";
     const icon = node.icon ? `${node.icon} ` : "";
@@ -437,10 +458,11 @@ export const exportDocumentAsPdf = async (outlineDocument: OutlineDocument) => {
       });
     }
 
-    if (node.imageName || node.table) {
+    if (node.imageName || node.table || node.attachmentRefs?.length) {
       const attachments = [
         node.imageName ? `图片：${node.imageName}` : "",
         node.table ? `表格：${node.table.map((row) => row.join(" | ")).join(" / ")}` : "",
+        ...(node.attachmentRefs ?? []).map((ref) => `附件 ${ref.name}`),
       ]
         .filter(Boolean)
         .join("  ");
@@ -450,6 +472,17 @@ export const exportDocumentAsPdf = async (outlineDocument: OutlineDocument) => {
         lineHeight: 14,
         color: rgb(0.38, 0.38, 0.42),
       });
+    }
+
+    for (const ref of node.attachmentRefs ?? []) {
+      const image = images.get(ref.assetId);
+      if (!image) continue;
+      const scale = Math.min(1, (maxWidth - 16) / image.width, 420 / image.height);
+      const width = image.width * scale;
+      const height = image.height * scale;
+      ensureSpace(height + 12);
+      page.drawImage(image, { x: x + 16, y: y - height, width, height });
+      y -= height + 12;
     }
 
     y -= depth === 0 ? 5 : 2;
@@ -545,7 +578,9 @@ export const importDocument = (
     }
     const parsed = parseMarkdownDocument(read.body ?? content, { filename });
     if ((read.status === "matched" || read.status === "digest-mismatch") && read.metadata) {
-      return restoreMarkdownIdentity(parsed, read.metadata, { matched: read.status === "matched" });
+      const restored = restoreMarkdownIdentity(parsed, read.metadata, { matched: read.status === "matched" });
+      validateDocumentAttachments(restored);
+      return restored;
     }
     return parsed;
   }

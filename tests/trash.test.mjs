@@ -8,6 +8,7 @@ const {
   moveDocumentToTrash,
   pruneTrash,
   removeTrashEntry,
+  retainLocalTrash,
   restoreTrashEntry,
 } = loadTypescript("src/trash.ts");
 
@@ -78,4 +79,22 @@ test("prunes expired entries and supports single and full deletion", () => {
   };
   assert.deepEqual(removeTrashEntry(withTrash, "a").trash.map((entry) => entry.id), ["b"]);
   assert.deepEqual(emptyTrash(withTrash).trash, []);
+});
+
+test("retaining local attachments after a text-only pull preserves workspace version 2", () => {
+  const current = workspace();
+  const assetId = `sha256:${"a".repeat(64)}`;
+  current.version = 2;
+  current.documents[1].attachments = {
+    version: 1, items: { [assetId]: { mediaType: "application/octet-stream", byteLength: 1 } },
+  };
+  current.documents[1].nodes[0].attachmentRefs = [{ assetId, name: "example.txt" }];
+  const remote = { version: 1, activeDocumentId: "first", documents: [current.documents[0]] };
+  const retained = retainLocalTrash(current, remote);
+  assert.equal(retained.version, 2);
+  assert.equal(migrateWorkspace(retained).version, 2);
+  assert.equal(retained.trash.find((entry) => entry.document.id === "second").document.attachments, current.documents[1].attachments);
+  const pulledAgain = retainLocalTrash(retained, remote);
+  assert.equal(pulledAgain.version, 2);
+  assert.equal(pulledAgain.trash, retained.trash);
 });

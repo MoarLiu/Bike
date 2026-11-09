@@ -215,7 +215,7 @@ test("metadata roundtrip keeps identity and rejects unsafe payloads", () => {
   const lossy = finalizeMarkdownExport(plain, document, { metadata: false });
   assert.match(lossy.content, /稳定 id/);
   assert.equal(readBikeMetadata(lossy.content).status, "absent");
-  assert.equal(readBikeMetadata("<!-- bike:document:v2 AAAA -->").status, "unknown-version");
+  assert.equal(readBikeMetadata("<!-- bike:document:v3 AAAA -->").status, "unknown-version");
   assert.equal(readBikeMetadata("<!-- bike:document:v1 not valid -->").status, "invalid");
   const huge = `<!-- bike:document:v1 ${"A".repeat(3 * 1024 * 1024)} -->`;
   assert.equal(readBikeMetadata(huge).status, "too-large");

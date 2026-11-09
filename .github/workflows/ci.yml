@@ -35,6 +35,8 @@ jobs:
         if: runner.os == 'Linux'
       - run: npm run test:runtime
         if: runner.os == 'Linux'
+      - run: npm run test:attachments-runtime
+        if: runner.os == 'macOS'
 
   node-compatibility:
     runs-on: ubuntu-latest

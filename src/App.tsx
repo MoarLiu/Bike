@@ -87,6 +87,9 @@ import { SearchResults } from "./components/SearchResults";
 import { SearchControls } from "./components/SearchControls";
 import { TrashDialog } from "./components/TrashDialog";
 import { VersionHistoryDialog } from "./components/VersionHistoryDialog";
+import { AttachmentActionsContext, AttachmentItems, AttachmentItem, AttachmentPanel, useAttachmentActions } from "./components/Attachments";
+import { mergeAttachmentMetadata, workspaceFormatVersion, workspaceAttachmentAssets, MAX_IMPORT_BYTES, MAX_IMPORT_FILES, MAX_ATTACHMENT_BYTES } from "../shared/bike-attachments.mjs";
+import type { AttachmentMetadata } from "../shared/bike-attachments.mjs";
 import {
   activeLinkQuery,
   addRelation,
@@ -161,6 +164,8 @@ import {
   listWorkspaceRecoverySnapshots,
   listWorkspaceRecoveryFiles,
   loadWorkspace,
+  loadPreAttachmentWorkspace,
+  attachmentRecoveryRoots,
   reloadWorkspaceIf,
   saveWorkspace as saveWorkspaceToStorage,
   saveWorkspaceFallback,
@@ -188,6 +193,7 @@ import {
 } from "./sync";
 import type { OutlineDocument, OutlineNode, ViewMode, Workspace } from "./types";
 import { uuid } from "./id";
+import { exportMindMap } from "./mindMapExport";
 import { assertTreeBudget } from "../shared/bike-limits.mjs";
 import {
   addChild,
@@ -223,6 +229,7 @@ import {
 } from "./trash";
 import {
   captureSnapshot,
+  listHistoryAttachmentIds,
   listDocumentSnapshots,
   type DocumentSnapshot,
 } from "./versionHistory";
@@ -252,6 +259,7 @@ type NodeClipboard = {
   sourceId: string;
   node: OutlineNode;
   knowledge?: OutlineDocument["knowledge"];
+  attachments?: OutlineDocument["attachments"];
 };
 type OutlineDropZone = "before" | "after" | "child";
 type StructuredAiTargetId = string;
@@ -293,7 +301,7 @@ const classNames = (...names: Array<string | false | undefined>) =>
 
 const isEditableEventTarget = (target: EventTarget | null) =>
   target instanceof HTMLElement &&
-  Boolean(target.closest("input, textarea, [contenteditable]"));
+  Boolean(target.closest("input, textarea, [contenteditable], dialog[open]"));
 
 const clampNumber = (value: number, min: number, max: number) =>
   Math.min(max, Math.max(min, value));
@@ -584,7 +592,14 @@ const firstNodeIdInWorkspace = (workspace: Workspace) =>
   firstNodeId(firstDocument(workspace).nodes);
 
 // Downloads a JSON copy of a workspace before it gets replaced or overwritten.
-const downloadWorkspaceBackup = (workspace: Workspace, reason: string) => {
+const downloadWorkspaceBackup = async (workspace: Workspace, reason: string) => {
+  if (workspace.version === 2) {
+    const bridge = (window.bike ?? window.localOutline)?.exportWorkspaceArchive;
+    if (!bridge) throw new Error("此工作区包含附件，请使用桌面版保存完整副本后再替换");
+    const result = await bridge(workspace);
+    if (!result.ok || result.cancelled) throw new Error(result.error || "完整备份已取消，工作区已保留");
+    return;
+  }
   const backup = exportWorkspace(workspace);
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   downloadText(`bike-workspace-before-${reason}-${stamp}.json`, backup.content, backup.mime);
@@ -738,6 +753,11 @@ const InspectorNoteField = React.memo(function InspectorNoteField({
 function App() {
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
   const [ready, setReady] = useState(false);
+  const [attachmentBusy, setAttachmentBusy] = useState(false);
+  const [attachmentGeneration, setAttachmentGeneration] = useState(0);
+  const attachmentImportRef = useRef<string | null>(null);
+  const cleanupBusyRef = useRef(false);
+  const updateInstallRef = useRef<Workspace | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [recoveryFiles, setRecoveryFiles] = useState<WorkspaceRecoveryFile[]>([]);
   const [mode, setMode] = useState<AppViewMode>("outline");
@@ -1011,7 +1031,10 @@ function App() {
     dispatchBackup(step.enqueue);
     armBackupTimer();
   });
-  const saveWorkspace = useEventCallback(async (payload: Workspace) => {
+  const saveWorkspace = useEventCallback(async (payload: Workspace): Promise<WorkspaceSaveResult> => {
+    if (updateInstallRef.current && payload !== updateInstallRef.current) {
+      return { ok: false as const, error: new Error("正在准备安装更新，请稍后保存") };
+    }
     const result = await saveWorkspaceToStorage(payload);
     showSaveResult(result, payload);
     return result;
@@ -1025,10 +1048,65 @@ function App() {
   });
 
   const replaceWorkspace = useEventCallback((next: Workspace) => {
+    if (updateInstallRef.current) throw new Error("正在准备安装更新，请稍后更改工作区");
+    const version = workspaceFormatVersion(next);
+    if (next.version !== version) next = { ...next, version };
     workspaceRef.current = next;
     setWorkspace(next);
     return next;
   });
+  const releaseUpdateLock = useEventCallback(() => {
+    if (!updateInstallRef.current) return;
+    updateInstallRef.current = null;
+    recoveryBusyRef.current = false;
+    setRecoveryBusy(false);
+    const shell = document.querySelector<HTMLElement>(".shell");
+    if (shell) shell.inert = false;
+  });
+  const prepareUpdateInstall = useEventCallback(async () => {
+    if (!ready || storageConflictRef.current || recoveryBusyRef.current || syncBusyRef.current ||
+        historyBusyRef.current || attachmentImportRef.current) return { ok: false };
+    const current = flushPendingEditsRef.current() ?? workspaceRef.current;
+    if (!current) return { ok: false };
+    updateInstallRef.current = current;
+    recoveryBusyRef.current = true;
+    setRecoveryBusy(true);
+    clearAutoSyncTimer();
+    const shell = document.querySelector<HTMLElement>(".shell");
+    if (shell) shell.inert = true;
+    try {
+      const result = await saveWorkspace(current);
+      await flushScheduledBackup();
+      if (!result.ok || result.target !== "indexeddb" || storageConflictRef.current ||
+          updateInstallRef.current !== current || workspaceRef.current !== current) {
+        releaseUpdateLock();
+        return { ok: false };
+      }
+      return { ok: true };
+    } catch {
+      releaseUpdateLock();
+      return { ok: false };
+    }
+  });
+
+  useEffect(() => {
+    const bridge = window.bike ?? window.localOutline;
+    const removePreparation = bridge?.onPrepareUpdate?.(prepareUpdateInstall);
+    const removeState = bridge?.onUpdateState?.((state) => {
+      if (!["preparing", "installing"].includes(state.status)) releaseUpdateLock();
+      const messages: Partial<Record<BikeUpdateState["status"], string>> = {
+        checking: "正在检查更新...",
+        downloading: `正在下载更新 ${Math.round(state.progress ?? 0)}%`,
+        downloaded: "更新已下载，可通过检查更新入口重启安装",
+        preparing: "正在保存工作区并准备更新...",
+        installing: "正在安装更新，应用即将重启...",
+        error: state.error || "更新失败，请重试",
+      };
+      const message = state.error || messages[state.status];
+      if (message) showNotice(message);
+    });
+    return () => { removePreparation?.(); removeState?.(); };
+  }, []);
 
   const clearEditHistory = useEventCallback(() => {
     historyRef.current = emptyEditHistory();
@@ -1336,8 +1414,11 @@ function App() {
   ) => {
     const current = workspaceRef.current;
     if (!current) return null;
-    const next = updater(current);
+    if (cleanupBusyRef.current || updateInstallRef.current) return current;
+    let next = updater(current);
     if (next === current) return current;
+    const version = workspaceFormatVersion(next);
+    if (next.version !== version) next = { ...next, version };
     const history = recordChange({
       history: historyRef.current,
       before: current,
@@ -1417,7 +1498,9 @@ function App() {
   ): MarkdownDocument => {
     const timestamp = now();
     const parsed = parseMarkdownDocument(content, {
-      previousDocument: document,
+      previousDocument: document.markdownSource === undefined
+        ? { ...document, markdownSource: documentToMarkdown(document) }
+        : document,
       documentId: document.id,
       now: timestamp,
     });
@@ -1794,6 +1877,7 @@ function App() {
 
   const performHistoryStep = useEventCallback((direction: "undo" | "redo") => {
     if (!ready || modalOpenRef.current || storageConflictRef.current || recoveryBusyRef.current || syncBusyRef.current || historyBusyRef.current) return;
+    if (document.querySelector?.("dialog[open]")) return;
     if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
     flushPendingEdits();
     const current = workspaceRef.current;
@@ -2061,12 +2145,14 @@ function App() {
     showNotice("已彻底删除文档");
   });
 
-  const emptyTrashForever = useEventCallback(() => {
+  const emptyTrashForever = useEventCallback(async () => {
     if (syncBusyRef.current || recoveryBusyRef.current || historyBusyRef.current || storageConflictRef.current) return;
     const current = workspaceRef.current;
     if (!current?.trash?.length) return;
     if (!window.confirm("清空回收站会先下载一份包含回收站内容的工作区备份。继续？")) return;
-    downloadWorkspaceBackup(current, "empty-trash");
+    try { await downloadWorkspaceBackup(current, "empty-trash"); }
+    catch (error) { showNotice(error instanceof Error ? error.message : "备份失败"); return; }
+    if ((flushPendingEdits() ?? workspaceRef.current) !== current) { showNotice("备份期间内容已变化，请重新清空回收站"); return; }
     replaceWorkspace(emptyTrash(current));
     showNotice("回收站已下载备份并清空");
   });
@@ -2504,6 +2590,7 @@ function App() {
       sourceId: id,
       node: cloneNodes([node])[0],
       knowledge: document.knowledge ? JSON.parse(JSON.stringify(anchorMarkdownReferences(document))) : undefined,
+      attachments: document.attachments,
     });
     try {
       await navigator.clipboard.writeText(renderNodeMarkdown(node));
@@ -2526,6 +2613,7 @@ function App() {
       sourceId: id,
       node: cloneNodes([node])[0],
       knowledge: document.knowledge ? JSON.parse(JSON.stringify(anchorMarkdownReferences(document))) : undefined,
+      attachments: document.attachments,
     });
     showNotice("已剪切主题，选择目标后粘贴");
   });
@@ -2616,6 +2704,10 @@ function App() {
       const activeNodes = targetId === MINDMAP_ROOT_ID
         ? [...activeBaseNodes, pasted]
         : addChild(activeBaseNodes, targetId, pasted);
+      nextActive = mergeAttachmentMetadata(nextActive, {
+        nodes: [pasted],
+        attachments: clipboard.mode === "copy" ? clipboard.attachments : sourceDocument?.attachments,
+      });
       didPaste = true;
 
       return {
@@ -2802,12 +2894,26 @@ function App() {
     updateActiveNodesStable((nodes) => moveNode(nodes, activeNodeId, direction));
   });
 
-  const exportActive = useEventCallback((format: ExportFormat, metadata: boolean = false) => {
+  const exportActive = useEventCallback(async (format: ExportFormat, metadata: boolean = false) => {
     const currentWorkspace = flushPendingEdits() ?? workspaceRef.current;
     const document = currentWorkspace?.documents.find(
       (item) => item.id === currentWorkspace.activeDocumentId,
     ) as MarkdownDocument | undefined;
     if (!document) return;
+    const archiveBridge = (window.bike ?? window.localOutline)?.exportWorkspaceArchive;
+    if (document.attachments && (format === "markdown" || format === "html")) {
+      try {
+        if (!archiveBridge) throw new Error("请在桌面版导出携带附件的阅读包");
+        const exported = exportDocument(document, format, { metadata, portable: true });
+        if (exported.error) throw new Error(exported.error);
+        const result = await archiveBridge({ version: 2, activeDocumentId: document.id, documents: [document] }, {
+          name: format === "html" ? "index.html" : "document.md", content: exported.content,
+        });
+        if (!result.ok) throw new Error(result.error || "携图导出失败");
+        if (!result.cancelled) showNotice(`已导出携图 ZIP，包含 ${result.attachmentCount ?? 0} 个原始附件`);
+      } catch (error) { showNotice(error instanceof Error ? error.message : "携图导出失败"); }
+      return;
+    }
     if ((format === "opml" || format === "freemind") && knowledgeEditable(document.knowledge) && (document.knowledge.references.length || document.knowledge.relations.length)) {
       showNotice("这个格式不能完整保留链接身份和关系");
     }
@@ -2816,7 +2922,8 @@ function App() {
     catch (error) { showNotice(error instanceof Error ? error.message : "导出失败，原数据已保留"); return; }
     if (metadata && result.error) { showNotice(result.error); return; }
     downloadText(result.filename, result.content, result.mime);
-    showNotice(result.error ? result.error : `已导出 ${result.filename}${result.lossy ? `：${result.lossReasons?.join("；") || "此格式无法完整保留原数据"}` : ""}`);
+    const attachmentScope = document.attachments ? "，本次文件没有携带附件原始字节，完整备份请使用工作区 ZIP" : "";
+    showNotice(result.error ? result.error : `已导出 ${result.filename}${result.lossy ? `：${result.lossReasons?.join("；") || "此格式无法完整保留原数据"}` : ""}${attachmentScope}`);
   });
 
   const exportActivePdf = useEventCallback(async () => {
@@ -2828,7 +2935,7 @@ function App() {
     try {
       showNotice("正在生成 PDF...");
       const filename = await exportDocumentAsPdf(document);
-      showNotice(`已下载 PDF：${filename}`);
+      showNotice(`已下载 PDF ${filename}`);
     } catch (error) {
       showNotice(error instanceof Error ? error.message : "PDF 导出失败");
     }
@@ -2839,7 +2946,187 @@ function App() {
     if (!currentWorkspace) return;
     const result = exportWorkspace(currentWorkspace);
     downloadText(result.filename, result.content, result.mime);
-    showNotice(`已导出 ${result.filename}`);
+    showNotice(currentWorkspace.version === 2 ? "已导出 JSON 元数据，完整附件请使用工作区 ZIP" : `已导出 ${result.filename}`);
+  });
+  const exportMap = useEventCallback(async (format: "svg" | "png", transparent: boolean = false) => {
+    const current = flushPendingEdits() ?? workspaceRef.current;
+    const document = current?.documents.find((item) => item.id === current.activeDocumentId);
+    if (!document) return;
+    try { await exportMindMap(document, format, transparent); showNotice(`已导出脑图 ${format.toUpperCase()}`); }
+    catch (error) { showNotice(error instanceof Error ? error.message : "脑图导出失败"); }
+  });
+  const cleanAttachments = useEventCallback(async () => {
+    const bridge = window.bike ?? window.localOutline;
+    if (!bridge?.scanAttachments || !bridge.cleanAttachments) { showNotice("请在桌面版管理附件库"); return; }
+    if (attachmentImportRef.current || recoveryBusyRef.current || syncBusyRef.current || historyBusyRef.current || storageConflictRef.current) return;
+    const current = flushPendingEdits() ?? workspaceRef.current;
+    if (!current) return;
+    const saved = await saveWorkspace(current);
+    if (!saved.ok || saved.target !== "indexeddb") { showNotice("请先恢复本机主存储，再扫描附件"); return; }
+    cleanupBusyRef.current = true;
+    recoveryBusyRef.current = true;
+    setRecoveryBusy(true);
+    const shell = document.querySelector<HTMLElement>(".shell");
+    if (shell) shell.inert = true;
+    try {
+      const roots = async () => {
+        const historicalIds = await listHistoryAttachmentIds();
+        const backups = await attachmentRecoveryRoots();
+        const documents = [...current.documents, ...(current.trash ?? []).map((item) => item.document)];
+        for (const entry of [...historyRef.current.past, ...historyRef.current.future]) {
+          for (const change of entry.changes) documents.push(change.before, change.after);
+        }
+        if (nodeClipboard) documents.push({ ...current.documents[0], nodes: [nodeClipboard.node], attachments: nodeClipboard.attachments });
+        for (const backup of backups) documents.push(...backup.documents, ...(backup.trash ?? []).map((item) => item.document));
+        return [...new Set([...historicalIds, ...workspaceAttachmentAssets({ documents }).map((item) => item.assetId)])];
+      };
+      const scan = await bridge.scanAttachments(await roots());
+      if (!scan.ok || !scan.ticket) throw new Error(scan.error || "附件扫描失败");
+      const accepted = window.confirm(`找到 ${scan.candidates?.length ?? 0} 个未引用附件，共 ${((scan.byteLength ?? 0) / 1024 / 1024).toFixed(2)} MiB。清理后保留 30 天，可在恢复引用时自动取回。此前隔离满 30 天且仍未引用的文件将永久删除。继续？`);
+      if (!accepted) return;
+      if (workspaceRef.current !== current || storageConflictRef.current) throw new Error("工作区已变化，请重新扫描");
+      const result = await bridge.cleanAttachments(await roots(), scan.ticket);
+      if (!result.ok) throw new Error(result.error || "清理失败");
+      showNotice(`已隔离 ${result.moved ?? 0} 个附件，清除 ${result.removed ?? 0} 个过期文件`);
+    } catch (error) { showNotice(`附件清理已停止 ${error instanceof Error ? error.message : "无法读取全部保护记录"}`); }
+    finally {
+      if (shell) shell.inert = false;
+      cleanupBusyRef.current = false;
+      recoveryBusyRef.current = false;
+      setRecoveryBusy(false);
+    }
+  });
+
+  const addAttachments = useEventCallback(async (nodeId?: string, files?: File[]) => {
+    const bridge = window.bike ?? window.localOutline;
+    if (!bridge?.importAttachments) { showNotice("请在 macOS 桌面版导入附件"); return; }
+    if (attachmentBusy || attachmentImportRef.current || storageConflictRef.current || syncBusyRef.current || recoveryBusyRef.current || historyBusyRef.current) return;
+    const current = flushPendingEdits() ?? workspaceRef.current;
+    const document = current?.documents.find((item) => item.id === current.activeDocumentId);
+    const targetId = nodeId ?? activeNodeIdRef.current;
+    if (!current || !document || !targetId || !findNode(document.nodes, targetId)) { showNotice("请先选择附件所属主题"); return; }
+    if (files && (files.length > MAX_IMPORT_FILES || files.reduce((sum, file) => sum + file.size, 0) > MAX_IMPORT_BYTES)) {
+      showNotice("单批最多 100 个文件、合计 512 MiB");
+      return;
+    }
+    const requestId = uuid();
+    attachmentImportRef.current = requestId;
+    setAttachmentBusy(true);
+    try {
+      const saved = await saveWorkspace(current);
+      if (!saved.ok || saved.target !== "indexeddb") throw new Error("请先完成本机主存储保存，再导入附件");
+      let assets: Array<{ assetId: string; name: string; metadata: AttachmentMetadata }> = [];
+      const failures: Array<{ name: string; error: string }> = [];
+      if (files) {
+        for (let index = 0; index < files.length; index++) {
+          if (attachmentImportRef.current !== requestId) return;
+          const file = files[index];
+          if (file.size > MAX_ATTACHMENT_BYTES) { failures.push({ name: file.name, error: "文件超过 128 MiB" }); continue; }
+          showNotice(`正在导入附件 ${index + 1}/${files.length}`);
+          const result = await bridge.importAttachments({ requestId, files: [{ name: file.name, bytes: await file.arrayBuffer() }] });
+          if (!result.ok) throw new Error(result.error || "附件导入失败");
+          if (result.cancelled) return;
+          assets.push(...(result.assets ?? []));
+          failures.push(...(result.failures ?? []));
+        }
+      } else {
+        const result = await bridge.importAttachments({ requestId, choose: true });
+        if (!result.ok) throw new Error(result.error || "附件导入失败");
+        if (result.cancelled) return;
+        assets = result.assets ?? [];
+        failures.push(...(result.failures ?? []));
+      }
+      if (attachmentImportRef.current !== requestId) return;
+      if (storageConflictRef.current || recoveryBusyRef.current || syncBusyRef.current) throw new Error("导入期间工作区状态改变，请重试");
+      const latest = flushPendingEdits() ?? workspaceRef.current;
+      const target = latest?.documents.find((item) => item.id === document.id);
+      if (!target || !findNode(target.nodes, targetId)) throw new Error("原主题已被删除，附件未加入正文");
+      if (assets.length) {
+        commitWorkspace((workspace) => ({
+          ...workspace,
+          documents: workspace.documents.map((item) => {
+            if (item.id !== document.id) return item;
+            const items = { ...(item.attachments?.items ?? {}) };
+            for (const asset of assets) items[asset.assetId] = asset.metadata;
+            return clearDocumentMarkdown({
+              ...item, updatedAt: now(), attachments: { version: 1, items },
+              nodes: updateNode(item.nodes, targetId, (node) => {
+                node.attachmentRefs = [...(node.attachmentRefs ?? []), ...assets.map(({ assetId, name }) => ({ assetId, name }))];
+              }),
+            });
+          }),
+        }), { label: "导入附件", group: null, nodeId: targetId });
+        setAttachmentGeneration((value) => value + 1);
+      }
+      showNotice(`已添加 ${assets.length} 个附件${failures.length ? `，${failures.length} 项失败\n${failures.map((item) => `${item.name} ${item.error}`).join("\n")}` : ""}`);
+    } catch (error) { showNotice(error instanceof Error ? error.message : "附件导入失败"); }
+    finally {
+      if (attachmentImportRef.current === requestId) attachmentImportRef.current = null;
+      setAttachmentBusy(false);
+    }
+  });
+  const cancelAttachmentImport = useEventCallback(() => {
+    const requestId = attachmentImportRef.current;
+    attachmentImportRef.current = null;
+    if (requestId) void (window.bike ?? window.localOutline)?.cancelAttachmentImport?.(requestId);
+    showNotice("正在取消附件导入");
+  });
+  const downloadMigrationBackup = useEventCallback(async () => {
+    try {
+      const original = await loadPreAttachmentWorkspace();
+      if (!original) { showNotice("当前环境没有附件格式升级前副本"); return; }
+      const result = exportWorkspace(original);
+      downloadText("bike-workspace-before-attachments-v1.json", result.content, result.mime);
+    } catch (error) { showNotice(error instanceof Error ? error.message : "读取升级前副本失败"); }
+  });
+  const exportArchive = useEventCallback(async () => {
+    const bridge = window.bike ?? window.localOutline;
+    if (!bridge?.exportWorkspaceArchive) { showNotice("请在 macOS 桌面版导出工作区 ZIP"); return; }
+    const current = flushPendingEdits() ?? workspaceRef.current;
+    if (!current || storageConflictRef.current || recoveryBusyRef.current) return;
+    try {
+      const saved = await saveWorkspace(current);
+      if (!saved.ok || saved.target !== "indexeddb") throw new Error("本机主存储保存完成后才能导出完整归档");
+      const result = await bridge.exportWorkspaceArchive(current);
+      if (!result.ok) throw new Error(result.error || "工作区归档失败");
+      if (!result.cancelled) showNotice(`已导出完整 ZIP，包含 ${result.attachmentCount ?? 0} 个附件`);
+    } catch (error) { showNotice(error instanceof Error ? error.message : "工作区归档失败"); }
+  });
+  const importArchive = useEventCallback(async (assetsOnly = false) => {
+    const bridge = window.bike ?? window.localOutline;
+    if (!bridge?.importWorkspaceArchive) { showNotice("请在 macOS 桌面版载入工作区 ZIP"); return; }
+    if (recoveryBusyRef.current || syncBusyRef.current || storageConflictRef.current || attachmentImportRef.current) return;
+    const current = flushPendingEdits() ?? workspaceRef.current;
+    if (!current) return;
+    recoveryBusyRef.current = true;
+    setRecoveryBusy(true);
+    try {
+      const saved = await saveWorkspace(current);
+      if (!saved.ok || saved.target !== "indexeddb") throw new Error("请先完成本机主存储保存");
+      const result = await bridge.importWorkspaceArchive();
+      if (!result.ok) throw new Error(result.error || "工作区归档导入失败");
+      if (result.cancelled) return;
+      if (assetsOnly) { setAttachmentGeneration((value) => value + 1); showNotice("附件库已补齐并完成校验"); return; }
+      const imported = migrateWorkspace(result.workspace);
+      if (!window.confirm(`归档包含 ${imported.documents.length} 个文档和 ${result.attachmentCount ?? 0} 个附件。替换前请保存当前工作区副本，继续？`)) return;
+      if ((flushPendingEdits() ?? workspaceRef.current) !== current || storageConflictRef.current) throw new Error("导入期间有新编辑，已保留当前工作区");
+      if (current.version === 2) {
+        const backup = await bridge.exportWorkspaceArchive?.(current);
+        if (!backup?.ok || backup.cancelled) throw new Error("当前工作区完整备份尚未完成，已停止替换");
+      } else await downloadWorkspaceBackup(current, "archive-import");
+      if ((flushPendingEdits() ?? workspaceRef.current) !== current || storageConflictRef.current) throw new Error("备份期间有新编辑，已停止替换");
+      replaceWorkspace(imported);
+      clearEditHistory();
+      setActiveNodeId(firstNodeIdInWorkspace(imported));
+      setFocusNodeId(null);
+      setNavigation((state) => resetRecentOpens(pruneNavigation(state, { liveIds: imported.documents.map((item) => item.id), trashIds: (imported.trash ?? []).map((entry) => entry.document.id) })));
+      const persisted = await saveWorkspace(imported);
+      if (!persisted.ok) throw persisted.error;
+      if (persisted.target !== "indexeddb") throw new Error("恢复内容暂存于备用存储，请恢复主存储后重试保存");
+      setAttachmentGeneration((value) => value + 1);
+      showNotice("工作区和附件已恢复");
+    } catch (error) { showNotice(error instanceof Error ? error.message : "工作区归档导入失败"); }
+    finally { recoveryBusyRef.current = false; setRecoveryBusy(false); }
   });
 
   const backupToCloud = useEventCallback(async () => {
@@ -2906,7 +3193,9 @@ function App() {
       return;
     }
     const currentWorkspace = flushPendingEdits() ?? workspaceRef.current;
-    if (currentWorkspace) downloadWorkspaceBackup(currentWorkspace, "load-backup");
+    try { if (currentWorkspace) await downloadWorkspaceBackup(currentWorkspace, "load-backup"); }
+    catch (error) { showNotice(error instanceof Error ? error.message : "备份失败"); return; }
+    if ((flushPendingEdits() ?? workspaceRef.current) !== currentWorkspace) { showNotice("备份期间内容已变化，请重新载入"); return; }
     pauseLocalBackup("restoring");
     pruneBackupPayloads(backupPayloadsRef.current, backupScheduleRef.current);
     replaceWorkspace(next);
@@ -3034,14 +3323,14 @@ function App() {
     try {
       const current = flushPendingEdits() ?? workspaceRef.current;
       if (current && !isWorkspacePersisted(current)) {
-        downloadWorkspaceBackup(current, "reload");
+        await downloadWorkspaceBackup(current, "reload");
       }
       const loaded = await initializeWorkspace(() => true, { includeFallback: false });
       if (!loaded) return;
       storageConflictRef.current = false;
       setStorageConflict(false);
       showNotice("已载入最新内容，本页未保存的修改已下载为备份文件");
-    } finally {
+    } catch (error) { showNotice(error instanceof Error ? error.message : "备份或恢复失败"); } finally {
       recoveryBusyRef.current = false;
       setRecoveryBusy(false);
     }
@@ -3063,7 +3352,7 @@ function App() {
         showNotice(`读取已保存版本失败：${latest.error.message}`);
         return;
       }
-      if (latest.status === "loaded") downloadWorkspaceBackup(latest.workspace, "overwrite");
+      if (latest.status === "loaded") await downloadWorkspaceBackup(latest.workspace, "overwrite");
       // Refuse the replacement if another save lands after this backed-up read.
       const result = await saveWorkspace(current);
       if (!result.ok) {
@@ -3076,7 +3365,7 @@ function App() {
       showNotice(result.target === "indexeddb"
         ? "已用本页内容覆盖已保存的工作区"
         : "IndexedDB 不可用，本页内容仍保存在备用存储中");
-    } finally {
+    } catch (error) { showNotice(error instanceof Error ? error.message : "备份或恢复失败"); } finally {
       recoveryBusyRef.current = false;
       setRecoveryBusy(false);
     }
@@ -3092,10 +3381,10 @@ function App() {
     clearAutoSyncTimer();
     try {
       const current = flushPendingEdits() ?? workspaceRef.current;
-      if (current) downloadWorkspaceBackup(current, "recovery-current");
+      if (current) await downloadWorkspaceBackup(current, "recovery-current");
       const latest = await loadWorkspace({ includeFallback: false });
       if (latest.status === "error") throw latest.error;
-      if (latest.status === "loaded") downloadWorkspaceBackup(latest.workspace, "recovery-saved");
+      if (latest.status === "loaded") await downloadWorkspaceBackup(latest.workspace, "recovery-saved");
       const saved = await saveWorkspace(snapshot.workspace);
       if (!saved.ok) throw saved.error;
       replaceWorkspace(snapshot.workspace);
@@ -3120,9 +3409,10 @@ function App() {
     }
   });
 
-  const discardRecoverySnapshot = useEventCallback((snapshot: WorkspaceRecoverySnapshot) => {
+  const discardRecoverySnapshot = useEventCallback(async (snapshot: WorkspaceRecoverySnapshot) => {
     if (!window.confirm("删除这个备用副本前会先下载它的备份文件。继续？")) return;
-    downloadWorkspaceBackup(snapshot.workspace, "discard-recovery");
+    try { await downloadWorkspaceBackup(snapshot.workspace, "discard-recovery"); }
+    catch (error) { showNotice(error instanceof Error ? error.message : "备份失败"); return; }
     const removed = discardWorkspaceRecoverySnapshot(snapshot);
     refreshRecoverySnapshots();
     showNotice(removed ? "备用副本已下载并删除" : "备用副本已有变化或无法删除，请重新查看");
@@ -3298,15 +3588,8 @@ function App() {
       showNotice("已取消拉取");
       return;
     }
-    if (currentWorkspace) {
-      const backup = exportWorkspace(currentWorkspace);
-      const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-      downloadText(
-        `bike-workspace-before-sync-pull-${stamp}.json`,
-        backup.content,
-        backup.mime,
-      );
-    }
+    try { await downloadWorkspaceBackup(currentWorkspace, "sync-pull"); }
+    catch (error) { showNotice(error instanceof Error ? error.message : "备份失败"); return; }
     const activeSync = overrideConfig
       ? persistSyncConfig(overrideConfig)
       : { config: syncConfig, state: syncState };
@@ -3369,23 +3652,14 @@ function App() {
 
       const result = await bikeBridge.checkForUpdates();
       if (!result.ok) {
-        showNotice(`检查更新失败：${result.error ?? "请稍后重试"}`);
+        showNotice(`更新未完成 ${result.error ?? "请稍后重试"}`);
         return;
       }
-      if (!result.updateAvailable) {
+      if (result.status === "not-available") {
         showNotice(`已是最新版本：${result.currentVersion}`);
-        return;
       }
-
-      const shouldOpen = window.confirm(
-        `发现新版本 ${result.latestVersion}\n当前版本：${result.currentVersion}\n\n是否打开发布页？`,
-      );
-      if (shouldOpen) {
-        window.open(result.releaseUrl || __RELEASE_PAGE_URL__, "_blank", "noopener,noreferrer");
-      }
-      showNotice(`发现新版本：${result.latestVersion}`);
     } catch (error) {
-      showNotice(`检查更新失败：${error instanceof Error ? error.message : String(error)}`);
+      showNotice(`更新失败 ${error instanceof Error ? error.message : String(error)}`);
     } finally {
       setIsCheckingUpdates(false);
     }
@@ -3419,15 +3693,8 @@ function App() {
           showNotice("已取消导入工作区");
           return;
         }
-        if (currentWorkspace) {
-          const backup = exportWorkspace(currentWorkspace);
-          const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-          downloadText(
-            `bike-workspace-before-import-${stamp}.json`,
-            backup.content,
-            backup.mime,
-          );
-        }
+        if (currentWorkspace) await downloadWorkspaceBackup(currentWorkspace, "import");
+        if ((flushPendingEdits() ?? workspaceRef.current) !== currentWorkspace) throw new Error("备份期间内容已变化，已停止替换");
         replaceWorkspace(imported);
         clearEditHistory();
         setNavigation((state) => resetRecentOpens(pruneNavigation(state, {
@@ -3541,7 +3808,7 @@ function App() {
               <strong>{snapshot.workspace.documents[0]?.title || "工作区"}</strong>
               <p>{snapshot.workspace.documents.length} 个文档 · {snapshot.savedAt ? formatTime(new Date(snapshot.savedAt).toISOString()) : "时间未知"}</p>
               <div className="loading-error-actions">
-                <button type="button" onClick={() => downloadWorkspaceBackup(snapshot.workspace, "recovery")} disabled={recoveryBusy}>下载副本</button>
+                <button type="button" onClick={() => void downloadWorkspaceBackup(snapshot.workspace, "recovery").catch((error) => showNotice(error.message))} disabled={recoveryBusy}>下载副本</button>
                 <button type="button" onClick={() => void restoreRecoverySnapshot(snapshot)} disabled={recoveryBusy || syncBusy}>恢复这个副本</button>
                 <button type="button" onClick={() => discardRecoverySnapshot(snapshot)} disabled={recoveryBusy}>下载并删除</button>
               </div>
@@ -3593,6 +3860,7 @@ function App() {
   const canRedo = historyRef.current.future.length > 0;
 
   return (
+    <AttachmentActionsContext.Provider value={{ add: (id) => void addAttachments(id), available: Boolean((window.bike ?? window.localOutline)?.importAttachments), busy: attachmentBusy, generation: attachmentGeneration }}>
     <main className="shell">
       <aside className="sidebar">
         <div className="brand">
@@ -3958,10 +4226,17 @@ function App() {
           <button onClick={() => exportActive("freemind")}>FreeMind</button>
           <button onClick={() => exportActive("html")}>HTML</button>
           <button onClick={exportActivePdf}>PDF</button>
+          {mode === "mindmap" && <><button onClick={() => void exportMap("svg")}>SVG</button><button onClick={() => void exportMap("png")}>PNG</button><button onClick={() => void exportMap("png", true)}>透明 PNG</button></>}
           <button onClick={exportAll}>
             <FileJson size={16} />
             工作区
           </button>
+          <button disabled={attachmentBusy || recoveryBusy || !(window.bike ?? window.localOutline)?.importAttachments} onClick={() => void addAttachments()}>添加附件</button>
+          {attachmentBusy && <button onClick={cancelAttachmentImport}>取消附件导入</button>}
+          <button disabled={recoveryBusy} onClick={() => void exportArchive()}>工作区 ZIP</button>
+          <button disabled={recoveryBusy} onClick={() => void importArchive()}>载入 ZIP</button>
+          <button disabled={recoveryBusy} onClick={() => void importArchive(true)}>补齐附件</button>
+          <button disabled={recoveryBusy || attachmentBusy} onClick={() => void cleanAttachments()}>清理附件</button>
           <span className="separator" />
           <button onClick={backupToCloud}>
             <Cloud size={16} />
@@ -3978,7 +4253,21 @@ function App() {
             mode === "markdown" && `markdown-${markdownPaneMode}`,
           )}
         >
-          <section className={classNames("editor-pane", mode === "markdown" && "markdown-editor-pane")}>
+          <section className={classNames("editor-pane", mode === "markdown" && "markdown-editor-pane")}
+            onPaste={(event) => {
+              const files = event.clipboardData?.files;
+              if (!files?.length || (event.nativeEvent as ClipboardEvent & { isComposing?: boolean }).isComposing) return;
+              event.preventDefault();
+              const row = (event.target as HTMLElement).closest<HTMLElement>("[data-node-id]");
+              void addAttachments(row?.dataset.nodeId, [...files]);
+            }}
+            onDropCapture={(event) => {
+              const files = event.dataTransfer?.files;
+              if (!files?.length) return;
+              event.preventDefault(); event.stopPropagation();
+              const row = (event.target as HTMLElement).closest<HTMLElement>("[data-node-id]");
+              void addAttachments(row?.dataset.nodeId, [...files]);
+            }}>
             {selectedTag && mode !== "markdown" && (
               <div className="filter-banner">
                 <Tag size={15} />
@@ -4115,6 +4404,7 @@ function App() {
                       <span>子主题</span>
                       <strong>{activeNode.children.length}</strong>
                     </div>
+                    <AttachmentPanel node={activeNode} onPatch={(attachmentRefs) => handleNodePatch(activeNode.id, { attachmentRefs })} onCancel={cancelAttachmentImport} onDownloadMigration={() => void downloadMigrationBackup()} />
                   </>
                 ) : (
                   <p className="empty-text">选择一个主题查看详情</p>
@@ -4275,6 +4565,7 @@ function App() {
         />
       )}
     </main>
+    </AttachmentActionsContext.Provider>
   );
 }
 
@@ -5221,7 +5512,7 @@ const renderInlineMarkdown = (text: string, keyPrefix: string, source: MarkdownR
   }
   const nodes: React.ReactNode[] = [];
   const tokenPattern =
-    /(!\[([^\]]*)\]\(([^)]+)\)|\[([^\]]+)\]\(([^)]+)\)|`([^`]+)`|\*\*([^*]+)\*\*|__([^_]+)__|~~([^~]+)~~|\*([^*]+)\*|_([^_]+)_)/g;
+    /(!\[((?:\\.|[^\]\\])*)\]\(([^)]+)\)|\[((?:\\.|[^\]\\])+)\]\(([^)]+)\)|`([^`]+)`|\*\*([^*]+)\*\*|__([^_]+)__|~~([^~]+)~~|\*([^*]+)\*|_([^_]+)_)/g;
   let lastIndex = 0;
   let match: RegExpExecArray | null;
 
@@ -5235,6 +5526,12 @@ const renderInlineMarkdown = (text: string, keyPrefix: string, source: MarkdownR
 
     const key = `${keyPrefix}-${match.index}`;
     if (match[2] !== undefined) {
+      if (/^bike-attachment:sha256:[a-f0-9]{64}$/u.test(match[3])) {
+        const label = markdownPlainText(match[2]);
+        nodes.push(<AttachmentItem key={key} reference={{ assetId: match[3].slice("bike-attachment:".length), name: label || "图片", alt: label }} />);
+        lastIndex = tokenPattern.lastIndex;
+        continue;
+      }
       const source = safeMarkdownUrl(match[3], "image");
       nodes.push(
         source ? (
@@ -5244,6 +5541,11 @@ const renderInlineMarkdown = (text: string, keyPrefix: string, source: MarkdownR
         ),
       );
     } else if (match[4] !== undefined) {
+      if (/^bike-attachment:sha256:[a-f0-9]{64}$/u.test(match[5])) {
+        nodes.push(<AttachmentItem key={key} reference={{ assetId: match[5].slice("bike-attachment:".length), name: markdownPlainText(match[4]) || "附件" }} />);
+        lastIndex = tokenPattern.lastIndex;
+        continue;
+      }
       const href = safeMarkdownUrl(match[5], "link");
       nodes.push(
         href ? (
@@ -5633,6 +5935,7 @@ const OutlineNodeRow = React.memo(function OutlineNodeRow({
             {node.imageAlt || node.imageName}
           </span>
         )}
+        <AttachmentItems node={node} compact />
         {node.table && (
           <span className="node-attachment">
             <Table size={13} />
@@ -5896,6 +6199,7 @@ function NodeMenu({
   const selectedWords = node.text.trim()
     ? Array.from(node.text.trim().matchAll(/[\p{L}\p{N}_-]+/gu)).length
     : 0;
+  const attachmentActions = useAttachmentActions();
   const nextIcon = node.icon ? undefined : "★";
   const nextTable = node.table
     ? undefined
@@ -6000,15 +6304,11 @@ function NodeMenu({
         </button>
         <button
           className="node-menu-row"
-          onClick={() =>
-            onPatch({
-              imageName: node.imageName ? undefined : "本地图片占位",
-              imageAlt: undefined,
-            })
-          }
+          disabled={!node.imageName && (!attachmentActions?.available || attachmentActions.busy)}
+          onClick={() => node.imageName ? onPatch({ imageName: undefined, imageAlt: undefined }) : attachmentActions?.add(node.id)}
         >
           <Image size={19} />
-          <span>{node.imageName ? "移除图片" : "添加图片"}</span>
+          <span>{node.imageName ? "移除旧图片引用" : "添加图片或文件"}</span>
         </button>
         <button className="node-menu-row" onClick={() => onPatch({ isTodo: !node.isTodo })}>
           <CheckCircle2 size={19} />
@@ -6587,6 +6887,7 @@ function MindMap({
                     ))}
                   </span>
                 )}
+                <AttachmentItems node={item.node} compact />
               </div>
             </foreignObject>
           ))}
@@ -6779,7 +7080,7 @@ const mindMapMetrics = (node: OutlineNode, depth: number) => {
   );
   const width = depth === 0 ? 300 : 360;
   const minHeight = depth === 0 ? 58 : 52;
-  const height = Math.max(minHeight, lines.length * 19 + 22);
+  const height = Math.max(minHeight, lines.length * 19 + 22) + (node.attachmentRefs?.length ? 132 : 0);
   return { lines, width, height };
 };
 
@@ -6850,7 +7151,7 @@ function PresentationView({ title, nodes, onSelect }: PresentationViewProps) {
   const playTimerRef = useRef<number | null>(null);
 
   const slides = useMemo(() => {
-    const list: Array<{ title: string; subtitle?: string; note?: string; points: OutlineNode[] }> = [];
+    const list: Array<{ title: string; subtitle?: string; note?: string; points: OutlineNode[]; node?: OutlineNode }> = [];
     
     // Slide 0: Cover
     list.push({
@@ -6863,6 +7164,7 @@ function PresentationView({ title, nodes, onSelect }: PresentationViewProps) {
     nodes.forEach((node) => {
       list.push({
         title: node.text || "未命名主题",
+        node,
         note: node.note,
         points: node.children,
       });
@@ -6944,6 +7246,7 @@ function PresentationView({ title, nodes, onSelect }: PresentationViewProps) {
           ) : (
             <div className="slide-content">
               <h2 className="slide-title">{activeSlide.title}</h2>
+              {activeSlide.node && <AttachmentItems node={activeSlide.node} />}
               {activeSlide.note && (
                 <blockquote className="slide-note">
                   {activeSlide.note}
@@ -6956,12 +7259,14 @@ function PresentationView({ title, nodes, onSelect }: PresentationViewProps) {
                       <span className="slide-point-bullet">•</span>
                       <span>{point.text || "未命名子项"}</span>
                     </div>
+                    <AttachmentItems node={point} />
                     {point.children && point.children.length > 0 && (
                       <div className="slide-point-nested">
                         {point.children.map((subpoint) => (
                           <div key={subpoint.id} className="slide-point-nested-item">
                             <span className="slide-point-nested-bullet">-</span>
                             <span>{subpoint.text || "未命名孙项"}</span>
+                            <AttachmentItems node={subpoint} />
                           </div>
                         ))}
                       </div>

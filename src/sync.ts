@@ -2,6 +2,7 @@ import { migrateDocument } from "./migrations";
 import type { OutlineDocument, Workspace } from "./types";
 import { documentSignature, legacyDocumentSignature, sameDocumentContent } from "./documentSignature";
 import { SYNC_TIMEOUT_MS, MAX_SYNC_RESPONSE_BYTES, readResponseText, withRequestBudget } from "../shared/bike-network.mjs";
+import { workspaceFormatVersion } from "../shared/bike-attachments.mjs";
 
 export type SyncConfig = {
   serverUrl: string;
@@ -31,6 +32,7 @@ export type SyncDocumentSummary = {
 };
 
 export type SyncManifest = {
+  capabilities?: string[];
   workspaceRevision: number;
   activeDocumentId: string | null;
   documentOrder: string[];
@@ -339,12 +341,18 @@ export const putRemoteDocument = async (
   document: OutlineDocument,
   expectedRevision: number | null,
 ) => {
+  if (document.attachments) {
+    const manifest = await fetchSyncManifest(config);
+    if (!manifest.capabilities?.includes("attachments-v1")) {
+      throw new SyncApiError(426, { message: "当前同步服务尚未支持附件保护，请先升级服务或通过 ZIP 迁移" });
+    }
+  }
   const response = await apiRequest<{ revision: number; document: unknown }>(
     config,
     `/api/documents/${encodeURIComponent(document.id)}`,
     {
       method: "PUT",
-      body: { expectedRevision, document },
+      body: { expectedRevision, document, capabilities: ["attachments-v1"] },
     },
   );
   return {
@@ -527,7 +535,7 @@ const workspaceFromRemote = async (
   if (!documents.length) return null;
   const ordered = orderedDocuments(documents, manifest.documentOrder);
   return {
-    version: 1,
+    version: workspaceFormatVersion({ documents: ordered }),
     activeDocumentId:
       manifest.activeDocumentId && ordered.some((document) => document.id === manifest.activeDocumentId)
         ? manifest.activeDocumentId
@@ -767,7 +775,7 @@ export const syncWorkspaceWithRemote = async (
     activeDocumentId === workspace.activeDocumentId;
   const nextWorkspace: Workspace = unchanged ? workspace : {
     ...workspace,
-    version: 1,
+    version: workspaceFormatVersion({ ...workspace, documents: ordered }),
     activeDocumentId,
     documents: ordered,
   };

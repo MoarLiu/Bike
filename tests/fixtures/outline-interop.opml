@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<opml version="2.0">
+  <head><title>导入兼容样本 😀</title></head>
+  <body>
+    <outline text="章节一" _note="第一行&#10;第二行">
+      <outline text="待办事项" _checked="true" />
+      <outline text="https://example.com/阅读" />
+    </outline>
+    <outline text="章节二 #标签" />
+  </body>
+</opml>

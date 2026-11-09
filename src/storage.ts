@@ -3,12 +3,15 @@ import { uuid } from "./id";
 import { migrateWorkspace } from "./migrations";
 import { assertWorkspaceBudget } from "../shared/bike-limits.mjs";
 import { sha256Hex } from "./knowledge";
+import { workspaceAttachmentAssets, workspaceFormatVersion } from "../shared/bike-attachments.mjs";
 
 const DB_NAME = "bike-db";
 const LEGACY_DB_NAME = "local-outline-db";
 const STORE_NAME = "workspace-store";
 const WORKSPACE_KEY = "workspace";
 const WORKSPACE_META_KEY = "workspace-meta";
+const PRE_ATTACHMENT_KEY = "workspace-before-attachments-v1";
+const PRE_ATTACHMENT_FALLBACK_KEY = "bike-workspace-before-attachments-v1";
 const FALLBACK_KEY = "bike-workspace";
 const FALLBACK_META_KEY = "bike-workspace-meta";
 const LEGACY_FALLBACK_KEY = "local-outline-workspace";
@@ -321,6 +324,13 @@ export const listWorkspaceRecoverySnapshots = (current?: Workspace | null): Work
     .filter((snapshot) => !current || !sameWorkspace(snapshot.workspace, current))
     .map(({ id, workspace, savedAt, baseRevision }) => ({ id, workspace, savedAt, baseRevision }));
 
+export const attachmentRecoveryRoots = async (): Promise<Workspace[]> => {
+  const result = readFallbackSnapshots();
+  if (result.error) throw result.error;
+  const original = await loadPreAttachmentWorkspace();
+  return [...result.snapshots.map((snapshot) => snapshot.workspace), ...(original ? [original] : [])];
+};
+
 const removeFallbackSnapshot = (snapshot: FallbackSnapshot) => {
   try {
     if (localStorage.getItem(snapshot.id) !== snapshot.raw) return false;
@@ -591,14 +601,23 @@ const writeWorkspace = async (
           return;
         }
         const revision = stored.revision + 1;
-        try {
-          store.put(workspace, WORKSPACE_KEY);
-          store.put({ savedAt: new Date().toISOString(), revision, writer: pageId, saveId }, WORKSPACE_META_KEY);
-          result = { status: "saved", revision };
-        } catch (error) {
-          failure = error;
-          tx.abort();
-        }
+        const commit = (previous?: Workspace) => {
+          try {
+            if (previous?.version === 1 && workspace.version === 2) {
+              store.put(previous, PRE_ATTACHMENT_KEY);
+            }
+            store.put(workspace, WORKSPACE_KEY);
+            store.put({ savedAt: new Date().toISOString(), revision, writer: pageId, saveId }, WORKSPACE_META_KEY);
+            result = { status: "saved", revision };
+          } catch (error) {
+            failure = error;
+            tx.abort();
+          }
+        };
+        if (workspace.version === 2) {
+          const previousRequest = store.get(WORKSPACE_KEY);
+          previousRequest.onsuccess = () => commit(previousRequest.result);
+        } else commit();
       };
       tx.oncomplete = () => {
         if (result) resolve(result);
@@ -658,7 +677,11 @@ export const saveWorkspace = (
   workspace: Workspace,
   options: { overwrite?: boolean } = {},
 ): Promise<WorkspaceSaveResult> => {
-  try { assertWorkspaceBudget(workspace); }
+  try {
+    assertWorkspaceBudget(workspace);
+    workspaceAttachmentAssets(workspace);
+    if (workspaceFormatVersion(workspace) !== workspace.version) throw new Error("附件工作区需要先升级到 version 2");
+  }
   catch (error) { return Promise.resolve({ ok: false, error: toError(error) }); }
   const epoch = adoptEpoch;
   const sequence = ++saveSequence;
@@ -680,6 +703,9 @@ export const saveWorkspace = (
 // over data another page saved later.
 const writeFallback = (workspace: Workspace, sequence: number): WorkspaceSaveResult => {
   try {
+    if (workspace.version === 2 && persistedWorkspace?.version === 1) {
+      localStorage.setItem(PRE_ATTACHMENT_FALLBACK_KEY, JSON.stringify(persistedWorkspace));
+    }
     const savedAt = new Date(Math.max(Date.now(), workspaceUpdatedAt(workspace) + 1)).toISOString();
     const id = `${FALLBACK_SNAPSHOT_PREFIX}${pageId}:${uuid()}`;
     const pending = [...pendingSaveIds];
@@ -700,3 +726,30 @@ const writeFallback = (workspace: Workspace, sequence: number): WorkspaceSaveRes
 
 export const saveWorkspaceFallback = (workspace: Workspace): WorkspaceSaveResult =>
   writeFallback(workspace, ++saveSequence);
+
+export const loadPreAttachmentWorkspace = async (): Promise<Workspace | null> => {
+  let db: IDBDatabase | null = null;
+  let stored: unknown;
+  let failure: unknown;
+  try {
+    const activeDb = await openDb();
+    db = activeDb;
+    stored = await new Promise<unknown>((resolve, reject) => {
+      const tx = activeDb.transaction(STORE_NAME, "readonly");
+      const request = tx.objectStore(STORE_NAME).get(PRE_ATTACHMENT_KEY);
+      tx.oncomplete = () => resolve(request.result);
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error);
+    });
+  } catch (error) { failure = error; }
+  finally { db?.close(); }
+  if (!stored) {
+    const raw = localStorage.getItem(PRE_ATTACHMENT_FALLBACK_KEY);
+    if (raw) stored = JSON.parse(raw);
+  }
+  if (!stored && failure) throw toError(failure);
+  if (!stored) return null;
+  const workspace = migrateWorkspace(stored);
+  if (workspace.version !== 1) throw new Error("升级前副本格式无效，原记录已保留");
+  return workspace;
+};
