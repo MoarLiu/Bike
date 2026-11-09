@@ -1,5 +1,5 @@
 // Shared by the Electron renderer, tests, and MCP. No DOM and no app imports.
-import { markdownLinkOrigins, markdownTextForExport } from "./bike-markdown.mjs";
+import { markdownLinkOrigins, markdownTextForExport, rewriteMarkdownLabel } from "./bike-markdown.mjs";
 
 export const KNOWLEDGE_VERSION = 1;
 export const MAX_METADATA_BYTES = 2 * 1024 * 1024;
@@ -286,10 +286,11 @@ export const extractKnowledgeTags = (text) => {
   const source = String(text ?? "");
   const mask = codeMask(source);
   const tags = [];
+  const links = scanLinks(source);
   const pattern = /(^|[\s])#([\p{L}\p{N}_-]+)/gu;
   for (const match of source.matchAll(pattern)) {
     const hashIndex = match.index + match[1].length;
-    if (mask[hashIndex]) continue;
+    if (mask[hashIndex] || links.some((link) => hashIndex >= link.start && hashIndex < link.end)) continue;
     const lineStart = source.lastIndexOf("\n", hashIndex - 1) + 1;
     const prefix = source.slice(lineStart, hashIndex);
     if (/^#{1,6}$/u.test(prefix) && /\s/u.test(source[hashIndex + 1] ?? "")) continue;
@@ -307,6 +308,27 @@ export const extractKnowledgeTags = (text) => {
 };
 
 const clone = (value) => structuredClone(value);
+
+const mapKnowledgeNodes = (nodes = [], mapper) => {
+  const result = [];
+  const stack = [{ source: nodes, target: result, parent: null }];
+  const pending = [];
+  while (stack.length) {
+    const frame = stack.pop();
+    for (let i = 0; i < frame.source.length; i++) {
+      const node = frame.source[i];
+      const children = [];
+      pending.push({ node, children, target: frame.target, index: i });
+      stack.push({ source: childNodes(node), target: children });
+    }
+  }
+  for (let i = pending.length - 1; i >= 0; i--) {
+    const { node, children, target, index } = pending[i];
+    const sameChildren = children.length === childNodes(node).length && children.every((child, at) => child === node.children[at]);
+    target[index] = mapper(sameChildren ? node : { ...node, children });
+  }
+  return result.length === nodes.length && result.every((node, i) => node === nodes[i]) ? nodes : result;
+};
 
 export const emptyKnowledge = () => ({ version: KNOWLEDGE_VERSION, references: [], relations: [] });
 
@@ -504,10 +526,14 @@ const setNodeField = (document, nodeId, field, text) => {
 };
 
 export const withFieldText = (document, { nodeId, field, text }) => {
-  const next = clone(document);
-  const previousText = fieldText(findKnowledgeNode(document.nodes, nodeId)?.node, field);
-  if (previousText === text) return document;
-  if (!setNodeField(next, nodeId, field, text)) return document;
+  const located = findKnowledgeNode(document.nodes, nodeId);
+  const previousText = fieldText(located?.node, field);
+  if (!located || previousText === text) return document;
+  const next = { ...document, nodes: mapKnowledgeNodes(document.nodes, (node) => node.id === nodeId ? { ...node, [field]: text } : node) };
+  if (field === "text" && typeof document.markdownSource === "string") {
+    next.markdownSource = rewriteMarkdownLabel(document, { nodeId, nextLabel: text });
+    if (next.markdownSource === undefined) delete next.markdownUpdatedAt;
+  }
   if (knowledgeEditable(next.knowledge)) {
     next.knowledge = relocateFieldReferences(next.knowledge, { nodeId, field, text, previousText });
     const raws = new Set(scanLinks(text).map((link) => link.raw));
@@ -662,12 +688,19 @@ export const resolveDocumentConnections = (workspace, document) => {
 };
 
 const targetKey = (documentId, nodeId = null) => `${documentId}\u0000${nodeId ?? ""}`;
+// Undo retains earlier document objects. A WeakMap keyed by those objects would
+// retain a full search index for every edit as long as history remains alive.
+// Cache only the latest live version of each document instead.
+const documentIndexCache = new Map();
 
 export const buildKnowledgeIndex = (workspace) => {
+  const liveIds = new Set(liveDocuments(workspace).map((document) => document.id));
+  for (const id of documentIndexCache.keys()) if (!liveIds.has(id)) documentIndexCache.delete(id);
   const documents = [];
   const nodes = [];
   const tagMap = new Map();
   const backlinks = new Map();
+  const nodesByDocument = new Map();
   for (const document of liveDocuments(workspace)) {
     const nodeRecords = new Map();
     documents.push({
@@ -675,7 +708,10 @@ export const buildKnowledgeIndex = (workspace) => {
       title: document.title || "未命名文档",
       updatedAt: document.updatedAt || "",
     });
-    walkNodes(document.nodes, (node, ancestors) => {
+    let cached = documentIndexCache.get(document.id);
+    if (cached?.document !== document) {
+      const records = [];
+      walkNodes(document.nodes, (node, ancestors) => {
       const parentIds = ancestors.map((item) => item.id);
       const record = {
         documentId: document.id,
@@ -690,20 +726,32 @@ export const buildKnowledgeIndex = (workspace) => {
         codeBlock: node.codeBlock || "",
         tableText: Array.isArray(node.table) ? node.table.flat().join(" ") : "",
       };
+      record.tagKeys = new Set([...extractKnowledgeTags(record.text), ...extractKnowledgeTags(record.note)].map(foldKey));
+      record.tags = [...new Set([...extractKnowledgeTags(record.text), ...extractKnowledgeTags(record.note)])];
+      record.foldedText = foldKey(record.text); record.foldedNote = foldKey(record.note);
+      record.foldedCode = foldKey(`${record.codeBlock} ${record.tableText}`);
+      records.push(record);
+      });
+      cached = { document, records, hasLinks: records.some((record) => record.text.includes("[[") || record.note.includes("[[")) || document.markdownSource?.includes("[[") };
+      documentIndexCache.set(document.id, cached);
+    }
+    nodesByDocument.set(document.id, cached.records);
+    for (const record of cached.records) {
       nodes.push(record);
-      nodeRecords.set(node.id, record);
+      nodeRecords.set(record.nodeId, record);
       const seen = new Set();
-      for (const tag of [...extractKnowledgeTags(record.text), ...extractKnowledgeTags(record.note)]) {
+      for (const tag of record.tags) {
         const key = foldKey(tag);
         if (seen.has(key)) continue;
         seen.add(key);
         const entry = tagMap.get(key) ?? { key, label: tag, nodes: [], documentIds: new Set() };
-        entry.nodes.push({ documentId: document.id, nodeId: node.id });
+        entry.nodes.push({ documentId: document.id, nodeId: record.nodeId });
         entry.documentIds.add(document.id);
         tagMap.set(key, entry);
       }
-    });
-    for (const item of resolveDocumentConnections(workspace, document)) {
+    }
+    const connections = cached.hasLinks || document.knowledge?.references?.length ? resolveDocumentConnections(workspace, document) : [];
+    for (const item of connections) {
       if (item.status !== "resolved") continue;
       const target = item.reference?.target ?? (item.resolved?.documentId ? { documentId: item.resolved.documentId, nodeId: item.resolved.nodeId } : null);
       if (!target?.documentId) continue;
@@ -730,6 +778,7 @@ export const buildKnowledgeIndex = (workspace) => {
   return {
     documents,
     nodes,
+    nodesByDocument,
     tags: [...tagMap.values()].map((tag) => ({
       key: tag.key,
       label: tag.label,
@@ -779,6 +828,11 @@ const taskMatches = (node, task) => {
   if (task === "done") return node.isTodo && node.checked;
   return false;
 };
+const searchQueryCaches = new WeakMap();
+const searchStats = new WeakMap();
+export const knowledgeSearchStats = (index) => ({ ...(searchStats.get(index) ?? { scannedNodes: 0, cacheHits: 0 }) });
+export const knowledgeIndexCacheStats = () => ({ documents: documentIndexCache.size,
+  nodes: [...documentIndexCache.values()].reduce((total, entry) => total + entry.records.length, 0) });
 
 export const searchKnowledge = (index, filters = {}) => {
   const query = identityKey(filters.query ?? "").trim();
@@ -788,14 +842,22 @@ export const searchKnowledge = (index, filters = {}) => {
   const favorites = filters.favoriteOnly ? new Set(filters.favoriteIds ?? []) : null;
   const limit = Math.max(1, Math.min(MAX_SEARCH_PAGE, filters.limit ?? MAX_SEARCH_PAGE));
   const offset = Math.max(0, filters.offset ?? 0);
-  const hits = [];
+  let cache = searchQueryCaches.get(index);
+  if (!cache) { cache = new Map(); searchQueryCaches.set(index, cache); }
+  const key = JSON.stringify([foldedQuery, [...tags].sort(), documentIds ? [...documentIds].sort() : null, filters.task ?? "all", favorites ? [...favorites].sort() : null, filters.includeCode === true]);
+  const stats = searchStats.get(index) ?? { scannedNodes: 0, cacheHits: 0 };
+  searchStats.set(index, stats);
+  const cached = cache.get(key);
+  const hits = cached ?? [];
   const matchesNodeFilters = (node) => taskMatches(node, filters.task)
-    && (!tags.length || tags.every((tag) => [...extractKnowledgeTags(node.text), ...extractKnowledgeTags(node.note)].map(foldKey).includes(tag)));
+    && (!tags.length || tags.every((tag) => (node.tagKeys ?? new Set([...extractKnowledgeTags(node.text), ...extractKnowledgeTags(node.note)].map(foldKey))).has(tag)));
+  if (cached) stats.cacheHits += 1;
+  else {
   if (query) {
     for (const document of index.documents) {
       if (documentIds && !documentIds.has(document.id)) continue;
       if (favorites && !favorites.has(document.id)) continue;
-      if ((tags.length || (filters.task && filters.task !== "all")) && !index.nodes.some((node) => node.documentId === document.id && matchesNodeFilters(node))) continue;
+      if ((tags.length || (filters.task && filters.task !== "all")) && !(index.nodesByDocument?.get(document.id) ?? index.nodes.filter((node) => node.documentId === document.id)).some(matchesNodeFilters)) continue;
       const title = document.title || "";
       const foldedTitle = foldKey(title);
       if (foldedTitle !== foldedQuery && !foldedTitle.includes(foldedQuery)) continue;
@@ -811,11 +873,12 @@ export const searchKnowledge = (index, filters = {}) => {
     }
   }
   for (const node of index.nodes) {
+    stats.scannedNodes += 1;
     if (documentIds && !documentIds.has(node.documentId)) continue;
     if (favorites && !favorites.has(node.documentId)) continue;
     if (!taskMatches(node, filters.task)) continue;
     if (tags.length) {
-      const present = new Set([
+      const present = node.tagKeys ?? new Set([
         ...extractKnowledgeTags(node.text),
         ...extractKnowledgeTags(node.note),
       ].map(foldKey));
@@ -829,7 +892,8 @@ export const searchKnowledge = (index, filters = {}) => {
       ];
       if (filters.includeCode) fields.push(["code", `${node.codeBlock} ${node.tableText}`, 50]);
       for (const [field, value, rank] of fields) {
-        if (!foldKey(value).includes(foldedQuery)) continue;
+        const folded = field === "text" ? node.foldedText : field === "note" ? node.foldedNote : node.foldedCode;
+        if (!(folded ?? foldKey(value)).includes(foldedQuery)) continue;
         hits.push({
           documentId: node.documentId,
           nodeId: node.nodeId,
@@ -861,6 +925,9 @@ export const searchKnowledge = (index, filters = {}) => {
     String(right.updatedAt).localeCompare(String(left.updatedAt)) ||
     `${left.documentId}:${left.nodeId ?? ""}`.localeCompare(`${right.documentId}:${right.nodeId ?? ""}`)
   ));
+    cache.set(key, hits);
+    while (cache.size > 4 || (cache.size > 1 && [...cache.values()].reduce((total, items) => total + items.length, 0) > 50_000)) cache.delete(cache.keys().next().value);
+  }
   const page = hits.slice(offset, offset + limit);
   const groups = [];
   for (const hit of page) {
@@ -933,6 +1000,7 @@ export const suggestLinkTargets = (workspace, rawQuery, { limit = 8 } = {}) => {
 
 const rewriteField = (document, node, field, workspace, rename, ambiguous) => {
   const text = fieldText(node, field);
+  if (!text.includes("[[")) return false;
   const links = scanLinks(text);
   const fieldReferences = knowledgeEditable(document.knowledge) ? referencesForField(document.knowledge, node.id, field) : [];
   const covered = new Set();
@@ -996,7 +1064,9 @@ export const renameTarget = (workspace, options) => {
   if (!original) return { workspace, updatedDocumentIds: [], ambiguous: [] };
   const previous = options.previousLabel ?? (nodeId ? findKnowledgeNode(original.nodes, nodeId)?.node.text ?? "" : original.title);
   if (previous === nextLabel) return { workspace, updatedDocumentIds: [], ambiguous: [] };
-  const source = options.mutate ? workspace : clone(workspace);
+  const source = options.mutate ? workspace : { ...workspace, documents: liveDocuments(workspace).map((document) => ({
+    ...document, ...(document.knowledge ? { knowledge: clone(document.knowledge) } : {}),
+  })) };
   const originalKnowledge = new Map();
   const sourceBindings = new Map();
   const sourceOrigins = new Map();
@@ -1022,7 +1092,7 @@ export const renameTarget = (workspace, options) => {
   if (nodeId) {
     const located = findKnowledgeNode(document.nodes, nodeId);
     if (!located) return { workspace, updatedDocumentIds: [], ambiguous: [] };
-    located.node.text = nextLabel;
+    document.nodes = mapKnowledgeNodes(document.nodes, (node) => node.id === nodeId ? { ...node, text: nextLabel } : node);
     if (knowledgeEditable(document.knowledge)) {
       document.knowledge = relocateFieldReferences(document.knowledge, { nodeId, field: "text", text: nextLabel, previousText: previous });
     }
@@ -1032,10 +1102,13 @@ export const renameTarget = (workspace, options) => {
   for (const candidate of liveDocuments(source)) {
     if (candidate.knowledge && !knowledgeEditable(candidate.knowledge)) continue;
     let changed = false;
-    walkNodes(candidate.nodes, (node) => {
+    candidate.nodes = mapKnowledgeNodes(candidate.nodes, (originalNode) => {
+      const node = { ...originalNode };
       const renamedNode = candidate.id === documentId && node.id === nodeId;
-      if (!renamedNode && rewriteField(candidate, node, "text", source, rename, ambiguous)) changed = true;
-      if (rewriteField(candidate, node, "note", source, rename, ambiguous)) changed = true;
+      const textChanged = !renamedNode && rewriteField(candidate, node, "text", source, rename, ambiguous);
+      const noteChanged = rewriteField(candidate, node, "note", source, rename, ambiguous);
+      if (textChanged || noteChanged) { changed = true; return node; }
+      return originalNode;
     });
     if (changed) updated.add(candidate.id);
   }
@@ -1103,11 +1176,23 @@ export const renameTarget = (workspace, options) => {
     updated.add(candidate.id);
   }
   for (const candidate of liveDocuments(source)) {
+    if (candidate.id === documentId && typeof candidate.markdownSource === "string") {
+      const before = candidate.markdownSource;
+      const next = rewriteMarkdownLabel(candidate, { nodeId, nextLabel });
+      if (next !== before) {
+        candidate.markdownSource = next;
+        candidate.knowledge = relocateMarkdownReferences(candidate.knowledge, next, before);
+      }
+    }
     if (!updated.has(candidate.id) && originalKnowledge.has(candidate.id)) {
       const original = originalKnowledge.get(candidate.id);
       if (original === undefined) delete candidate.knowledge;
       else candidate.knowledge = original;
     }
+  }
+  if (!options.mutate) {
+    const originals = new Map(liveDocuments(workspace).map((document) => [document.id, document]));
+    source.documents = source.documents.map((document) => updated.has(document.id) ? document : originals.get(document.id));
   }
   return { workspace: source, updatedDocumentIds: [...updated], ambiguous };
 };
@@ -1246,17 +1331,27 @@ export const moveSubtreeConnections = (sourceDocument, targetDocument, movedIds)
     return true;
   });
   const movedReferences = [];
+  const movedGroups = new Map();
   sourceKnowledge.references = sourceKnowledge.references.filter((reference) => {
     const group = sourceKnowledge.sourceGroups?.[reference.source.groupId];
     if (group) {
       const moved = group.candidates.filter((item) => ids.has(item.nodeId));
       if (moved.length) {
         targetKnowledge.sourceGroups ??= {};
-        targetKnowledge.sourceGroups[reference.source.groupId] = { ...group, candidates: moved };
+        let targetGroupId = movedGroups.get(reference.source.groupId);
+        if (!targetGroupId) {
+          targetGroupId = createId("source");
+          movedGroups.set(reference.source.groupId, targetGroupId);
+          targetKnowledge.sourceGroups[targetGroupId] = { ...group, candidates: moved };
+        }
         const remaining = group.candidates.filter((item) => !ids.has(item.nodeId));
-        movedReferences.push({ ...reference, id: remaining.length ? createId("ref") : reference.id });
+        movedReferences.push({ ...reference, id: remaining.length ? createId("ref") : reference.id,
+          source: { ...reference.source, ...moved[0], groupId: targetGroupId, start: -1, end: -1 } });
         if (!remaining.length) return false;
+        reference.source = { ...reference.source, ...remaining[0], start: -1, end: -1 };
       }
+      if (reference.target?.documentId === source.id && reference.target.nodeId && ids.has(reference.target.nodeId)) reference.target = { ...reference.target, documentId: target.id };
+      return true;
     }
     if (reference.source?.kind === "node-field" && ids.has(reference.source.nodeId)) {
       movedReferences.push(reference);
@@ -1328,7 +1423,8 @@ export const remapCollidingIds = (document, usedIds, idFactory = (prefix) => cre
       references: next.knowledge.references.map((reference) => ({
         ...reference,
         source: reference.source?.kind === "node-field"
-          ? { ...reference.source, nodeId: idMap.get(reference.source.nodeId) ?? reference.source.nodeId }
+          ? { ...reference.source, nodeId: idMap.get(reference.source.nodeId) ?? reference.source.nodeId,
+            ...(reference.source.sourceNodeId ? { sourceNodeId: idMap.get(reference.source.sourceNodeId) ?? reference.source.sourceNodeId } : {}) }
           : reference.source,
         target: {
           documentId: reference.target?.documentId === sourceId || reference.target?.documentId === document.id && idMap.has(document.id)
@@ -1470,7 +1566,8 @@ export const resolveWikiLink = (workspace, raw, origin = null) => {
     const sourceText = origin.kind === "markdown"
       ? String(document.markdownSource ?? "")
       : fieldText(findKnowledgeNode(document.nodes, origin.nodeId)?.node, origin.field);
-    if (origin.start < 0 || sourceText.slice(origin.start, origin.end) !== raw) {
+    const sourceRaw = origin.sourceRaw ?? raw;
+    if (origin.start < 0 || sourceText.slice(origin.start, origin.end) !== sourceRaw) {
       return { status: "sourceMismatch", link };
     }
     const normalized = anchorMarkdownReferences(document);
@@ -1488,7 +1585,7 @@ export const resolveWikiLink = (workspace, raw, origin = null) => {
       return { status: referenceStatus(workspace, document, reference), ...reference.target, link };
     }
     // Do not reinterpret a displaced binding as a link to a recycled name.
-    if (references.some((reference) => sourceMatches(normalized, reference, origin) && reference.source.raw === raw && referenceStatus(workspace, document, reference) === "sourceMismatch")) {
+    if (references.some((reference) => sourceMatches(normalized, reference, origin) && reference.source.raw === sourceRaw && referenceStatus(workspace, document, reference) === "sourceMismatch")) {
       return { status: "sourceMismatch", link };
     }
   }
@@ -1542,6 +1639,8 @@ export const attachReference = (document, input) => {
 
 const LOSSY_MARKER = "<!-- bike-export:lossy -->";
 const METADATA_PATTERN = /<!--\s*bike:document:v(\d+)\s+([A-Za-z0-9_-]+)\s*-->/gu;
+const METADATA_START = "<!-- bike:metadata -->";
+const METADATA_END = "<!-- /bike:metadata -->";
 
 const jsonDepth = (value, depth = 1) => {
   let maximum = depth;
@@ -1579,8 +1678,17 @@ const validMetadataTree = (records) => {
 export const readBikeMetadata = (markdown) => {
   const source = String(markdown ?? "").replace(/^\uFEFF/u, "").replace(/\r\n?/gu, "\n");
   const mask = codeMask(source);
-  const loose = [...source.matchAll(/<!--\s*bike:document:[^>]*-->/gu)].filter((match) => !mask[match.index]);
-  const matches = [...source.matchAll(METADATA_PATTERN)].filter((match) => !mask[match.index]);
+  const standalone = (match) => !mask[match.index] && /^ {0,3}$/u.test(source.slice(source.lastIndexOf("\n", match.index - 1) + 1, match.index));
+  const starts = [...source.matchAll(/^<!-- bike:metadata -->$/gmu)].filter(standalone);
+  const ends = [...source.matchAll(/^<!-- \/bike:metadata -->$/gmu)].filter(standalone);
+  let envelope = null;
+  if (starts.length || ends.length) {
+    if (starts.length !== 1 || ends.length !== 1 || starts[0].index >= ends[0].index) return { status: "invalid", error: "Bike 元数据封装无效或重复" };
+    envelope = { start: starts[0].index, end: ends[0].index + METADATA_END.length };
+  }
+  const loose = [...source.matchAll(/<!--\s*bike:document:v\d+[^>]*-->/gu)].filter(standalone);
+  const matches = [...source.matchAll(METADATA_PATTERN)].filter(standalone);
+  if (envelope && (!matches.length || matches[0].index < envelope.start || matches[0].index >= envelope.end)) return { status: "invalid", error: "Bike 元数据字段无效" };
   if (!loose.length && !matches.length) return { status: "absent", body: source };
   if (matches.length === 1 && matches[0][1] !== String(KNOWLEDGE_VERSION)) {
     return { status: "unknown-version", version: Number(matches[0][1]) };
@@ -1611,13 +1719,14 @@ export const readBikeMetadata = (markdown) => {
   const validNodes = payload.nodes.every((node) => isRecord(node) && typeof node.id === "string" && Array.isArray(node.path) && node.path.every((part) => Number.isInteger(part) && part >= 0) && typeof node.text === "string" && (node.exportText === undefined || typeof node.exportText === "string") && (node.note === undefined || typeof node.note === "string"));
   if (!validNodes) return { status: "invalid", error: "Bike 节点映射无效" };
   if (payload.title !== undefined && typeof payload.title !== "string") return { status: "invalid", error: "Bike 标题无效" };
+  if (payload.documentAttributes !== undefined && !isRecord(payload.documentAttributes)) return { status: "invalid", error: "Bike 文档扩展无效" };
   if (payload.structure !== undefined && (payload.structure !== "tree-v1" || !validMetadataTree(payload.nodes))) {
     return { status: "invalid", error: "Bike 原始层级映射无效" };
   }
   if (payload.knowledge !== undefined && !knowledgeEditable(payload.knowledge)) {
     return { status: "invalid", error: "Bike 知识字段无效" };
   }
-  const body = canonicalText(source.replace(match[0], ""));
+  const body = canonicalText(envelope ? source.slice(0, envelope.start) + source.slice(envelope.end) : source.replace(match[0], ""));
   return {
     status: payload.digest === sha256Hex(body) ? "matched" : "digest-mismatch",
     body,
@@ -1639,10 +1748,12 @@ const flattenIdentity = (nodes) => {
 
 export const encodeBikeMetadata = (document, body) => {
   if (document.knowledge && !knowledgeEditable(document.knowledge)) throw new Error("当前版本无法无损导出这份知识数据，请使用 JSON 导出保留原数据");
+  const { id, title, nodes, knowledge, markdownSource, markdownUpdatedAt, updatedAt, ...documentAttributes } = document;
   const payload = {
     v: KNOWLEDGE_VERSION,
     documentId: document.id,
     title: document.title,
+    documentAttributes,
     structure: "tree-v1",
     nodes: flattenIdentity(document.nodes ?? []).map(({ node, ...record }) => {
       const { id, text, note, children, ...attributes } = node;
@@ -1684,11 +1795,17 @@ export const readableRelations = (document, { separator = " → " } = {}) => {
 
 export const finalizeMarkdownExport = (body, document, { metadata = false } = {}) => {
   const read = readBikeMetadata(body);
+  if (["invalid", "unknown-version", "too-large"].includes(read.status)) return { content: String(body ?? ""), lossy: true, error: read.error ?? "原 Markdown 中的 Bike 元数据无法安全更新，请使用 JSON 保留原数据" };
   const plain = stripLossyTrailer(read.status === "unknown-version" ? String(body ?? "") : read.body ?? String(body ?? ""));
   const canonical = canonicalText(plain);
   if (!metadata) {
     const knowledge = knowledgeEditable(document.knowledge) ? document.knowledge : null;
-    if (!knowledge || (!knowledge.references.length && !knowledge.relations.length)) return { content: canonical, lossy: false };
+    const lossReasons = ["稳定 id 与引用身份不包含在普通 Markdown 中"];
+    if (String(body ?? "") !== canonical) lossReasons.push("文件末尾空白已规范化");
+    let textNormalized = markdownTextForExport(String(document.title ?? "")) !== String(document.title ?? "");
+    walkNodes(document.nodes, (node) => { if (markdownTextForExport(String(node.text ?? "")) !== String(node.text ?? "")) textNormalized = true; });
+    if (textNormalized) lossReasons.push("主题文本中的换行或连续空白已规范化");
+    if (!knowledge || (!knowledge.references.length && !knowledge.relations.length)) return { content: canonical, lossy: true, lossReasons };
     const labels = nodeLabelMap(document);
     const lines = ["", LOSSY_MARKER, "## 关系", ""];
     if (knowledge.relations.length) {
@@ -1701,10 +1818,10 @@ export const finalizeMarkdownExport = (body, document, { metadata = false } = {}
       lines.push("- （没有跨主题关系）");
     }
     lines.push("", "> 此 Markdown 不包含稳定 id。链接文字仍可读，但重名和身份信息可能丢失。如需在 Bike 间无损往返，请导出带元数据的 Markdown。", "");
-    return { content: `${canonical}\n${lines.join("\n")}`, lossy: true };
+    return { content: `${canonical}\n${lines.join("\n")}`, lossy: true, lossReasons };
   }
   try {
-    return { content: `${canonical}\n\n${encodeBikeMetadata(document, canonical)}\n`, lossy: false };
+    return { content: `${canonical}\n\n${METADATA_START}\n${encodeBikeMetadata(document, canonical)}\n${METADATA_END}\n`, lossy: false };
   } catch (error) {
     return { content: canonical, lossy: true, error: error instanceof Error ? error.message : String(error) };
   }
@@ -1758,7 +1875,7 @@ const assignUniqueText = (nodes, records) => {
 };
 
 export const restoreMarkdownIdentity = (document, metadata, { matched }) => {
-  const next = clone(document);
+  const next = { ...clone(document), ...(matched ? clone(metadata.documentAttributes ?? {}) : {}) };
   if (matched && metadata.structure === "tree-v1") {
     // Markdown cannot express every mix of heading/list hierarchy. The digest
     // authenticates the exported body; rebuild the original flat tree mapping.
@@ -1837,12 +1954,18 @@ export const expandAncestors = (nodes, nodeId) => {
   if (!located) return { nodes, found: false };
   const ancestors = new Set(located.ancestors.map((node) => node.id));
   let changed = false;
-  const visit = (list) => list.map((node) => {
-    const children = visit(childNodes(node));
-    const collapsed = ancestors.has(node.id) ? false : node.collapsed;
-    if (collapsed !== node.collapsed || children !== node.children) changed = true;
-    return collapsed === node.collapsed && children === node.children ? node : { ...node, collapsed, children };
-  });
+  const visit = (list) => {
+    let listChanged = false;
+    const result = list.map((node) => {
+      const children = visit(childNodes(node));
+      const collapsed = ancestors.has(node.id) ? false : node.collapsed;
+      if (collapsed === node.collapsed && children === node.children) return node;
+      changed = true;
+      listChanged = true;
+      return { ...node, collapsed, children };
+    });
+    return listChanged ? result : list;
+  };
   const next = visit(nodes);
   return { nodes: changed ? next : nodes, found: true };
 };

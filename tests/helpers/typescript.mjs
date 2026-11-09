@@ -57,5 +57,6 @@ export function loadAppCallback(name, bindings) {
     .find((node) => node.name.getText(ast) === name);
   const initializer = declaration.initializer;
   const callback = ts.isCallExpression(initializer) ? initializer.arguments[0] : initializer;
+  if (!("AbortController" in bindings)) bindings.AbortController = AbortController;
   return vm.runInNewContext(compile(`(${callback.getText(ast)})`), bindings, { filename });
 }

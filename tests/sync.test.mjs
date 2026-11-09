@@ -5,6 +5,7 @@ import { loadTypescript } from "./helpers/typescript.mjs";
 
 const sync = loadTypescript("src/sync.ts");
 const { migrateDocument } = loadTypescript("src/migrations.ts");
+const { legacyDocumentSignature } = loadTypescript("src/documentSignature.ts");
 const config = { serverUrl: "http://fixture.invalid", token: "fixture", autoSync: false, autoSyncIntervalSeconds: 60 };
 const document = (id, text, updatedAt = "2026-09-01T00:00:00.000Z") => migrateDocument({
   id, title: id, createdAt: updatedAt, updatedAt, nodes: [{ id: `node-${id}`, text, children: [] }],
@@ -293,10 +294,90 @@ test("a sync that changes nothing does not bump the workspace revision", async (
   seed(store, "A", "B");
   const device = await pullDevice();
   const revision = store.getManifest().workspaceRevision;
+  const original = device.workspace;
   const result = await syncDevice(device);
+  assert.equal(result.workspace, original);
   assert.equal(store.getManifest().workspaceRevision, revision);
   assert.equal(result.state.workspaceRevision, revision);
   assert.deepEqual(result.state.documentOrder, ["A", "B"]);
+});
+
+test('v2 candidate fingerprints reconcile remote edits and deletes before upgrading', async (t) => {
+  const { store } = await fixture(t);
+  seed(store, 'A', 'B');
+  const device = await pullDevice();
+  device.state.fingerprintVersion = 2;
+  for (const item of device.workspace.documents) device.state.documentFingerprints[item.id] = `v2:${legacyDocumentSignature(item)}`;
+  store.putDocument({ id: 'A', expectedRevision: 1, document: document('A', 'remote edit') });
+  store.deleteDocument({ id: 'B', expectedRevision: 1 });
+  const result = await syncDevice(device);
+  assert.deepEqual(result.summary.conflicts, []);
+  assert.deepEqual(ids(result.workspace), ['A']);
+  assert.equal(result.workspace.documents[0].nodes[0].text, 'remote edit');
+  assert.equal(result.state.fingerprintVersion, sync.FINGERPRINT_VERSION);
+});
+
+test("checkpoint storage failures do not stop uploads and a restart reconciles their actual content", async (t) => {
+  const { store } = await fixture(t);
+  seed(store, "A", "B");
+  const device = await pullDevice();
+  const durableState = device.state;
+  editDocument(device, "A", "edited A");
+  editDocument(device, "B", "edited B");
+  const result = await sync.syncWorkspaceWithRemote(device.workspace, config, durableState, {
+    onCheckpoint: () => { throw new Error("quota exceeded"); },
+  });
+  assert.equal(result.summary.uploaded, 2);
+  assert.equal(result.summary.checkpointErrors.length, 2);
+  assert.equal(result.state.documentRevisions.A, 2);
+  assert.equal(result.state.documentRevisions.B, 2);
+  const restarted = await sync.syncWorkspaceWithRemote(device.workspace, config, durableState);
+  assert.deepEqual(restarted.summary.conflicts, []);
+  assert.equal(restarted.summary.uploaded, 0);
+  assert.equal(restarted.state.documentRevisions.A, 2);
+  store.putDocument({ id: "A", expectedRevision: 2, document: document("A", "new remote edit") });
+  const realConflict = await sync.syncWorkspaceWithRemote(device.workspace, config, durableState);
+  assert.equal(realConflict.summary.conflicts.length, 1);
+  assert.equal(store.getDocument("A").document.nodes[0].text, "new remote edit");
+});
+
+test("content fingerprints ignore timestamps and object key order, including edit then undo", async (t) => {
+  const { store } = await fixture(t);
+  seed(store, "A");
+  const device = await pullDevice();
+  const original = device.workspace.documents[0];
+  const reordered = Object.fromEntries(Object.entries(original).reverse());
+  const timestampOnly = { ...reordered, updatedAt: "2030-01-01T00:00:00.000Z" };
+  assert.equal(sync.documentFingerprint(original), sync.documentFingerprint(timestampOnly));
+  device.workspace = { ...device.workspace, documents: [timestampOnly] };
+  assert.equal((await syncDevice(device)).summary.uploaded, 0);
+  editDocument(device, "A", "B");
+  editDocument(device, "A", original.nodes[0].text);
+  assert.equal((await syncDevice(device)).summary.uploaded, 0);
+  assert.equal(store.getDocument("A").revision, 1);
+});
+
+test("server A to B to A preserves separate baselines and failed persistence retains memory progress", () => {
+  const values = new Map();
+  const original = globalThis.localStorage;
+  let failWrites = false;
+  globalThis.localStorage = {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => { if (failWrites) throw new Error("quota"); values.set(key, value); },
+  };
+  try {
+    const a = { ...sync.emptySyncState("HTTP://A.invalid:80/"), documentRevisions: { A: 1 } };
+    const b = { ...sync.emptySyncState("http://b.invalid"), documentRevisions: { B: 7 } };
+    sync.saveSyncState(a);
+    sync.saveSyncState(b);
+    assert.equal(sync.loadSyncState("http://a.invalid").documentRevisions.A, 1);
+    assert.equal(sync.loadSyncState("http://b.invalid/").documentRevisions.B, 7);
+    failWrites = true;
+    assert.throws(() => sync.saveSyncState({ ...a, documentRevisions: { A: 2 } }), /quota/);
+    assert.equal(sync.loadSyncState("http://a.invalid").documentRevisions.A, 2);
+    failWrites = false;
+    sync.saveSyncState({ ...a, documentRevisions: { A: 2 } });
+  } finally { globalThis.localStorage = original; }
 });
 
 test("the order guard accounts for this sync's own creates and deletes", async (t) => {

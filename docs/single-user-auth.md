@@ -16,7 +16,7 @@ Vite 前端配置会被打包进浏览器可下载的 JS 文件。账号、密�
 
 ```bash
 cp config/bike.config.example.json config/bike.config.json
-npm run auth:hash -- "你的登录密码"
+npm run auth:hash
 ```
 
 把输出填入配置：
@@ -143,7 +143,7 @@ npm run start:sync
 生成设备密钥 hash：
 
 ```bash
-npm run auth:hash -- "你的设备同步密钥"
+npm run auth:hash
 ```
 
 手动配置同步服务密钥时，把输出的 `passwordHash` 放入 `config/bike-sync.config.json`：
@@ -166,7 +166,7 @@ npm run auth:hash -- "你的设备同步密钥"
 重新执行：
 
 ```bash
-npm run auth:hash -- "新的登录密码"
+npm run auth:hash
 ```
 
 替换 `passwordHash`。如果也替换 `sessionSecret`，已有登录会全部失效。

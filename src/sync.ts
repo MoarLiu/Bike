@@ -1,5 +1,7 @@
 import { migrateDocument } from "./migrations";
 import type { OutlineDocument, Workspace } from "./types";
+import { documentSignature, legacyDocumentSignature, sameDocumentContent } from "./documentSignature";
+import { SYNC_TIMEOUT_MS, MAX_SYNC_RESPONSE_BYTES, readResponseText, withRequestBudget } from "../shared/bike-network.mjs";
 
 export type SyncConfig = {
   serverUrl: string;
@@ -9,6 +11,7 @@ export type SyncConfig = {
 };
 
 export type SyncState = {
+  fingerprintVersion?: number;
   serverUrl: string;
   workspaceRevision: number | null;
   documentRevisions: Record<string, number>;
@@ -39,14 +42,19 @@ export type SyncSummary = {
   downloaded: number;
   deleted: number;
   conflicts: string[];
+  checkpointErrors?: string[];
 };
 
 export type SyncCheckpointOptions = {
   onCheckpoint?: (state: SyncState) => void;
+  onCheckpointError?: (error: unknown, state: SyncState) => void;
 };
 
 const CONFIG_KEY = "bike-sync-config";
-const STATE_KEY = "bike-sync-state";
+const STATE_KEY = "bike-sync-states.v2";
+const LEGACY_STATE_KEY = "bike-sync-state";
+const pendingSyncStates = new Map<string, SyncState>();
+export const FINGERPRINT_VERSION = 3;
 const LEGACY_TOKEN_KEY = "bike-sync-token";
 const DEFAULT_AUTO_SYNC_INTERVAL_SECONDS = 60;
 const MIN_AUTO_SYNC_INTERVAL_SECONDS = 15;
@@ -81,7 +89,11 @@ export const defaultSyncConfig = (): SyncConfig => ({
 
 export const normalizeSyncServerUrl = (value: string) => {
   const trimmed = value.trim() || defaultSyncServerUrl();
-  return trimmed.replace(/\/+$/, "");
+  try {
+    const url = new URL(trimmed);
+    url.hash = "";
+    return url.toString().replace(/\/+$/, "");
+  } catch { return trimmed.replace(/\/+$/, ""); }
 };
 
 export const normalizeAutoSyncInterval = (value: unknown) => {
@@ -123,6 +135,7 @@ export const saveSyncConfig = (config: SyncConfig) => {
 };
 
 export const emptySyncState = (serverUrl: string): SyncState => ({
+  fingerprintVersion: FINGERPRINT_VERSION,
   serverUrl: normalizeSyncServerUrl(serverUrl),
   workspaceRevision: null,
   documentRevisions: {},
@@ -139,14 +152,18 @@ const documentOrderOrNull = (value: unknown): string[] | null =>
 
 export const loadSyncState = (serverUrl: string): SyncState => {
   const normalizedServerUrl = normalizeSyncServerUrl(serverUrl);
+  const pending = pendingSyncStates.get(normalizedServerUrl);
+  if (pending) return cloneSyncState(pending);
   try {
     const raw = localStorage.getItem(STATE_KEY);
-    if (!raw) return emptySyncState(normalizedServerUrl);
-    const parsed = JSON.parse(raw) as Partial<SyncState>;
-    if (parsed.serverUrl !== normalizedServerUrl) {
+    const states = raw ? JSON.parse(raw) as Record<string, Partial<SyncState>> : {};
+    const legacy = localStorage.getItem(LEGACY_STATE_KEY);
+    const parsed = states[normalizedServerUrl] ?? (legacy ? JSON.parse(legacy) : null) as Partial<SyncState> | null;
+    if (!parsed || typeof parsed.serverUrl !== "string" || normalizeSyncServerUrl(parsed.serverUrl) !== normalizedServerUrl) {
       return emptySyncState(normalizedServerUrl);
     }
     return {
+      fingerprintVersion: parsed.fingerprintVersion ?? 1,
       serverUrl: normalizedServerUrl,
       workspaceRevision:
         typeof parsed.workspaceRevision === "number" ? parsed.workspaceRevision : null,
@@ -172,7 +189,23 @@ export const loadSyncState = (serverUrl: string): SyncState => {
 };
 
 export const saveSyncState = (state: SyncState) => {
-  localStorage.setItem(STATE_KEY, JSON.stringify(state));
+  const serverUrl = normalizeSyncServerUrl(state.serverUrl);
+  const next = cloneSyncState({ ...state, serverUrl });
+  // Keep usable progress before attempting quota-sensitive persistence.
+  pendingSyncStates.set(serverUrl, next);
+  let states: Record<string, SyncState> = {};
+  const raw = localStorage.getItem(STATE_KEY);
+  if (raw) states = JSON.parse(raw);
+  const legacy = localStorage.getItem(LEGACY_STATE_KEY);
+  if (legacy) {
+    const previous = JSON.parse(legacy) as SyncState;
+    if (typeof previous.serverUrl === "string") {
+      const key = normalizeSyncServerUrl(previous.serverUrl);
+      if (!states[key]) states[key] = previous;
+    }
+  }
+  localStorage.setItem(STATE_KEY, JSON.stringify({ ...states, [serverUrl]: next }));
+  pendingSyncStates.delete(serverUrl);
 };
 
 const apiUrl = (config: SyncConfig, pathname: string) =>
@@ -232,11 +265,12 @@ const bridgePayload = (result: {
   return { message: result.error || "同步请求失败" };
 };
 
-const apiRequest = async <T>(
+export const apiRequest = async <T>(
   config: SyncConfig,
   pathname: string,
-  options: { method?: string; body?: unknown } = {},
+  options: { method?: string; body?: unknown; signal?: AbortSignal; timeoutMs?: number; maxResponseBytes?: number } = {},
 ): Promise<T> => {
+  return withRequestBudget({ signal: options.signal, timeoutMs: options.timeoutMs ?? SYNC_TIMEOUT_MS }, async (signal) => {
   const electronSyncBridge = window.bike?.invokeSyncRequest;
   if (electronSyncBridge) {
     const result = await electronSyncBridge({
@@ -262,11 +296,12 @@ const apiRequest = async <T>(
       headers,
       credentials: config.token.trim() ? "same-origin" : "include",
       body: options.body === undefined ? undefined : JSON.stringify(options.body),
+      signal,
     });
   } catch (error) {
     throw new SyncApiError(0, syncFetchFailurePayload(config, error));
   }
-  const text = await response.text();
+  const text = await readResponseText(response, { signal, maxBytes: options.maxResponseBytes ?? MAX_SYNC_RESPONSE_BYTES });
   let payload: unknown = null;
   if (text) {
     try {
@@ -282,6 +317,7 @@ const apiRequest = async <T>(
   }
   if (!response.ok) throw new SyncApiError(response.status, payload);
   return payload as T;
+  });
 };
 
 export const fetchSyncManifest = (config: SyncConfig) =>
@@ -344,7 +380,7 @@ export const patchRemoteManifest = (
     body: input,
   });
 
-export const documentFingerprint = (document: OutlineDocument) => {
+const legacyDocumentFingerprint = (document: OutlineDocument) => {
   const value = JSON.stringify(document);
   let hash = 2166136261;
   for (let index = 0; index < value.length; index += 1) {
@@ -354,9 +390,17 @@ export const documentFingerprint = (document: OutlineDocument) => {
   return (hash >>> 0).toString(16);
 };
 
+export const documentFingerprint = (document: OutlineDocument) =>
+  `v${FINGERPRINT_VERSION}:${documentSignature(document)}`;
+
+const fingerprintMatches = (fingerprint: string | undefined, document: OutlineDocument) =>
+  fingerprint === (fingerprint?.startsWith(`v${FINGERPRINT_VERSION}:`) ? documentFingerprint(document)
+    : fingerprint?.startsWith("v2:") ? `v2:${legacyDocumentSignature(document)}` : legacyDocumentFingerprint(document));
+
 const syncTimestamp = () => new Date().toISOString();
 
 const cloneSyncState = (state: SyncState): SyncState => ({
+  fingerprintVersion: state.fingerprintVersion ?? 1,
   serverUrl: state.serverUrl,
   workspaceRevision: state.workspaceRevision,
   documentRevisions: { ...state.documentRevisions },
@@ -369,9 +413,15 @@ const cloneSyncState = (state: SyncState): SyncState => ({
 const checkpointSyncState = (
   state: SyncState,
   options?: SyncCheckpointOptions,
+  summary?: SyncSummary,
 ) => {
   state.lastSyncedAt = syncTimestamp();
-  options?.onCheckpoint?.(cloneSyncState(state));
+  const checkpoint = cloneSyncState(state);
+  try { options?.onCheckpoint?.(checkpoint); }
+  catch (error) {
+    if (summary) (summary.checkpointErrors ??= []).push(error instanceof Error ? error.message : String(error));
+    try { options?.onCheckpointError?.(error, checkpoint); } catch { /* Progress stays usable. */ }
+  }
 };
 
 const recordDocumentState = (
@@ -379,6 +429,7 @@ const recordDocumentState = (
   document: OutlineDocument,
   revision: number,
 ) => {
+  state.fingerprintVersion = FINGERPRINT_VERSION;
   state.documentRevisions[document.id] = revision;
   state.documentFingerprints[document.id] = documentFingerprint(document);
   delete state.deletedDocumentRevisions[document.id];
@@ -520,7 +571,7 @@ export const pushWorkspaceToRemote = async (
     const expectedRevision = remote && !remote.deletedAt ? remote.revision : remote?.revision ?? null;
     const result = await putRemoteDocument(normalizedConfig, document, expectedRevision);
     recordDocumentState(state, result.document, result.revision);
-    checkpointSyncState(state, options);
+    checkpointSyncState(state, options, summary);
     summary.uploaded += 1;
   }
 
@@ -576,15 +627,15 @@ export const syncWorkspaceWithRemote = async (
     serverOrder = serverOrder.filter((item) => item !== id);
     if (present) serverOrder.push(id);
   };
-  let documents = [...workspace.documents];
+  let documents = workspace.documents;
   const localById = () => new Map(documents.map((document) => [document.id, document]));
   const recordUpload = (uploaded: { revision: number; document: OutlineDocument }) => {
-    documents = documents.map((document) =>
-      document.id === uploaded.document.id ? uploaded.document : document,
-    );
+    if (documents.some((document) => document.id === uploaded.document.id && !sameDocumentContent(document, uploaded.document))) {
+      documents = documents.map((document) => document.id === uploaded.document.id ? uploaded.document : document);
+    }
     recordDocumentState(state, uploaded.document, uploaded.revision);
     recordDocumentState(checkpointState, uploaded.document, uploaded.revision);
-    checkpointSyncState(checkpointState, options);
+    checkpointSyncState(checkpointState, options, summary);
     summary.uploaded += 1;
   };
   // Edits win over deletes: bring a remotely deleted document back with the
@@ -608,7 +659,7 @@ export const syncWorkspaceWithRemote = async (
     const local = localById().get(remote.id);
     const knownRevision = state.documentRevisions[remote.id];
     const knownFingerprint = state.documentFingerprints[remote.id];
-    const localChanged = Boolean(local && knownFingerprint !== documentFingerprint(local));
+    const localChanged = Boolean(local && !fingerprintMatches(knownFingerprint, local));
 
     if (remote.deletedAt) {
       if (!local) {
@@ -629,13 +680,13 @@ export const syncWorkspaceWithRemote = async (
         notePresenceChange(remote.id, false);
         recordDeletedState(state, remote.id, deleted.revision);
         recordDeletedState(checkpointState, remote.id, deleted.revision);
-        checkpointSyncState(checkpointState, options);
+        checkpointSyncState(checkpointState, options, summary);
         summary.deleted += 1;
       } else {
         // New remotely, or changed there since this device deleted it: remote
         // edits win over the local delete, so the document is restored.
         const downloaded = await fetchRemoteDocument(normalizedConfig, remote.id);
-        documents.push(downloaded.document);
+        documents = [...documents, downloaded.document];
         recordDocumentState(state, downloaded.document, downloaded.revision);
         summary.downloaded += 1;
       }
@@ -654,7 +705,13 @@ export const syncWorkspaceWithRemote = async (
 
     if (knownRevision === remote.revision) {
       if (localChanged) {
-        recordUpload(await putRemoteDocument(normalizedConfig, local, knownRevision));
+        // An unversioned fingerprint may differ only because of old timestamp
+        // or key ordering rules. Reconcile its real content before uploading.
+        const remoteContent = !knownFingerprint?.startsWith(`v${FINGERPRINT_VERSION}:`)
+          ? await fetchRemoteDocument(normalizedConfig, remote.id) : null;
+        if (remoteContent && sameDocumentContent(remoteContent.document, local)) {
+          recordDocumentState(state, local, remoteContent.revision);
+        } else recordUpload(await putRemoteDocument(normalizedConfig, local, knownRevision));
       } else {
         recordDocumentState(state, local, remote.revision);
       }
@@ -669,7 +726,12 @@ export const syncWorkspaceWithRemote = async (
       recordDocumentState(state, downloaded.document, downloaded.revision);
       summary.downloaded += 1;
     } else {
-      summary.conflicts.push(`${local.title}：本机和远端都有新改动`);
+      // Covers a successful upload whose checkpoint could not be persisted.
+      // A newer revision alone is never sufficient to overwrite the server.
+      const remoteContent = await fetchRemoteDocument(normalizedConfig, remote.id);
+      if (sameDocumentContent(remoteContent.document, local)) {
+        recordDocumentState(state, local, remoteContent.revision);
+      } else summary.conflicts.push(`${local.title}：本机和远端都有新改动`);
     }
   }
 
@@ -700,7 +762,10 @@ export const syncWorkspaceWithRemote = async (
   const activeDocumentId = ordered.some((document) => document.id === workspace.activeDocumentId)
     ? workspace.activeDocumentId
     : ordered[0]?.id ?? workspace.activeDocumentId;
-  const nextWorkspace: Workspace = {
+  const unchanged = ordered.length === workspace.documents.length &&
+    ordered.every((document, index) => document === workspace.documents[index]) &&
+    activeDocumentId === workspace.activeDocumentId;
+  const nextWorkspace: Workspace = unchanged ? workspace : {
     ...workspace,
     version: 1,
     activeDocumentId,

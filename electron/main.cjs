@@ -1,4 +1,7 @@
 const { app, BrowserWindow, dialog, ipcMain, Menu, shell, session } = require("electron");
+const { verifySavedBackupSource } = require("./backup-source.cjs");
+const { isTrustedIpcSender, configuredNetworkRequest, safeReleaseUrl } = require("./ipc-guard.cjs");
+const { requestJson } = require("./network-proxy.cjs");
 const crypto = require("node:crypto");
 const fs = require("node:fs/promises");
 const path = require("node:path");
@@ -19,6 +22,9 @@ const { createBackupService, MESSAGES: backupMessages } = require("./backup-serv
 const devServer = resolveDevServer({ env: process.env, isPackaged: app.isPackaged });
 if (devServer.warning) console.warn(devServer.warning);
 const isDev = devServer.isDev;
+if (process.env.BIKE_TEST_USER_DATA) app.setPath("userData", path.resolve(process.env.BIKE_TEST_USER_DATA));
+const ownsInstance = isDev || app.requestSingleInstanceLock();
+if (!ownsInstance) app.quit();
 const maxStampedBackups = 20;
 const cloudFolderName = "Bike";
 const workspaceFilename = "bike-workspace.json";
@@ -29,13 +35,16 @@ let coreModulePromise;
 let backupServicePromise;
 let mainWindow = null;
 let quitting = false;
+const aiRequests = new Map();
+const cancelledAiRequests = new Map();
 const contentSecurityPolicy = [
   "default-src 'self'",
   "script-src 'self'",
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: file:",
   "font-src 'self'",
-  "connect-src 'self' http://127.0.0.1:5173 ws://127.0.0.1:5173",
+  isDev ? `connect-src 'self' ${new URL(devServer.url).origin} ${new URL(devServer.url).origin.replace(/^http/u, "ws")}` : "connect-src 'self'",
+  "frame-src 'none'",
   "object-src 'none'",
   "base-uri 'self'",
   "frame-ancestors 'none'",
@@ -109,8 +118,20 @@ const backupService = () => {
         if (error?.code === "ENOENT") return "";
         throw error;
       }),
-      writeSettings: (value) => fs.writeFile(path.join(app.getPath("userData"), "backup-settings.json"), value),
+      writeSettings: (value) => writeFileAtomically(path.join(app.getPath("userData"), "backup-settings.json"), value),
       migrate: migrateWorkspacePayload,
+      verifySavedSource: async (receipt) => {
+        const origin = mainWindow;
+        const valid = await verifySavedBackupSource({ ...receipt, window: origin, migrate: migrateWorkspacePayload, hash: hashContent });
+        return origin === mainWindow && valid;
+      },
+      requireSavedSources: true,
+      readPending: () => fs.readFile(path.join(app.getPath("userData"), "backup-pending.json"), "utf8").then(JSON.parse).catch((error) => {
+        if (error.code === "ENOENT") return null;
+        throw error;
+      }),
+      writePending: (value) => value == null ? fs.rm(path.join(app.getPath("userData"), "backup-pending.json"), { force: true })
+        : writeFileAtomically(path.join(app.getPath("userData"), "backup-pending.json"), `${JSON.stringify(value)}\n`),
     });
     await service.load();
     return service;
@@ -131,6 +152,7 @@ const createWindow = () => {
     minHeight: 960,
     title: "Bike",
     webPreferences: {
+      devTools: isDev,
       preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,
       nodeIntegration: false,
@@ -147,7 +169,7 @@ const createWindow = () => {
     closing = true;
     let settled = false;
     const finish = (reply) => {
-      if (reply?.sender && reply.sender !== window.webContents) return;
+      if (reply?.sender && !isTrustedIpcSender(reply, window, isAllowedAppUrl)) return;
       if (settled) return;
       settled = true;
       clearTimeout(timeout);
@@ -155,7 +177,9 @@ const createWindow = () => {
       allowWindowClose = true;
       window.close();
     };
-    const timeout = setTimeout(finish, 3000);
+    const timeout = setTimeout(() => {
+      void backupService().then((service) => service.recordCloseTimeout()).catch((error) => console.error("Backup close receipt:", error.message)).finally(() => finish());
+    }, 3000);
     ipcMain.on("backup-flush-done", finish);
     if (window.webContents.isDestroyed()) finish();
     else window.webContents.send("backup-flush-request");
@@ -168,6 +192,7 @@ const createWindow = () => {
   });
 
   window.on("closed", () => {
+    for (const request of aiRequests.values()) if (request.ownerId === window.webContents.id) request.controller.abort();
     if (mainWindow === window) mainWindow = null;
   });
 
@@ -209,7 +234,8 @@ const openApiConfig = () => {
 const checkForUpdates = async () => {
   const currentVersion = app.getVersion();
   try {
-    return await fetchLatestRelease({ currentVersion });
+    const result = await fetchLatestRelease({ currentVersion });
+    return { ...result, releaseUrl: safeReleaseUrl(result.releaseUrl) };
   } catch (error) {
     return {
       ok: false,
@@ -331,9 +357,7 @@ const installApplicationMenu = () => {
     {
       label: "视图",
       submenu: [
-        { role: "reload", label: "重新载入" },
-        { role: "toggleDevTools", label: "开发者工具" },
-        { type: "separator" },
+        ...(isDev ? [{ role: "reload", label: "重新载入" }, { role: "toggleDevTools", label: "开发者工具" }, { type: "separator" }] : []),
         { role: "resetZoom", label: "实际大小" },
         { role: "zoomIn", label: "放大" },
         { role: "zoomOut", label: "缩小" },
@@ -471,6 +495,7 @@ const pruneStampedBackups = async (directory, prefix = stampedBackupPrefix) => {
 };
 
 app.whenReady().then(() => {
+  if (!ownsInstance) return;
   removeLegacySyncSecret().catch((error) => {
     console.warn("Failed to remove legacy sync secret:", error);
   });
@@ -491,18 +516,32 @@ app.on("activate", () => {
   if (BrowserWindow.getAllWindows().length === 0) createWindow();
 });
 
-ipcMain.handle("save-icloud-backup", async (_event, payload) => {
+app.on("second-instance", () => {
+  if (!mainWindow) createWindow();
+  else { if (mainWindow.isMinimized()) mainWindow.restore(); mainWindow.show(); mainWindow.focus(); }
+});
+
+const registerIpc = (channel, handler) => ipcMain.handle(channel, async (event, payload) => {
+  if (!isTrustedIpcSender(event, mainWindow, isAllowedAppUrl)) return { ok: false, status: 403, code: "untrusted-sender", error: "请求来源无效，请重新打开 Bike" };
+  return handler(event, payload);
+});
+const savedNetworkConfig = async (kind) => {
+  const { AI_CONFIG_KEY, LEGACY_AI_CONFIG_KEY } = await import("../shared/bike-settings.mjs");
+  const script = kind === "sync" ? 'JSON.parse(localStorage.getItem("bike-sync-config") || "null")'
+    : `JSON.parse(localStorage.getItem(${JSON.stringify(AI_CONFIG_KEY)}) || localStorage.getItem(${JSON.stringify(LEGACY_AI_CONFIG_KEY)}) || "null")`;
+  let timer;
+  try {
+    return await Promise.race([mainWindow.webContents.executeJavaScript(script), new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("服务配置读取超时")), 2000); })]);
+  } finally { clearTimeout(timer); }
+};
+
+registerIpc("save-icloud-backup", async (event, payload) => {
   try {
     const request = isRecord(payload) && "workspace" in payload ? payload : { workspace: payload };
     const service = await backupService();
-    if (typeof request.expectedRevision === "string" && request.expectedRevision.trim()) {
-      const inspected = await service.inspect();
-      if (inspected.ok && inspected.exists && !inspected.baselineHash && inspected.fileHash === request.expectedRevision) {
-        await service.acceptBaseline(request.expectedRevision);
-      }
-    }
     return backupResult(await service.enqueue({
       workspace: request.workspace,
+      ownerId: event.sender.id,
       ticket: Number.isInteger(request.ticket) ? request.ticket : undefined,
       sourceRevision: request.sourceRevision,
       semanticHash: request.semanticHash,
@@ -514,7 +553,7 @@ ipcMain.handle("save-icloud-backup", async (_event, payload) => {
   }
 });
 
-ipcMain.handle("backup-status", async () => {
+registerIpc("backup-status", async () => {
   try {
     const service = await backupService();
     return { ok: true, ...service.status() };
@@ -523,7 +562,7 @@ ipcMain.handle("backup-status", async () => {
   }
 });
 
-ipcMain.handle("backup-set-auto", async (_event, payload) => {
+registerIpc("backup-set-auto", async (_event, payload) => {
   try {
     const service = await backupService();
     return { ok: true, ...(await service.setAuto(isRecord(payload) && payload.enabled === true)) };
@@ -531,17 +570,18 @@ ipcMain.handle("backup-set-auto", async (_event, payload) => {
     return { ok: false, code: "write-failed", error: error instanceof Error ? error.message : String(error) };
   }
 });
-ipcMain.handle("backup-pause-source", async () => {
+registerIpc("backup-pause-source", async () => {
   try { return { ok: true, ...(await (await backupService()).pauseSource()) }; }
   catch (error) { return { ok: false, code: "write-failed", error: String(error) }; }
 });
 
-ipcMain.handle("backup-enqueue", async (_event, payload) => {
+registerIpc("backup-enqueue", async (event, payload) => {
   try {
     const request = isRecord(payload) ? payload : {};
     const service = await backupService();
     return backupResult(await service.enqueue({
       workspace: request.workspace,
+      ownerId: event.sender.id,
       ticket: Number.isInteger(request.ticket) ? request.ticket : undefined,
       sourceRevision: request.sourceRevision,
       semanticHash: request.semanticHash,
@@ -555,7 +595,7 @@ ipcMain.handle("backup-enqueue", async (_event, payload) => {
   }
 });
 
-ipcMain.handle("backup-inspect", async () => {
+registerIpc("backup-inspect", async () => {
   try {
     return await (await backupService()).inspect();
   } catch (error) {
@@ -563,11 +603,12 @@ ipcMain.handle("backup-inspect", async () => {
   }
 });
 
-ipcMain.handle("backup-replace-local", async (_event, payload) => {
+registerIpc("backup-replace-local", async (event, payload) => {
   try {
     const request = isRecord(payload) ? payload : {};
     return backupResult(await (await backupService()).replaceWithLocal({
       workspace: request.workspace,
+      ownerId: event.sender.id,
       expectedFileHash: typeof request.expectedFileHash === "string" ? request.expectedFileHash : null,
       sourceRevision: request.sourceRevision,
       semanticHash: request.semanticHash,
@@ -578,18 +619,18 @@ ipcMain.handle("backup-replace-local", async (_event, payload) => {
   }
 });
 
-ipcMain.handle("backup-accept-baseline", async (_event, payload) => {
+registerIpc("backup-accept-baseline", async (event, payload) => {
   try {
     const hashValue = isRecord(payload) && typeof payload.hash === "string" ? payload.hash : "";
     if (!hashValue) return { ok: false, code: "write-failed", error: "缺少备份基线" };
     if (!payload.workspace || !Number.isSafeInteger(payload.sourceRevision)) return { ok: false, code: "stale-source", error: backupMessages["stale-source"] };
-    return await (await backupService()).acceptBaseline(hashValue, { workspace: payload.workspace, sourceRevision: payload.sourceRevision, semanticHash: payload.semanticHash });
+    return await (await backupService()).acceptBaseline(hashValue, { workspace: payload.workspace, sourceRevision: payload.sourceRevision, semanticHash: payload.semanticHash, ticket: payload.ticket, ownerId: event.sender.id });
   } catch (error) {
     return { ok: false, code: "write-failed", error: error instanceof Error ? error.message : String(error) };
   }
 });
 
-ipcMain.handle("load-icloud-backup", async () => {
+registerIpc("load-icloud-backup", async () => {
   try {
     const currentPath = path.join(await iCloudDirectory(), workspaceFilename);
     const legacyPath = path.join(await legacyICloudDirectory(), legacyWorkspaceFilename);
@@ -606,41 +647,22 @@ ipcMain.handle("load-icloud-backup", async () => {
   }
 });
 
-ipcMain.handle("check-for-updates", async () => checkForUpdates());
+registerIpc("check-for-updates", async () => checkForUpdates());
 
-ipcMain.handle("invoke-sync-request", async (_event, payload) => {
+registerIpc("invoke-sync-request", async (_event, payload) => {
+  const deadline = Date.now() + 60_000;
   try {
+    if (!isRecord(payload)) throw new Error("同步请求参数无效");
+    configuredNetworkRequest("sync", payload, await savedNetworkConfig("sync"));
     const request = createSyncRequestUrl(payload);
     const headers = {
       Accept: "application/json",
       ...(request.body === undefined ? {} : { "Content-Type": "application/json" }),
       ...(request.token ? { Authorization: `Bearer ${request.token}` } : {}),
     };
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 60_000);
-    const response = await fetch(request.url, {
-      method: request.method,
-      headers,
-      body: request.body === undefined ? undefined : JSON.stringify(request.body),
-      signal: controller.signal,
-    }).finally(() => clearTimeout(timeout));
-    const text = await response.text();
-    let data = null;
-    if (text) {
-      try {
-        data = JSON.parse(text);
-      } catch {
-        data = { message: text.slice(0, 500) };
-        if (response.ok) {
-          return {
-            ok: false,
-            status: response.status,
-            data,
-            error: "同步服务返回了无效 JSON",
-          };
-        }
-      }
-    }
+    const response = await requestJson({ url: request.url, method: request.method, headers, body: request.body,
+      timeoutMs: Math.max(1, deadline - Date.now()), maxBytes: 80 * 1024 * 1024, requireJson: true });
+    const data = response.data;
     if (!response.ok) {
       return {
         ok: false,
@@ -659,37 +681,32 @@ ipcMain.handle("invoke-sync-request", async (_event, payload) => {
   }
 });
 
-ipcMain.handle("invoke-ai-provider", async (_event, payload) => {
+registerIpc("invoke-ai-provider", async (event, payload) => {
+  const deadline = Date.now() + 90_000;
+  let key;
   try {
     if (!isRecord(payload)) throw new Error("AI 请求参数无效");
+    configuredNetworkRequest("ai", payload, await savedNetworkConfig("ai"));
     const endpoint = payload.endpoint === "chat_completions" ? "chat_completions" : "responses";
     const baseUrl = typeof payload.baseUrl === "string" ? payload.baseUrl : "";
     const apiKey = typeof payload.apiKey === "string" ? payload.apiKey.trim() : "";
     if (!apiKey) throw new Error("请输入 API key");
     const body = isRecord(payload.body) ? payload.body : {};
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 90_000);
-    const response = await fetch(createAiEndpointUrl(baseUrl, endpoint), {
-      method: "POST",
+    if (typeof payload.requestId !== "string" || payload.requestId.length > 100) throw new Error("AI 请求编号无效");
+    key = `${event.sender.id}:${payload.requestId}`;
+    for (const [id, expiry] of cancelledAiRequests) if (expiry < Date.now()) cancelledAiRequests.delete(id);
+    if (cancelledAiRequests.has(key)) throw new Error("AI 请求已取消");
+    if (aiRequests.has(key)) throw new Error("AI 请求已在进行中");
+    aiRequests.set(key, { controller, ownerId: event.sender.id });
+    const response = await requestJson({ url: createAiEndpointUrl(baseUrl, endpoint), method: "POST",
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${apiKey}`,
       },
-      body: JSON.stringify(body),
-      signal: controller.signal,
-    }).finally(() => clearTimeout(timeout));
-    const contentType = response.headers.get("content-type") || "";
-    const text = await response.text();
-    const data = text
-      ? (() => {
-          try {
-            return JSON.parse(text);
-          } catch {
-            return { text };
-          }
-        })()
-      : null;
-    if (response.ok && /^text\/html\b/i.test(contentType)) {
+      body, signal: controller.signal, timeoutMs: Math.max(1, deadline - Date.now()), maxBytes: 2 * 1024 * 1024 });
+    const data = response.data;
+    if (response.ok && /^text\/html\b/i.test(response.contentType)) {
       throw new Error("AI 端点返回了 HTML 页面，请检查 API baseurl 和协议端点是否匹配");
     }
     if (!response.ok) {
@@ -702,5 +719,14 @@ ipcMain.handle("invoke-ai-provider", async (_event, payload) => {
       ok: false,
       error: error instanceof Error ? error.message : String(error),
     };
-  }
+  } finally { if (key) { aiRequests.delete(key); cancelledAiRequests.delete(key); } }
+});
+
+registerIpc("cancel-ai-provider", async (event, payload) => {
+  if (typeof payload?.requestId !== "string" || payload.requestId.length > 100) return { ok: false };
+  const key = `${event.sender.id}:${payload.requestId}`;
+  cancelledAiRequests.set(key, Date.now() + 90_000);
+  while (cancelledAiRequests.size > 100) cancelledAiRequests.delete(cancelledAiRequests.keys().next().value);
+  aiRequests.get(key)?.controller.abort(new Error("AI 请求已取消"));
+  return { ok: true };
 });

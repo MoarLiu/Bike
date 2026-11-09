@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 import fs from "node:fs/promises";
 import { pathToFileURL } from "node:url";
+import path from "node:path";
+import { assertTextBudget, assertValueBudget } from "../shared/bike-limits.mjs";
 
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -27,17 +29,24 @@ import {
   updateNodeForMcp,
 } from "./bike-core.mjs";
 
-const jsonContent = (uri, data) => ({
+const jsonContent = (uri, data) => {
+  assertValueBudget(data, { maxBytes: 8 * 1024 * 1024 });
+  const text = JSON.stringify(data, null, 2);
+  assertTextBudget(text, 8 * 1024 * 1024);
+  return ({
   contents: [
     {
       uri,
       mimeType: "application/json",
-      text: JSON.stringify(data, null, 2),
+      text,
     },
   ],
-});
+  });
+};
 
-const textContent = (uri, text, mimeType = "text/plain") => ({
+const textContent = (uri, text, mimeType = "text/plain") => {
+  assertTextBudget(text, 8 * 1024 * 1024);
+  return ({
   contents: [
     {
       uri,
@@ -45,7 +54,8 @@ const textContent = (uri, text, mimeType = "text/plain") => ({
       text,
     },
   ],
-});
+  });
+};
 
 const variableString = (value) =>
   Array.isArray(value) ? String(value[0] ?? "") : String(value ?? "");
@@ -103,6 +113,9 @@ const writableNodeSchema = z.object({
   codeLanguage: nodeCodeLanguageSchema.optional(),
   isTodo: z.boolean().optional(),
   children: z.array(z.any()).optional().default([]),
+}).superRefine((value, context) => {
+  try { assertValueBudget(value, { maxDepth: 128, maxBytes: 4 * 1024 * 1024 }); }
+  catch (error) { context.addIssue({ code: "custom", message: error.message }); }
 });
 
 export const createBikeMcpServer = async ({
@@ -128,8 +141,21 @@ export const createBikeMcpServer = async ({
   );
 
   const snapshot = () => workspaceStore.load();
+  const guarded = (callback) => async (...args) => {
+    try { return await callback(...args); }
+    catch (error) {
+      let message = error instanceof Error ? error.message : String(error);
+      if (!workspaceStore.config?.debug) {
+        const file = workspaceStore.config?.workspacePath;
+        for (const value of file ? [file, path.dirname(file)] : []) message = message.split(value).join("[工作区路径]");
+      }
+      throw new Error(message);
+    }
+  };
+  const registerTool = (...args) => { args[args.length - 1] = guarded(args[args.length - 1]); return server.registerTool(...args); };
+  const registerResource = (...args) => { args[args.length - 1] = guarded(args[args.length - 1]); return server.registerResource(...args); };
 
-  server.registerTool(
+  registerTool(
     "get_workspace_summary",
     {
       title: "Get Workspace Summary",
@@ -143,7 +169,7 @@ export const createBikeMcpServer = async ({
     async () => textToolResult(getWorkspaceSummary(await snapshot())),
   );
 
-  server.registerTool(
+  registerTool(
     "list_documents",
     {
       title: "List Documents",
@@ -161,7 +187,7 @@ export const createBikeMcpServer = async ({
     async (args) => textToolResult(listDocuments(await snapshot(), args)),
   );
 
-  server.registerTool(
+  registerTool(
     "search_outline",
     {
       title: "Search Outline",
@@ -183,7 +209,7 @@ export const createBikeMcpServer = async ({
     async (args) => textToolResult(searchOutline(await snapshot(), args)),
   );
 
-  server.registerTool(
+  registerTool(
     "get_document",
     {
       title: "Get Document",
@@ -202,7 +228,7 @@ export const createBikeMcpServer = async ({
     async (args) => textToolResult(getDocument(await snapshot(), args)),
   );
 
-  server.registerTool(
+  registerTool(
     "get_node",
     {
       title: "Get Node",
@@ -222,7 +248,7 @@ export const createBikeMcpServer = async ({
     async (args) => textToolResult(getNode(await snapshot(), args)),
   );
 
-  server.registerTool(
+  registerTool(
     "export_document",
     {
       title: "Export Document",
@@ -240,7 +266,7 @@ export const createBikeMcpServer = async ({
     async (args) => textToolResult(exportDocumentForMcp(await snapshot(), args)),
   );
 
-  server.registerTool(
+  registerTool(
     "create_document",
     {
       title: "Create Document",
@@ -259,7 +285,7 @@ export const createBikeMcpServer = async ({
     async (args) => textToolResult(await createDocumentForMcp(workspaceStore, args)),
   );
 
-  server.registerTool(
+  registerTool(
     "update_document_title",
     {
       title: "Update Document Title",
@@ -277,7 +303,7 @@ export const createBikeMcpServer = async ({
     async (args) => textToolResult(await updateDocumentTitleForMcp(workspaceStore, args)),
   );
 
-  server.registerTool(
+  registerTool(
     "create_node",
     {
       title: "Create Node",
@@ -306,7 +332,7 @@ export const createBikeMcpServer = async ({
     async (args) => textToolResult(await createNodeForMcp(workspaceStore, args)),
   );
 
-  server.registerTool(
+  registerTool(
     "update_node",
     {
       title: "Update Node",
@@ -332,7 +358,7 @@ export const createBikeMcpServer = async ({
     async (args) => textToolResult(await updateNodeForMcp(workspaceStore, args)),
   );
 
-  server.registerTool(
+  registerTool(
     "set_node_checked",
     {
       title: "Set Node Checked",
@@ -351,7 +377,7 @@ export const createBikeMcpServer = async ({
     async (args) => textToolResult(await setNodeCheckedForMcp(workspaceStore, args)),
   );
 
-  server.registerTool(
+  registerTool(
     "append_children",
     {
       title: "Append Children",
@@ -370,7 +396,7 @@ export const createBikeMcpServer = async ({
     async (args) => textToolResult(await appendChildrenForMcp(workspaceStore, args)),
   );
 
-  server.registerTool(
+  registerTool(
     "move_node",
     {
       title: "Move Node",
@@ -390,7 +416,7 @@ export const createBikeMcpServer = async ({
     async (args) => textToolResult(await moveNodeForMcp(workspaceStore, args)),
   );
 
-  server.registerTool(
+  registerTool(
     "delete_node",
     {
       title: "Delete Node",
@@ -409,7 +435,7 @@ export const createBikeMcpServer = async ({
     async (args) => textToolResult(await deleteNodeForMcp(workspaceStore, args)),
   );
 
-  server.registerResource(
+  registerResource(
     "workspace-summary",
     "bike://workspace/summary",
     {
@@ -421,7 +447,7 @@ export const createBikeMcpServer = async ({
     async (uri) => jsonContent(uri.href, getWorkspaceSummary(await snapshot())),
   );
 
-  server.registerResource(
+  registerResource(
     "documents",
     "bike://documents",
     {
@@ -433,7 +459,7 @@ export const createBikeMcpServer = async ({
     async (uri) => jsonContent(uri.href, listDocuments(await snapshot(), { limit: 100 })),
   );
 
-  server.registerResource(
+  registerResource(
     "document",
     new ResourceTemplate("bike://document/{documentId}", {
       list: async () => {
@@ -469,7 +495,7 @@ export const createBikeMcpServer = async ({
     },
   );
 
-  server.registerResource(
+  registerResource(
     "document-markdown",
     new ResourceTemplate("bike://document-markdown/{documentId}", {
       list: async () => {
@@ -506,7 +532,7 @@ export const createBikeMcpServer = async ({
     },
   );
 
-  server.registerResource(
+  registerResource(
     "node",
     new ResourceTemplate("bike://node/{documentId}/{nodeId}", {
       list: undefined,
@@ -645,8 +671,11 @@ export const createBikeMcpServer = async ({
   return server;
 };
 
-const isMainModule = () =>
-  process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
+const isMainModule = async () => {
+  if (!process.argv[1]) return false;
+  try { return await fs.realpath(new URL(import.meta.url)) === await fs.realpath(process.argv[1]); }
+  catch { return false; }
+};
 
 const printHelp = () => {
   process.stdout.write(`Bike MCP
@@ -703,10 +732,14 @@ const main = async () => {
   process.stderr.write(`${SERVER_DISPLAY_NAME} running on stdio\n`);
 };
 
-if (isMainModule()) {
+if (await isMainModule()) {
   main().catch((error) => {
+    const debug = /^(?:true|1|yes|on)$/iu.test(process.env.BIKE_MCP_DEBUG ?? "");
+    const message = debug ? error instanceof Error ? error.message : String(error)
+      : error?.code ? `工作区或配置文件不可用（${error.code}），可设置 BIKE_MCP_DEBUG=true 查看详情`
+      : "无法启动，请检查配置与工作区；设置 BIKE_MCP_DEBUG=true 查看详情";
     process.stderr.write(
-      `Bike MCP failed: ${error instanceof Error ? error.message : String(error)}\n`,
+      `Bike MCP failed: ${message}\n`,
     );
     process.exit(1);
   });

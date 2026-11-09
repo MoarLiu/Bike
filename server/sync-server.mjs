@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { readFile, chmod } from "node:fs/promises";
 import { createServer } from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -7,6 +7,8 @@ import {
   bearerTokenFrom,
   createDeviceTokenGuard,
   normalizeOptionalBoolean,
+  normalizePositiveInteger,
+  environmentInteger,
   normalizeTrustedProxyCount,
   resolveClientAddress,
   tooManyAuthFailuresPayload,
@@ -15,6 +17,7 @@ import { handleSyncApi, sendJson } from "./sync-api.mjs";
 import { createSyncStore } from "./sync-store.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+process.umask(0o077);
 const projectRoot = path.resolve(__dirname, "..");
 const defaultConfigPath = path.join(projectRoot, "config", "bike-sync.config.json");
 const defaultDatabasePath = path.join(projectRoot, "data", "bike-sync.sqlite");
@@ -48,6 +51,7 @@ const readConfig = async () => {
   let parsed;
   try {
     parsed = JSON.parse(await readFile(configPath, "utf8"));
+    await chmod(configPath, 0o600);
   } catch (error) {
     throw new Error(
       `无法读取同步服务配置：${configPath}\n请复制 config/bike-sync.config.example.json 为 config/bike-sync.config.json，或运行 npm run setup:sync。\n${error instanceof Error ? error.message : String(error)}`,
@@ -69,14 +73,14 @@ const readConfig = async () => {
 
   return {
     host: parsed.host || sync.host || "127.0.0.1",
-    port: Number(parsed.port || sync.port || process.env.PORT || 4174),
+    port: normalizePositiveInteger(parsed.port ?? sync.port ?? environmentInteger(process.env.PORT, "PORT"), "port", 4174, { maximum: 65535 }),
     owner: {
       username: String(parsed.owner?.username || sync.owner?.username || "me"),
     },
     sync: {
       databasePath: resolveProjectPath(sync.databasePath, defaultDatabasePath),
       deviceTokenHashes,
-      maxBodyBytes: Number(sync.maxBodyBytes || 10 * 1024 * 1024),
+      maxBodyBytes: normalizePositiveInteger(sync.maxBodyBytes, "maxBodyBytes", 10 * 1024 * 1024, { maximum: 64 * 1024 * 1024 }),
     },
     proxy: {
       trustProxyHeaders: normalizeOptionalBoolean(
@@ -89,7 +93,7 @@ const readConfig = async () => {
       ),
     },
     cors: {
-      enabled: cors.enabled !== false,
+      enabled: normalizeOptionalBoolean(cors.enabled, "cors.enabled", true),
       allowedOrigins: normalizeOrigins(cors.allowedOrigins),
     },
   };

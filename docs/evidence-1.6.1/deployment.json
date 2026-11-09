@@ -1,0 +1,18 @@
+{
+  "runtime": "v22.13.0",
+  "platform": "darwin",
+  "checks": [
+    "clean archive extraction",
+    "production dependency install",
+    "MCP entry, shared file-lock dependency and stdio smoke",
+    "real login Secure cookie",
+    "built Web page",
+    "Sync upload",
+    "archive upgrade and restart preserves revision and content",
+    "private config/database permissions"
+  ],
+  "modes": {
+    "config/candidate.json": 384,
+    "data/candidate.sqlite": 384
+  }
+}

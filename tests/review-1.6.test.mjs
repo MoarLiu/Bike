@@ -239,13 +239,16 @@ function topLevel(name, bindings, filename = "src/App.tsx") {
 function fixture(value) {
   const notices = [];
   const b = { ...k, ...tree, ...md, ...history, ...migrations, ...ids,
+    ...loadTypescript("src/documentSignature.ts"),
+    assertTreeBudget: () => {},
     ready: true, backupStatus: { auto: true }, backupLocalPauseRef: { current: null },
     backupScheduleRef: { current: k.createBackupSchedule() }, backupPayloadsRef: { current: new Map() },
     workspaceRef: { current: value }, historyRef: { current: history.emptyEditHistory() },
     activeNodeIdRef: { current: value.documents[0].nodes[0]?.id }, focusNodeId: null, modeRef: { current: "outline" },
     storageConflictRef: { current: false }, recoveryBusyRef: { current: false }, syncBusyRef: { current: false },
     now: () => timestamp, bumpHistoryVersion() {}, maybeCaptureAutoSnapshots() {},
-    showNotice: (message) => notices.push(message), setActiveNodeId() {}, setFocusNodeId() {}, setPendingCaretFocus() {},
+    showNotice: (message) => notices.push(message), setActiveNodeId() {}, setFocusNodeId() {}, setPendingCaretFocus() {}, setNavigationTarget() {},
+    backupErrorNoticeRef: { current: null },
     flushPendingEdits: () => b.workspaceRef.current, flushFocusedStructuredInput: () => b.workspaceRef.current,
     replaceWorkspace: (next) => { b.workspaceRef.current = next; return next; },
     subtreeIds: (n) => [n.id, ...n.children.flatMap(b.subtreeIds)], rekeyKnowledgeNodes: k.rekeyNodes,

@@ -1,5 +1,7 @@
 import type { OutlineDocument, Workspace } from "./types";
 import { sameDocumentContent } from "./documentSignature";
+import { withHistoryBudget } from "./historyBudget";
+export { MAX_HISTORY_BYTES, historyMemoryUsage } from "./historyBudget";
 
 export type HistorySelection = {
   documentId: string;
@@ -103,7 +105,7 @@ export const recordChange = ({
   if (canMerge) {
     const previousChange = previous.changes[0];
     const nextChange = changes[0];
-    return {
+    return withHistoryBudget(history, {
       past: [
         ...history.past.slice(0, -1),
         {
@@ -119,10 +121,10 @@ export const recordChange = ({
         },
       ],
       future: [],
-    };
+    });
   }
 
-  return {
+  return withHistoryBudget(history, {
     past: [
       ...history.past,
       {
@@ -135,7 +137,7 @@ export const recordChange = ({
       },
     ].slice(-MAX_ENTRIES),
     future: [],
-  };
+  });
 };
 
 const applyEntry = (
@@ -191,10 +193,10 @@ export const undo = ({
   if (result.status !== "applied") return result;
   return {
     ...result,
-    history: {
+    history: withHistoryBudget(history, {
       past: history.past.slice(0, -1),
       future: [entry, ...history.future].slice(0, MAX_ENTRIES),
-    },
+    }),
   };
 };
 
@@ -209,9 +211,9 @@ export const redo = ({
   if (result.status !== "applied") return result;
   return {
     ...result,
-    history: {
+    history: withHistoryBudget(history, {
       past: [...history.past, entry].slice(-MAX_ENTRIES),
       future: history.future.slice(1),
-    },
+    }),
   };
 };

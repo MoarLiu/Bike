@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import test from "node:test";
 import { handleSyncApi, readJsonRequestBody } from "./sync-api.mjs";
+import { createServer, request as httpRequest } from "node:http";
 
 const fakeRequest = ({ method = "GET", url = "/", chunks = [] } = {}) => {
   const request = new EventEmitter();
@@ -49,8 +50,30 @@ test("request body limit counts bytes, not characters", async () => {
   assert.ok(payload.length > 40);
   await assert.rejects(
     readJsonRequestBody(fakeRequest({ method: "PUT", chunks: [payload] }), 40),
-    /请求体过大/,
+    /请求体超过/,
   );
+});
+
+test("real HTTP clients receive structured 413 for both declared and chunked oversize bodies", async (t) => {
+  const server = createServer((request, response) => {
+    void handleSyncApi(request, response, { sync: { maxBodyBytes: 64 } }, { putDocument: () => assert.fail("oversize body reached storage") });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(async () => { server.closeAllConnections(); await new Promise((resolve) => server.close(resolve)); });
+  for (const headers of [{ "Content-Length": "1000" }, { "Transfer-Encoding": "chunked" }]) {
+    const result = await new Promise((resolve, reject) => {
+      const request = httpRequest({ host: "127.0.0.1", port: server.address().port, path: "/api/documents/large", method: "PUT", headers }, (response) => {
+        const chunks = [];
+        response.on("data", (chunk) => chunks.push(chunk));
+        response.on("end", () => resolve({ status: response.statusCode, body: JSON.parse(Buffer.concat(chunks).toString("utf8")) }));
+      });
+      request.on("error", reject);
+      request.end("x".repeat(1000));
+    });
+    assert.equal(result.status, 413);
+    assert.equal(result.body.error, "payload_too_large");
+    assert.equal(result.body.maxBytes, 64);
+  }
 });
 
 test("malformed percent-encoding in the path is a 400, not a 500", async () => {

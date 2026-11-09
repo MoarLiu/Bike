@@ -1,0 +1,45 @@
+{
+  "runtime": "v22.13.0",
+  "platform": "darwin",
+  "arch": "arm64",
+  "machine": "Apple M4",
+  "collectedAt": "2026-11-08T18:40:45.067Z",
+  "evidence": "Node module measurement; excludes renderer paint and debounce",
+  "sample": {
+    "documents": 100,
+    "libraryNodes": 20000,
+    "singleDocumentNodes": 20000,
+    "independentEdits": 20,
+    "searches": 20
+  },
+  "indexMs": 25.869124999999997,
+  "searches": {
+    "medianMs": 69.27462500000001,
+    "p95Ms": 72.28883300000007,
+    "maximumMs": 94.85537500000004
+  },
+  "editing": {
+    "medianMs": 175.0923340000004,
+    "p95Ms": 193.5428340000003,
+    "maximumMs": 208.04804200000035
+  },
+  "historyEntries": 20,
+  "memory": [
+    {
+      "edit": 0,
+      "rss": 270352384,
+      "heapTotal": 90718208,
+      "heapUsed": 46073496,
+      "external": 1900145,
+      "arrayBuffers": 16875
+    },
+    {
+      "edit": 20,
+      "rss": 506691584,
+      "heapTotal": 265764864,
+      "heapUsed": 158808912,
+      "external": 1931752,
+      "arrayBuffers": 16875
+    }
+  ]
+}

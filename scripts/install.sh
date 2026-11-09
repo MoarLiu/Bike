@@ -611,6 +611,7 @@ ExecStart=${NODE_BIN} ${INSTALL_DIR}/server/auth-server.mjs
 Restart=on-failure
 RestartSec=3
 NoNewPrivileges=true
+UMask=0077
 PrivateTmp=true
 ProtectSystem=full
 ReadWritePaths=${data_dir}
@@ -698,6 +699,7 @@ update_web_action() {
   install_or_update_files 0
   if web_service_installed; then
     migrate_web_service_state
+    migrate_private_service "${WEB_SERVICE_NAME}"
     restart_web_service
   else
     success "已更新文件。当前没有安装 Bike Web systemd 服务，未执行重启。"
@@ -713,13 +715,43 @@ install_sync_action() {
 update_sync_action() {
   install_or_update_files
   if sync_service_installed; then
+    migrate_private_service "${SYNC_SERVICE_NAME}"
     run_setup restart
   else
     success "已更新文件。当前没有安装 systemd 服务，未执行重启。"
   fi
 }
 
+migrate_private_service() {
+  local service_name="$1" dropin_dir tmp_file
+  dropin_dir="/etc/systemd/system/${service_name}.service.d"
+  tmp_file="${TMP_DIR}/bike-private-umask.conf"
+  cat > "${tmp_file}" <<EOF
+[Service]
+UMask=0077
+EOF
+  sudo_cmd mkdir -p "${dropin_dir}"
+  if sudo_cmd cmp -s "${tmp_file}" "${dropin_dir}/60-bike-private-umask.conf"; then return; fi
+  sudo_cmd install -m 0644 "${tmp_file}" "${dropin_dir}/60-bike-private-umask.conf.new"
+  sudo_cmd mv -f "${dropin_dir}/60-bike-private-umask.conf.new" "${dropin_dir}/60-bike-private-umask.conf"
+  sudo_cmd systemctl daemon-reload
+}
+
 uninstall_action() {
+  [[ -n "${NODE_BIN}" && -x "${NODE_BIN}" ]] || die "卸载前需要 Node.js 校验安装目录，请设置 NODE_BIN。"
+  INSTALL_DIR="$("${NODE_BIN}" --input-type=commonjs - "${INSTALL_DIR}" <<'NODE'
+const fs = require('node:fs'), path = require('node:path'), os = require('node:os');
+const requested = path.resolve(process.argv[2]);
+let parent = requested, suffix = [];
+while (!fs.existsSync(parent) && path.dirname(parent) !== parent) { suffix.unshift(path.basename(parent)); parent = path.dirname(parent); }
+const target = path.join(fs.realpathSync(parent), ...suffix);
+const forbidden = new Set([os.homedir(), '/Users', '/home', '/root', '/opt', '/usr/local', '/var/lib', '/var/www', '/tmp', '/private/tmp']);
+if (path.dirname(target) === target || path.dirname(target) === '/' || forbidden.has(target) || target === fs.realpathSync(os.homedir())) {
+  console.error('拒绝卸载危险安装目录：' + target); process.exit(1);
+}
+process.stdout.write(target);
+NODE
+  )" || die "安装目录校验失败，已停止卸载。"
   if installed; then
     run_setup uninstall-service || true
   elif sync_service_installed; then

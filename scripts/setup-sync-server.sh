@@ -130,6 +130,11 @@ install_service() {
   sudo_cmd chown "${service_user}:${service_group}" "${database_dir}"
   [[ ! -e "${database_path}" ]] || sudo_cmd chown "${service_user}:${service_group}" "${database_path}"
   sudo_cmd chown "${service_user}:${service_group}" "${CONFIG_PATH}" || true
+  sudo_cmd chmod 0600 "${CONFIG_PATH}"
+  sudo_cmd chmod 0700 "${database_dir}"
+  for private_file in "${database_path}" "${database_path}-wal" "${database_path}-shm"; do
+    [[ ! -f "${private_file}" ]] || sudo_cmd chmod 0600 "${private_file}"
+  done
 
   local tmp_file
   tmp_file="$(mktemp)"
@@ -150,6 +155,7 @@ ExecStart=${NODE_BIN} ${PROJECT_ROOT}/server/sync-server.mjs
 Restart=on-failure
 RestartSec=3
 NoNewPrivileges=true
+UMask=0077
 PrivateTmp=true
 ProtectSystem=full
 ReadWritePaths=${data_dir}

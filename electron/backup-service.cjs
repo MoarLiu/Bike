@@ -49,6 +49,10 @@ const createBackupService = ({
   migrate,
   setTimer = (callback, delay) => setTimeout(callback, delay),
   clearTimer = (timer) => clearTimeout(timer),
+  verifySavedSource,
+  requireSavedSources = false,
+  readPending = async () => null,
+  writePending = async () => {},
 }) => {
   let settings = defaultSettings();
   let pending = null;
@@ -63,9 +67,14 @@ const createBackupService = ({
   let newestSourceRevision = 0;
   let newestSourceHash = null;
   let resolutionEpoch = 0;
+  let unfinishedReceipt = null;
+  let settingsWrites = Promise.resolve();
 
-  const persist = async () => {
-    await writeSettings(JSON.stringify(settings, null, 2));
+  const persist = () => {
+    const content = JSON.stringify(settings, null, 2);
+    const run = settingsWrites.then(() => writeSettings(content), () => writeSettings(content));
+    settingsWrites = run.catch(() => {});
+    return run;
   };
 
   const status = () => ({
@@ -79,6 +88,7 @@ const createBackupService = ({
     writing: Boolean(writing),
     pending: Boolean(pending),
     lastResult,
+    unfinishedReceipt,
   });
 
   const load = async () => {
@@ -90,6 +100,12 @@ const createBackupService = ({
     } catch {
       settings = defaultSettings();
     }
+    try {
+      const previous = await readPending();
+      if (previous && Number.isSafeInteger(previous.sourceRevision) && typeof previous.sourceHash === "string") {
+        unfinishedReceipt = { sourceRevision: previous.sourceRevision, sourceHash: previous.sourceHash, ticket: previous.ticket };
+      }
+    } catch (error) { settings.lastError = { code: "write-failed", message: `未完成备份凭据读取失败：${error.message}` }; }
     return settings;
   };
 
@@ -256,6 +272,10 @@ const createBackupService = ({
           writing = job;
           try {
             job.result = await perform(job);
+            if (job.result?.ok && !pending) {
+              try { await writePending(null); unfinishedReceipt = null; }
+              catch (error) { settings.lastError = { code: "write-failed", message: `备份已写入，但未完成凭据清理失败：${error.message}` }; await persist(); }
+            }
           } finally {
             if (writing === job) writing = null;
           }
@@ -270,6 +290,7 @@ const createBackupService = ({
 
   const enqueueUnlocked = async (job) => {
     await load();
+    if (requireSavedSources && !job.retry && (!verifySavedSource || !(await verifySavedSource(job)))) return finish({ ok: false, code: "stale-source", ticket: job.ticket });
     newestSourceRevision = Math.max(newestSourceRevision, settings.lastSourceRevision || 0);
     if (newestSourceHash == null) newestSourceHash = settings.lastSourceHash;
     const sourceRevision = Number.isSafeInteger(job.sourceRevision) && job.sourceRevision > 0 ? job.sourceRevision : null;
@@ -293,6 +314,10 @@ const createBackupService = ({
     if (ticket <= floor && !ownRetry) {
       return finish({ ok: false, code: "stale-source", ticket });
     }
+    try {
+      await writePending({ workspace: job.workspace, sourceRevision, sourceHash, ticket, semanticHash: job.semanticHash });
+      unfinishedReceipt = { sourceRevision, sourceHash, ticket };
+    } catch (error) { return finish({ ok: false, code: codeFor(error), ticket, error: `备份凭据保存失败：${error.message}` }); }
     if (!job.retry) invalidateRetries();
     issuedTicket = Math.max(issuedTicket, ticket);
     if (sourceRevision != null) { newestSourceRevision = sourceRevision; newestSourceHash = sourceHash; }
@@ -357,8 +382,9 @@ const createBackupService = ({
     }
   };
 
-  const replaceWithLocal = async ({ workspace, expectedFileHash, sourceRevision, semanticHash, ticket }) => {
+  const replaceWithLocal = async ({ workspace, expectedFileHash, sourceRevision, semanticHash, ticket, ownerId }) => {
     await load();
+    if (requireSavedSources && (!verifySavedSource || !(await verifySavedSource({ workspace, sourceRevision, ticket, ownerId })))) return finish({ ok: false, code: "stale-source" });
     const directory = await getDirectory();
     await fs.mkdir(directory, { recursive: true });
     const latestPath = path.join(directory, workspaceFilename);
@@ -410,8 +436,13 @@ const createBackupService = ({
     });
   };
 
-  const acceptBaseline = async (hashValue, { sourceRevision, workspace, semanticHash } = {}) => {
+  const acceptBaseline = async (hashValue, { sourceRevision, workspace, semanticHash, ticket, ownerId } = {}) => {
     await load();
+    if (workspace === undefined || !verifySavedSource || !Number.isSafeInteger(ticket) || ticket <= 0 ||
+      !(await verifySavedSource({ sourceRevision, workspace, ticket, ownerId }))) return finish({ ok: false, code: "stale-source" });
+    // Only the main process allocates the accepted ticket. Renderer counters
+    // cannot raise the scheduling floor, even with an extreme supplied value.
+    ticket = floorTicket() + 1;
     const latestPath = path.join(await getDirectory(), workspaceFilename);
     return lock(latestPath, async () => {
       let existing = null;
@@ -446,12 +477,23 @@ const createBackupService = ({
       settings.paused = null;
       settings.lastError = null;
       settings.retryCount = 0;
+      if (Number.isSafeInteger(ticket)) settings.lastTicket = Math.max(settings.lastTicket, ticket);
+      unfinishedReceipt = null;
+      await writePending(null);
       await persist();
       return { ok: true, ...status() };
     });
   };
 
+  const recordCloseTimeout = async () => {
+    await load();
+    settings.lastError = { code: "close-timeout", message: "上次关闭时备份刷新超过 3 秒；本机内容和未完成备份凭据已保留，请查看备份状态后重试" };
+    await persist();
+    return status();
+  };
+
   return {
+    recordCloseTimeout,
     load,
     status,
     enqueue,

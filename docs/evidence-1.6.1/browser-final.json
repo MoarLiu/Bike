@@ -1,0 +1,11 @@
+{
+  "runtime": "v22.13.0",
+  "browser": "158.0.8127.18",
+  "checks": [
+    "focused mouse drag, undo/redo, IndexedDB save and reload",
+    "search navigation into collapsed ancestors preserves undo",
+    "real DOMParser OPML and FreeMind roundtrip, metadata Markdown exact tree and extension roundtrip",
+    "real React edit debounce, independent 60-second polling, no 5-second sync loop and preserved input focus"
+  ],
+  "errors": []
+}

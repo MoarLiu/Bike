@@ -1,5 +1,9 @@
+import { AI_CONFIG_KEY, LEGACY_AI_CONFIG_KEY } from "../shared/bike-settings.mjs";
 import type { OutlineNode } from "./types";
 import { createNode } from "./tree";
+import { uuid } from "./id";
+import { AI_TIMEOUT_MS, MAX_AI_RESPONSE_BYTES, readResponseText, withRequestBudget } from "../shared/bike-network.mjs";
+import { assertValueBudget } from "../shared/bike-limits.mjs";
 
 export type AiEndpoint = "chat_completions" | "responses";
 export type AiNodeAction = "generate" | "polish";
@@ -41,8 +45,6 @@ type ResponsesInputItem = {
   }>;
 };
 
-const AI_CONFIG_KEY = "bike-ai-config";
-const LEGACY_AI_CONFIG_KEY = "local-outline-ai-config";
 
 export const defaultAiConfig: AiApiConfig = {
   endpoint: "responses",
@@ -303,48 +305,32 @@ const parseJsonText = (value: string): unknown => {
   }
 };
 
-const firstBalancedJsonSlice = (value: string) => {
-  for (let start = 0; start < value.length; start += 1) {
-    const firstChar = value[start];
-    if (firstChar !== "{" && firstChar !== "[") continue;
-
-    const stack = [firstChar === "{" ? "}" : "]"];
-    let inString = false;
-    let escaped = false;
-
-    for (let index = start + 1; index < value.length; index += 1) {
-      const char = value[index];
-
-      if (inString) {
-        if (escaped) {
-          escaped = false;
-        } else if (char === "\\") {
-          escaped = true;
-        } else if (char === "\"") {
-          inString = false;
-        }
-        continue;
-      }
-
-      if (char === "\"") {
-        inString = true;
-        continue;
-      }
-
-      if (char === "{") {
-        stack.push("}");
-      } else if (char === "[") {
-        stack.push("]");
-      } else if (char === "}" || char === "]") {
-        if (stack[stack.length - 1] !== char) break;
-        stack.pop();
-        if (!stack.length) return value.slice(start, index + 1);
-      }
+export const firstBalancedJsonSlice = (value: string) => {
+  if (value.length > MAX_AI_RESPONSE_BYTES) throw new Error("AI JSON 文本超过解析预算");
+  const stack: string[] = [];
+  let start = -1, inString = false, escaped = false;
+  for (let index = 0; index < value.length; index += 1) {
+    const char = value[index];
+    if (start < 0) { if (char === "{" || char === "[") { start = index; stack.push(char === "{" ? "}" : "]"); } continue; }
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === '"') inString = false;
+      continue;
+    }
+    if (char === '"') { inString = true; continue; }
+    if (char === "{" || char === "[") {
+      if (stack.length >= 64) throw new Error("AI JSON 嵌套超过 64 层解析预算");
+      stack.push(char === "{" ? "}" : "]");
+    } else if (char === "}" || char === "]") {
+      if (stack.pop() !== char) { start = -1; stack.length = 0; continue; }
+      if (!stack.length) return value.slice(start, index + 1);
     }
   }
-
   return null;
 };
+
+const cleanAiText = (text: string) => Array.from(text.replace(/[\u0000-\u001f\u007f]/gu, " ").replace(/\s+/gu, " ").trim().normalize("NFC")).slice(0, 120).join("");
 
 const generatedTextKeys = ["text", "title", "name", "label", "content", "heading", "topic"] as const;
 const generatedChildrenKeys = [
@@ -361,11 +347,11 @@ const generatedChildrenKeys = [
 ] as const;
 
 const generatedNodeText = (value: unknown) => {
-  if (typeof value === "string") return value.trim();
+  if (typeof value === "string") return cleanAiText(value);
   if (!isRecord(value)) return "";
   for (const key of generatedTextKeys) {
     const text = value[key];
-    if (typeof text === "string" && text.trim()) return text.trim();
+    if (typeof text === "string" && text.trim()) return cleanAiText(text);
   }
   return "";
 };
@@ -379,24 +365,27 @@ const generatedNodeChildren = (value: unknown): unknown => {
   return undefined;
 };
 
-const sanitizeGeneratedNodes = (value: unknown, depth = 1): AiGeneratedNode[] => {
-  if (depth > 3) return [];
-  const items = Array.isArray(value) ? value : generatedNodeChildren(value);
-  if (!Array.isArray(items)) return [];
-
-  return items.flatMap((item) => {
+const sanitizeGeneratedNodes = (value: unknown): AiGeneratedNode[] => {
+  const result: AiGeneratedNode[] = [];
+  const initial = Array.isArray(value) ? value : generatedNodeChildren(value);
+  const stack = [{ items: Array.isArray(initial) ? initial : [], target: result, at: 0, depth: 1 }];
+  let visited = 0;
+  while (stack.length) {
+    const frame = stack[stack.length - 1];
+    if (frame.at >= frame.items.length || frame.target.length >= 8 || frame.depth > 3) { stack.pop(); continue; }
+    if (++visited > 1000) throw new Error("AI 生成节点超过处理预算");
+    const item = frame.items[frame.at++];
     const text = generatedNodeText(item);
-    if (!text) {
-      return sanitizeGeneratedNodes(generatedNodeChildren(item), depth);
-    }
-    return [{
-      text: text.slice(0, 120),
-      children: sanitizeGeneratedNodes(generatedNodeChildren(item), depth + 1),
-    }];
-  }).slice(0, 8);
+    const children = generatedNodeChildren(item);
+    const next = { text, children: [] as AiGeneratedNode[] };
+    if (text) frame.target.push(next);
+    if (Array.isArray(children)) stack.push({ items: children, target: text ? next.children : frame.target, at: 0, depth: frame.depth + Number(Boolean(text)) });
+  }
+  return result;
 };
 
 const normalizeActionResult = (action: AiNodeAction, parsed: unknown): AiActionResult => {
+  assertValueBudget(parsed, { maxDepth: 64, maxBytes: MAX_AI_RESPONSE_BYTES, maxValues: 10_000 });
   if (Array.isArray(parsed)) {
     return { children: sanitizeGeneratedNodes(parsed) };
   }
@@ -425,6 +414,7 @@ export const runAiNodeAction = async (
   config: AiApiConfig,
   action: AiNodeAction,
   context: AiActionContext,
+  options: { signal?: AbortSignal; timeoutMs?: number; maxResponseBytes?: number } = {},
 ): Promise<AiActionResult> => {
   const error = validateAiConfig(config);
   if (error) throw new Error(error);
@@ -436,29 +426,37 @@ export const runAiNodeAction = async (
   ];
   const body = requestBodyFor(normalized, messages);
   const invokePayload = {
+    requestId: uuid(),
     endpoint: normalized.endpoint,
     baseUrl: normalized.baseUrl,
     apiKey: normalized.apiKey,
     body,
   };
 
-  let data: unknown;
   const bikeBridge = window.bike ?? window.localOutline;
-  if (bikeBridge?.invokeAiProvider) {
-    const result = await bikeBridge.invokeAiProvider(invokePayload);
-    if (!result.ok) throw new Error(result.error ?? "AI 请求失败");
-    data = result.data;
-  } else {
-    const response = await fetch(endpointUrl(normalized), {
+  return withRequestBudget({ signal: options.signal, timeoutMs: options.timeoutMs ?? AI_TIMEOUT_MS }, async (signal) => {
+    let data: unknown;
+    if (bikeBridge?.invokeAiProvider) {
+      const cancel = () => { void bikeBridge.cancelAiRequest?.(invokePayload.requestId); };
+      signal.addEventListener("abort", cancel, { once: true });
+      try {
+        const result = await bikeBridge.invokeAiProvider(invokePayload);
+        signal.throwIfAborted();
+        if (!result.ok) throw new Error(result.error ?? "AI 请求失败");
+        data = result.data;
+      } finally { signal.removeEventListener("abort", cancel); }
+    } else {
+      const response = await fetch(endpointUrl(normalized), {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${normalized.apiKey}`,
       },
       body: JSON.stringify(body),
-    });
+      signal,
+      });
     const contentType = response.headers.get("content-type") || "";
-    data = parseProviderPayload(await response.text());
+    data = parseProviderPayload(await readResponseText(response, { signal, maxBytes: options.maxResponseBytes ?? MAX_AI_RESPONSE_BYTES }));
     if (response.ok && /^text\/html\b/i.test(contentType)) {
       throw new Error("AI 端点返回了 HTML 页面，请检查 API baseurl 和协议端点是否匹配");
     }
@@ -466,9 +464,10 @@ export const runAiNodeAction = async (
       const message = providerErrorMessage(data) ?? `AI 请求失败：HTTP ${response.status}`;
       throw new Error(message);
     }
-  }
-
-  const text = extractTextFromResponse(data);
-  if (!text.trim()) throw new Error("AI 返回内容为空");
-  return normalizeActionResult(action, parseJsonText(text));
+    }
+    const text = extractTextFromResponse(data);
+    if (!text.trim()) throw new Error("AI 返回内容为空");
+    signal.throwIfAborted();
+    return normalizeActionResult(action, parseJsonText(text));
+  });
 };

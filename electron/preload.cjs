@@ -18,6 +18,7 @@ const bikeBridge = {
   finishBackupFlush: () => ipcRenderer.send("backup-flush-done"),
   checkForUpdates: () => ipcRenderer.invoke("check-for-updates"),
   invokeAiProvider: (payload) => ipcRenderer.invoke("invoke-ai-provider", payload),
+  cancelAiRequest: (requestId) => ipcRenderer.invoke("cancel-ai-provider", { requestId }),
   invokeSyncRequest: (payload) => ipcRenderer.invoke("invoke-sync-request", payload),
   onEditCommand: (callback) => {
     const handler = (_event, action) => callback(action);

@@ -11,6 +11,8 @@ import {
   summarizeKnowledge,
 } from "../shared/bike-knowledge.mjs";
 import { documentToMarkdown as renderDocumentMarkdown } from "../shared/bike-markdown.mjs";
+import { assertDocumentBudget, assertTextBudget, assertTreeBudget, assertValueBudget, assertWorkspaceBudget, MAX_DOCUMENT_BYTES } from "../shared/bike-limits.mjs";
+import { assertRegularWriteTarget, isProcessAlive } from "../electron/workspace-lock.cjs";
 
 export const SERVER_NAME = "bike";
 export const SERVER_DISPLAY_NAME = "Bike MCP";
@@ -153,6 +155,8 @@ const normalizeNode = (rawNode, usedIds, fallbackText = DEFAULT_NODE_TEXT) => {
 
 export const migrateDocument = (rawDocument, usedIds = new Set()) => {
   if (!isRecord(rawDocument)) throw new Error("导入文件不是有效文档");
+  if (!Array.isArray(rawDocument.nodes)) throw new Error("文档缺少有效主题数组，原文件已保留");
+  assertTreeBudget(rawDocument.nodes, { maxDepth: 10_000 });
 
   const now = new Date().toISOString();
   const updatedAt = textOr(rawDocument.updatedAt, now);
@@ -182,7 +186,7 @@ export const migrateDocument = (rawDocument, usedIds = new Set()) => {
     isShortcut: typeof rawDocument.isShortcut === "boolean" ? rawDocument.isShortcut : undefined,
     ...(markdownSource !== undefined ? { markdownSource } : {}),
     ...(markdownUpdatedAt !== undefined ? { markdownUpdatedAt } : {}),
-    nodes: nodes.length ? nodes : [normalizeNode(null, usedIds)],
+    nodes,
   };
 };
 
@@ -190,13 +194,14 @@ export const migrateWorkspace = (rawWorkspace) => {
   if (!isRecord(rawWorkspace) || !Array.isArray(rawWorkspace.documents)) {
     throw new Error("导入文件不是有效工作区");
   }
+  if (rawWorkspace.version !== undefined && rawWorkspace.version !== CURRENT_WORKSPACE_VERSION) throw new Error("工作区版本暂不支持，原文件已保留");
 
   const usedIds = new Set();
-  const documents = rawWorkspace.documents.flatMap((document) => {
+  const documents = rawWorkspace.documents.map((document, index) => {
     try {
-      return [migrateDocument(document, usedIds)];
-    } catch {
-      return [];
+      return migrateDocument(document, usedIds);
+    } catch (error) {
+      throw new Error(`第 ${index + 1} 个文档无法读取：${error.message}；原文件已保留`);
     }
   });
   if (!documents.length) throw new Error("工作区至少需要一个文档");
@@ -225,13 +230,13 @@ export const migrateWorkspace = (rawWorkspace) => {
         !textOr(rawEntry.document.id, "").trim() ||
         !Array.isArray(rawEntry.document.nodes)
       ) {
-        return [];
+        throw new Error("回收站记录无效，原文件已保留");
       }
       let document;
       try {
         document = migrateDocument(rawEntry.document);
-      } catch {
-        return [];
+      } catch (error) {
+        throw new Error(`回收站文档无法读取：${error.message}`);
       }
       const candidate = textOr(rawEntry.id, "").trim();
       const id = candidate && !entryIds.has(candidate)
@@ -534,6 +539,7 @@ export class WorkspaceStore {
 
   async readSnapshot({ useCache = true, includeRaw = false } = {}) {
     const stats = await fs.stat(this.config.workspacePath);
+    if (!stats.isFile() || stats.size > MAX_DOCUMENT_BYTES) throw new Error("工作区文件无效或超过 64 MiB 读取预算，原文件已保留");
     const cacheKey = `${stats.mtimeMs}:${stats.size}`;
     if (useCache && this.cache?.cacheKey === cacheKey) {
       if (!includeRaw) return this.cache.snapshot;
@@ -544,6 +550,7 @@ export class WorkspaceStore {
     }
 
     const raw = await fs.readFile(this.config.workspacePath, "utf8");
+    assertTextBudget(raw);
     const workspace = migrateWorkspace(JSON.parse(raw));
     const index = buildWorkspaceIndex(workspace);
     const revision = crypto.createHash("sha256").update(raw).digest("hex");
@@ -640,6 +647,7 @@ export class WorkspaceStore {
     }
 
     const now = writeTimestamp || new Date().toISOString();
+    assertWorkspaceBudget(current.workspace);
     const draft = cloneWorkspace(current.workspace);
     const preview = apply(draft, { now, current });
     const normalizedWorkspace = migrateWorkspace(draft);
@@ -665,6 +673,7 @@ export class WorkspaceStore {
       ...preview,
       ...(confirmationArgs ? { confirmationArgs } : {}),
     };
+    textToolResult(baseResult);
 
     if (dryRun) return baseResult;
     if (this.config.mode !== "write") {
@@ -680,12 +689,16 @@ export class WorkspaceStore {
     await this.writeWorkspaceAtomically(nextRaw, {
       expectedRevision: current.revision,
     });
+    let backupWarning;
+    try { await this.pruneBackupSnapshots(backup.filename); }
+    catch { backupWarning = "工作区已保存，旧备份清理未完成；最近的恢复副本已保留"; }
     this.cache = null;
     const nextSnapshot = await this.load();
 
     return {
       ...baseResult,
       applied: true,
+      ...(backupWarning ? { backupWarning } : {}),
       workspaceRevision: current.revision,
       nextWorkspaceRevision: nextSnapshot.revision,
       snapshot: backup,
@@ -702,6 +715,7 @@ export class WorkspaceStore {
   }
 
   async acquireWorkspaceWriteLock() {
+    await assertRegularWriteTarget(this.config.workspacePath);
     const lockPath = workspaceLockPath(this.config.workspacePath);
     const startedAt = Date.now();
     while (Date.now() - startedAt <= WRITE_LOCK_TIMEOUT_MS) {
@@ -710,6 +724,7 @@ export class WorkspaceStore {
         await fs.writeFile(lockPath, this.lockFileContent(ownerToken), {
           encoding: "utf8",
           flag: "wx",
+          mode: 0o600,
         });
         return async () => {
           await releaseWorkspaceWriteLock(lockPath, ownerToken);
@@ -749,18 +764,31 @@ export class WorkspaceStore {
       path.dirname(this.config.workspacePath),
       ".backups",
     );
-    await fs.mkdir(backupDirectory, { recursive: true });
+    await fs.mkdir(backupDirectory, { recursive: true, mode: 0o700 });
+    await fs.chmod(backupDirectory, 0o700);
     const revisionPrefix = hashContent(raw).slice(0, 12);
     const randomSuffix = crypto.randomBytes(4).toString("hex");
     const filename = `bike-mcp-${backupTimestamp(now)}-${revisionPrefix}-${sanitizeOperationName(operation)}-${randomSuffix}.json`;
     const backupPath = path.join(backupDirectory, filename);
-    await fs.writeFile(backupPath, raw, { encoding: "utf8", flag: "wx" });
+    await fs.writeFile(backupPath, raw, { encoding: "utf8", flag: "wx", mode: 0o600 });
     return {
       filename,
       path: this.config.debug ? backupPath : path.join(".backups", filename),
       pathIsRedacted: !this.config.debug,
       createdAt: now,
     };
+  }
+
+  async pruneBackupSnapshots(keepFilename) {
+    const directory = path.join(path.dirname(this.config.workspacePath), ".backups");
+    const entries = await fs.readdir(directory, { withFileTypes: true });
+    const files = await Promise.all(entries.filter((entry) => entry.isFile() && /^bike-mcp-.*\.json$/u.test(entry.name)).map(async (entry) => ({ name: entry.name, ...(await fs.stat(path.join(directory, entry.name))) })));
+    files.sort((left, right) => Number(right.name === keepFilename) - Number(left.name === keepFilename) || right.mtimeMs - left.mtimeMs || right.name.localeCompare(left.name));
+    let bytes = 0;
+    for (let i = 0; i < files.length; i++) {
+      bytes += files[i].size;
+      if (i > 0 && (i >= 20 || bytes > 64 * 1024 * 1024)) await fs.rm(path.join(directory, files[i].name));
+    }
   }
 
   async writeWorkspaceAtomically(raw, { expectedRevision } = {}) {
@@ -770,9 +798,11 @@ export class WorkspaceStore {
       directory,
       `.${basename}.${process.pid}.${Date.now()}.${crypto.randomBytes(4).toString("hex")}.tmp`,
     );
-    await writeFileDurably(tempPath, raw);
+    const original = await assertRegularWriteTarget(this.config.workspacePath);
     try {
+      await writeFileDurably(tempPath, raw, original ? original.mode & 0o777 : 0o600);
       if (expectedRevision) await this.assertCurrentRevision(expectedRevision);
+      await assertRegularWriteTarget(this.config.workspacePath);
       await fs.rename(tempPath, this.config.workspacePath);
       await fsyncDirectory(directory);
     } catch (error) {
@@ -789,8 +819,8 @@ const hashContent = (value) => crypto.createHash("sha256").update(value).digest(
 
 const cloneWorkspace = (workspace) => JSON.parse(JSON.stringify(workspace));
 
-const writeFileDurably = async (filePath, content) => {
-  const handle = await fs.open(filePath, "w");
+const writeFileDurably = async (filePath, content, mode) => {
+  const handle = await fs.open(filePath, "wx", mode);
   try {
     await handle.writeFile(content, "utf8");
     await handle.sync();
@@ -834,6 +864,7 @@ const readWorkspaceLock = async (lockPath) => {
   return {
     raw,
     ownerToken: parseWorkspaceLock(raw).ownerToken,
+    pid: parseWorkspaceLock(raw).pid,
     modifiedAt: stats.mtimeMs,
   };
 };
@@ -860,7 +891,7 @@ const releaseWorkspaceWriteLock = async (lockPath, ownerToken) => {
 const removeStaleLock = async (lockPath) => {
   try {
     const lock = await readWorkspaceLock(lockPath);
-    if (Date.now() - lock.modifiedAt >= WRITE_LOCK_STALE_MS) {
+    if (Date.now() - lock.modifiedAt >= WRITE_LOCK_STALE_MS && !isProcessAlive(lock.pid)) {
       if (lock.ownerToken) {
         await releaseWorkspaceWriteLock(lockPath, lock.ownerToken);
       } else {
@@ -1380,7 +1411,7 @@ export const updateNodeForMcp = async (store, args = {}) =>
     writeTimestamp: args.writeTimestamp,
     apply: (workspace, { now }) => {
       const document = workspaceDocumentById(workspace, args.documentId);
-      const located = locateNodeMutable(document.nodes, args.nodeId);
+      let located = locateNodeMutable(document.nodes, args.nodeId);
       if (!located) throw new Error(`找不到节点：${args.nodeId}`);
       const beforeText = located.node.text;
       if (hasOwn(args, "text") && textOr(args.text, "") !== beforeText) {
@@ -1395,6 +1426,7 @@ export const updateNodeForMcp = async (store, args = {}) =>
           const updated = workspace.documents.find((item) => item.id === id);
           if (updated && updated.id !== document.id) markDocumentUpdated(updated, now);
         }
+        located = locateNodeMutable(document.nodes, args.nodeId);
       }
       const fieldChanges = updateNodeFields(located.node, args);
       if (!fieldChanges.length && beforeText === located.node.text) throw new Error("至少需要提供一个可更新字段");
@@ -1901,13 +1933,13 @@ export const documentToMarkdown = (document, options = {}) => {
 };
 
 const sanitizeFilenameBase = (value) => {
-  const sanitized = textOr(value, "")
+  const sanitized = Array.from(textOr(value, "")
     .trim()
     .replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_")
     .replace(/\s+/g, " ")
     .replace(/^\.+/, "")
     .replace(/[.\s]+$/g, "")
-    .slice(0, 120);
+    ).slice(0, 120).join("");
 
   if (!sanitized) return DEFAULT_DOCUMENT_TITLE;
   if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i.test(sanitized)) {
@@ -1924,6 +1956,7 @@ export const getDocument = (
   { documentId, format = "compact", maxDepth = 6, metadata = false } = {},
 ) => {
   const document = documentById(snapshot, documentId);
+  if (format !== "compact") assertDocumentBudget(document);
   if (format === "json") {
     return {
       documentId: document.id,
@@ -2033,6 +2066,7 @@ export const exportDocumentForMcp = (
   { documentId, format = "json", metadata = false } = {},
 ) => {
   const document = documentById(snapshot, documentId);
+  assertDocumentBudget(document);
   if (format === "markdown") {
     return {
       filename: exportFilename(document.title, metadata ? "bike.md" : "md"),
@@ -2074,12 +2108,17 @@ export const resourceForDocument = (snapshot, document, format = "compact") => {
   };
 };
 
-export const textToolResult = (data) => ({
+export const textToolResult = (data) => {
+  assertValueBudget(data, { maxDepth: 600, maxBytes: 8 * 1024 * 1024 });
+  const text = typeof data === "string" ? data : JSON.stringify(data, null, 2);
+  assertTextBudget(text, 8 * 1024 * 1024);
+  return ({
   content: [
     {
       type: "text",
-      text: typeof data === "string" ? data : JSON.stringify(data, null, 2),
+      text,
     },
   ],
   ...(typeof data === "string" ? {} : { structuredContent: data }),
-});
+  });
+};

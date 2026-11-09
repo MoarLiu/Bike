@@ -1,6 +1,7 @@
 // Browser storage doubles (localStorage, BroadcastChannel) plus an installer
 // that puts them and the fake IndexedDB on globalThis for one test.
 import { createFakeIndexedDB, createTaskQueue, domError } from "./fake-indexeddb.mjs";
+import assert from 'node:assert/strict';
 
 export function createFakeLocalStorage() {
   const data = new Map();
@@ -127,12 +128,15 @@ export function installFakeBrowserStorage(t, { indexedDB = true } = {}) {
   t.after(() => {
     channels.closeAll();
     installs -= 1;
-    if (installs > 0) return;
-    for (const [name, descriptor] of originals) {
-      if (descriptor) Object.defineProperty(globalThis, name, descriptor);
-      else delete globalThis[name];
+    if (installs === 0) {
+      for (const [name, descriptor] of originals) {
+        if (descriptor) Object.defineProperty(globalThis, name, descriptor);
+        else delete globalThis[name];
+      }
+      originals = null;
     }
-    originals = null;
+    assert.deepEqual(idb.handlerErrors, [], 'unexpected IndexedDB handler errors');
+    assert.deepEqual(channels.listenerErrors, [], 'unexpected BroadcastChannel listener errors');
   });
   return { idb, localStorage: local, channels, settle: () => tasks.idle() };
 }

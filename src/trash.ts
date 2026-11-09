@@ -1,6 +1,7 @@
 import type { OutlineDocument, TrashEntry, Workspace } from "./types";
 import { uuid } from "./id";
-import { cloneNodes, flattenNodes } from "./tree";
+import { flattenNodes } from "./tree";
+import { remapCollidingIds, knowledgeEditable } from "./knowledge";
 
 export const TRASH_LIMIT = 100;
 export const TRASH_TTL_MS = 30 * 24 * 60 * 60 * 1000;
@@ -41,7 +42,6 @@ export const moveDocumentToTrash = (
     entry,
   };
 };
-
 export const restoreTrashEntry = (
   workspace: Workspace,
   entryId: string,
@@ -58,22 +58,17 @@ export const restoreTrashEntry = (
   const nodeCollision = flattenNodes(entry.document.nodes).some((row) =>
     liveNodeIds.has(row.node.id),
   );
-  const restored = idCollision
-    ? {
-        ...entry.document,
-        id: uuid(),
-        title: `${entry.document.title}（恢复）`,
-        updatedAt: now(),
-        markdownSource: undefined,
-        markdownUpdatedAt: undefined,
-        nodes: rekeyNodes(entry.document.nodes),
-      }
-    : {
-        ...entry.document,
-        updatedAt: now(),
-        ...(nodeCollision ? { markdownSource: undefined, markdownUpdatedAt: undefined } : {}),
-        nodes: nodeCollision ? rekeyNodes(entry.document.nodes) : entry.document.nodes,
-      };
+  if ((idCollision || nodeCollision) && entry.document.knowledge && !knowledgeEditable(entry.document.knowledge)) {
+    throw new Error("恢复时发现身份冲突，当前版本无法安全更新这份知识数据；原副本仍保留在回收站，可先导出 JSON");
+  }
+  const usedIds = new Set([...liveNodeIds, ...workspace.documents.map((document) => document.id)]);
+  const remapped = idCollision || nodeCollision ? remapCollidingIds(entry.document, usedIds).document : entry.document;
+  const restored = {
+    ...remapped,
+    ...(idCollision ? { title: `${entry.document.title}（恢复）` } : {}),
+    updatedAt: now(),
+    ...((idCollision || nodeCollision) ? { markdownSource: undefined, markdownUpdatedAt: undefined } : {}),
+  };
 
   const insertIndex = Math.min(entry.originalIndex, workspace.documents.length);
   const documents = [...workspace.documents];
@@ -114,15 +109,14 @@ export const retainLocalTrash = (before: Workspace, after: Workspace): Workspace
     }],
   );
   if (!removed.length && before.trash === undefined) return after;
+  if (!removed.length) {
+    const retained = pruneTrash(before.trash);
+    if (retained.length === before.trash?.length) {
+      return after.trash === before.trash ? after : { ...after, trash: before.trash };
+    }
+  }
   return {
     ...after,
     trash: pruneTrash([...removed, ...(before.trash ?? [])]).slice(0, TRASH_LIMIT),
   };
 };
-
-const rekeyNodes = (nodes: OutlineDocument["nodes"]): OutlineDocument["nodes"] =>
-  cloneNodes(nodes).map((node) => ({
-    ...node,
-    id: `node_${uuid()}`,
-    children: rekeyNodes(node.children),
-  }));

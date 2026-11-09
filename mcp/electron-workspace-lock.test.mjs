@@ -121,11 +121,33 @@ test("electron workspace lock can recover stale locks", async () => {
   const oldTime = new Date(Date.now() - 60_000);
   await fs.utimes(lockPath, oldTime, oldTime);
   const release = await acquireWorkspaceWriteLock(workspacePath, {
-    timeoutMs: 100,
+    timeoutMs: 2000,
     staleMs: 1,
     retryMs: 1,
   });
 
   await release();
   await assert.rejects(fs.stat(lockPath), /ENOENT/);
+});
+
+test('atomic writes preserve private modes and reject symbolic-link targets', async () => {
+  const file = await makeWorkspacePath();
+  await fs.writeFile(file, 'private', { mode: 0o600 });
+  await fs.chmod(file, 0o600);
+  await writeFileAtomically(file, 'updated');
+  assert.equal((await fs.stat(file)).mode & 0o777, 0o600);
+  const link = file + '.link';
+  await fs.symlink(file, link);
+  await assert.rejects(writeFileAtomically(link, 'wrong'), /符号链接/);
+  assert.equal(await fs.readFile(file, 'utf8'), 'updated');
+  assert.equal((await fs.lstat(link)).isSymbolicLink(), true);
+});
+
+test('an aged lock held by a living writer cannot be stolen', async () => {
+  const file = await makeWorkspacePath();
+  const release = await acquireWorkspaceWriteLock(file);
+  const old = new Date(Date.now() - 60000);
+  await fs.utimes(workspaceLockPath(file), old, old);
+  try { await assert.rejects(acquireWorkspaceWriteLock(file, { timeoutMs: 50, retryMs: 5, staleMs: 1 }), /另一个 Bike/); }
+  finally { await release(); }
 });

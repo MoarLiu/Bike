@@ -1,5 +1,6 @@
-import { mkdir } from "node:fs/promises";
+import { mkdir, chmod, open } from "node:fs/promises";
 import path from "node:path";
+import { assertDocumentBudget, assertValueBudget } from "../shared/bike-limits.mjs";
 
 const singletonWorkspaceId = "default";
 let DatabaseSync;
@@ -27,6 +28,12 @@ export class SyncValidationError extends Error {
     this.name = "SyncValidationError";
     this.statusCode = 400;
   }
+}
+export class SyncPayloadTooLargeError extends Error {
+  constructor(maxBytes) { super(`请求体超过 ${Math.floor(maxBytes / 1024 / 1024)} MiB 上限`); this.name = "SyncPayloadTooLargeError"; this.statusCode = 413; this.maxBytes = maxBytes; }
+}
+export class SyncBusyError extends Error {
+  constructor() { super("同步数据库暂时被占用，请稍后重试"); this.name = "SyncBusyError"; this.statusCode = 503; }
 }
 
 const now = () => new Date().toISOString();
@@ -67,13 +74,14 @@ const validateDocument = (id, document) => {
   if (!Array.isArray(document.nodes)) {
     throw new SyncValidationError("document.nodes must be an array");
   }
+  try { assertDocumentBudget(document); } catch (error) { throw new SyncValidationError(error.message); }
   return document;
 };
 
 const normalizeOperationSequence = (value) => {
   if (value === null || value === undefined || value === "") return 0;
   const numeric = Number(value);
-  if (Number.isInteger(numeric) && numeric >= 0) return numeric;
+  if (Number.isSafeInteger(numeric) && numeric >= 0) return numeric;
   throw new SyncValidationError("after must be a non-negative integer");
 };
 
@@ -89,6 +97,8 @@ const validateOperations = (operations) => {
     if (typeof operation.type !== "string" || !operation.type.trim()) {
       throw new SyncValidationError("operation.type is required");
     }
+    try { assertValueBudget(operation, { maxDepth: 64, maxBytes: 1024 * 1024 }); }
+    catch (error) { throw new SyncValidationError(error.message); }
     return operation;
   });
 };
@@ -107,10 +117,11 @@ const rowToDocumentSummary = (row) => ({
   deletedAt: row.deleted_at ?? null,
 });
 
-export const createSyncStore = async (databasePath) => {
+export const createSyncStore = async (databasePath, { busyTimeoutMs = 1500 } = {}) => {
   if (!databasePath) {
     throw new Error("sync.databasePath is required");
   }
+  if (!Number.isInteger(busyTimeoutMs) || busyTimeoutMs < 1 || busyTimeoutMs > 10_000) throw new Error("busyTimeoutMs 必须是 1 到 10000 的整数");
   if (!DatabaseSync) {
     try {
       ({ DatabaseSync } = await import("node:sqlite"));
@@ -121,12 +132,19 @@ export const createSyncStore = async (databasePath) => {
     }
   }
   if (databasePath !== ":memory:") {
-    await mkdir(path.dirname(databasePath), { recursive: true });
+    await mkdir(path.dirname(databasePath), { recursive: true, mode: 0o700 });
+    const file = await open(databasePath, "a", 0o600);
+    await file.close();
+    await chmod(databasePath, 0o600);
   }
 
   const db = new DatabaseSync(databasePath);
+  db.exec(`PRAGMA busy_timeout = ${busyTimeoutMs}`);
   db.exec("PRAGMA journal_mode = WAL");
   db.exec("PRAGMA foreign_keys = ON");
+  if (databasePath !== ":memory:") {
+    for (const suffix of ["-wal", "-shm"]) await chmod(`${databasePath}${suffix}`, 0o600).catch((error) => { if (error.code !== "ENOENT") throw error; });
+  }
   db.exec(`
     CREATE TABLE IF NOT EXISTS workspace_meta (
       id TEXT PRIMARY KEY,
@@ -177,15 +195,16 @@ export const createSyncStore = async (databasePath) => {
   }
 
   const transaction = (callback) => {
-    db.exec("BEGIN IMMEDIATE");
+    let started = false;
     try {
+      db.exec("BEGIN IMMEDIATE");
+      started = true;
       const result = callback();
       db.exec("COMMIT");
       return result;
     } catch (error) {
-      try {
-        db.exec("ROLLBACK");
-      } catch {}
+      if (started) try { db.exec("ROLLBACK"); } catch {}
+      if (/database is (?:locked|busy)/iu.test(error.message)) throw new SyncBusyError();
       throw error;
     }
   };
@@ -385,27 +404,38 @@ export const createSyncStore = async (databasePath) => {
       return getManifest();
     });
 
-  const getDocumentOperations = ({ id, after }) => {
+  const getDocumentOperations = ({ id, after, limit = 100 }) => {
     const document = getDocument(id);
     if (!document) throw new SyncNotFoundError("Document not found");
     if (document.deletedAt) throw new SyncNotFoundError("Document is deleted");
     const safeAfter = normalizeOperationSequence(after);
+    const safeLimit = Number(limit);
+    if (!Number.isSafeInteger(safeLimit) || safeLimit < 1 || safeLimit > 500) throw new SyncValidationError("limit must be an integer between 1 and 500");
     const rows = db.prepare(`
       SELECT sequence, base_revision, actor_id, operation_json, created_at
       FROM document_operations
       WHERE document_id = ? AND sequence > ?
       ORDER BY sequence ASC
-    `).all(id, safeAfter);
+      LIMIT ?
+    `).iterate(id, safeAfter, safeLimit + 1);
+    const operations = [];
+    let bytes = 256 + Buffer.byteLength(id), truncated = false;
+    for (const row of rows) {
+      const item = {
+        sequence: row.sequence, baseRevision: row.base_revision, actorId: row.actor_id,
+        operation: parseJson(row.operation_json, null), createdAt: row.created_at,
+      };
+      const size = Buffer.byteLength(JSON.stringify(item)) + 1;
+      if (operations.length >= safeLimit || bytes + size > 2 * 1024 * 1024) { truncated = true; break; }
+      operations.push(item); bytes += size;
+    }
     return {
       documentId: id,
       currentRevision: document.revision,
-      operations: rows.map((row) => ({
-        sequence: row.sequence,
-        baseRevision: row.base_revision,
-        actorId: row.actor_id,
-        operation: parseJson(row.operation_json, null),
-        createdAt: row.created_at,
-      })),
+      operations,
+      truncated,
+      hasMore: truncated,
+      nextAfter: truncated ? operations.at(-1)?.sequence ?? safeAfter : null,
     };
   };
 

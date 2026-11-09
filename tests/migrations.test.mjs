@@ -43,7 +43,6 @@ test("workspace migration preserves and validates trash entries", () => {
           nodes: [{ id: "deleted-node", text: "Old", children: [] }],
         },
       },
-      { id: "bad", deletedAt: "not-a-date", document: null },
     ],
   });
 
@@ -51,6 +50,7 @@ test("workspace migration preserves and validates trash entries", () => {
   assert.equal(workspace.trash[0].id, "trash-1");
   assert.equal(workspace.trash[0].document.id, "deleted");
   assert.equal(workspace.trash[0].originalIndex, 1);
+  assert.throws(() => migrateWorkspace({ ...workspace, trash: [...workspace.trash, { id: "bad", deletedAt: "not-a-date", document: null }] }), /回收站包含无效/);
 });
 
 test("trash migration keeps document and node ids even when a live document has the same ids", () => {

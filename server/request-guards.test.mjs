@@ -38,8 +38,9 @@ test("client address is the entry appended by the trusted proxy", () => {
 
   const twoProxies = { trustProxyHeaders: true, trustedProxyCount: 2 };
   assert.equal(address("1.2.3.4, 198.51.100.7, 10.0.0.2", twoProxies), "198.51.100.7");
-  // Fewer entries than trusted proxies: fall back to the leftmost entry.
-  assert.equal(address("198.51.100.7", twoProxies), "198.51.100.7");
+  // A short chain cannot establish which entry a trusted proxy supplied.
+  assert.equal(address("198.51.100.7", twoProxies), "10.0.0.1");
+  assert.equal(address("198.51.100.7", { trustProxyHeaders: "false", trustedProxyCount: 1 }), "10.0.0.1");
 });
 
 test("client address falls back to the socket when the header is missing or empty", () => {

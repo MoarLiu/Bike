@@ -90,6 +90,7 @@ export interface ResolvedConnection {
 }
 
 export interface KnowledgeIndex {
+  nodesByDocument: Map<string, KnowledgeIndex["nodes"]>;
   documents: Array<{ id: string; title: string; updatedAt: string }>;
   nodes: Array<{
     documentId: string;
@@ -101,6 +102,13 @@ export interface KnowledgeIndex {
     isTodo: boolean;
     checked: boolean;
     updatedAt: string;
+    codeBlock: string;
+    tableText: string;
+    tags: string[];
+    tagKeys: Set<string>;
+    foldedText: string;
+    foldedNote: string;
+    foldedCode: string;
   }>;
   tags: Array<{ key: string; label: string; count: number; documentCount: number; nodes: Array<{ documentId: string; nodeId: string }> }>;
   backlinks: Map<string, BacklinkSource[]>;
@@ -211,14 +219,18 @@ export interface LinkOrigin {
   field?: "text" | "note";
   start: number;
   end: number;
+  sourceRaw?: string;
 }
 export function resolveWikiLink(workspace: KnowledgeWorkspace, raw: string, origin?: LinkOrigin | null): {
   status: string;
+  ancestors?: KnowledgeNode[];
   documentId?: string;
   nodeId?: string | null;
   link?: WikiLink;
 };
 export function buildKnowledgeIndex(workspace: KnowledgeWorkspace): KnowledgeIndex;
+export function knowledgeSearchStats(index: KnowledgeIndex): { scannedNodes: number; cacheHits: number };
+export function knowledgeIndexCacheStats(): { documents: number; nodes: number };
 export function backlinksFor(index: KnowledgeIndex, documentId: string, nodeId?: string | null): BacklinkSource[];
 export function searchKnowledge(index: KnowledgeIndex, filters?: {
   query?: string;
@@ -288,6 +300,7 @@ export function encodeBikeMetadata(document: KnowledgeDocument, body: string): s
 export function finalizeMarkdownExport(body: string, document: KnowledgeDocument, options?: { metadata?: boolean }): {
   content: string;
   lossy: boolean;
+  lossReasons?: string[];
   error?: string;
 };
 export function restoreMarkdownIdentity<T extends KnowledgeDocument>(document: T, metadata: NonNullable<ReturnType<typeof readBikeMetadata>["metadata"]>, options: { matched: boolean }): T;

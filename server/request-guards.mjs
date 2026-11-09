@@ -23,6 +23,16 @@ export const normalizeOptionalBoolean = (value, name, fallback = false) => {
   }
   return value;
 };
+export const normalizePositiveInteger = (value, name, fallback, { minimum = 1, maximum = Number.MAX_SAFE_INTEGER } = {}) => {
+  if (value === undefined || value === null) return fallback;
+  if (!Number.isSafeInteger(value) || value < minimum || value > maximum) throw new Error(`${name} 必须是 ${minimum} 到 ${maximum} 的整数`);
+  return value;
+};
+export const environmentInteger = (value, name) => {
+  if (value == null || value === "") return undefined;
+  if (!/^\d+$/u.test(value)) throw new Error(`${name} 必须是整数`);
+  return Number(value);
+};
 
 // Every trusted proxy appends the address it accepted the connection from to
 // X-Forwarded-For, so the right-hand entries are written by our own proxies and
@@ -33,14 +43,14 @@ export const resolveClientAddress = (
   { trustProxyHeaders = false, trustedProxyCount = defaultTrustedProxyCount } = {},
 ) => {
   const socketAddress = request.socket?.remoteAddress || "unknown";
-  if (!trustProxyHeaders) return socketAddress;
+  if (trustProxyHeaders !== true) return socketAddress;
   const header = request.headers["x-forwarded-for"];
   const entries = (Array.isArray(header) ? header.join(",") : String(header ?? ""))
     .split(",")
     .map((entry) => entry.trim())
     .filter(Boolean);
-  if (!entries.length) return socketAddress;
-  return entries[Math.max(0, entries.length - trustedProxyCount)];
+  if (entries.length < trustedProxyCount) return socketAddress;
+  return entries[entries.length - trustedProxyCount];
 };
 
 // Devices that logged in successfully before (proven by a signed device

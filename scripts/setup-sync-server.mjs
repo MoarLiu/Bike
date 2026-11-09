@@ -10,6 +10,7 @@ import {
   rename,
   rm,
   writeFile,
+  chmod,
 } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
@@ -20,6 +21,7 @@ import {
 } from "../server/password.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+process.umask(0o077);
 const projectRoot = path.resolve(__dirname, "..");
 const configPath = process.env.BIKE_SYNC_CONFIG
   ? path.resolve(process.env.BIKE_SYNC_CONFIG)
@@ -106,8 +108,9 @@ const loadConfig = async () => {
 };
 
 const saveConfig = async (config) => {
-  await mkdir(path.dirname(configPath), { recursive: true });
-  await writeFile(`${configPath}.tmp`, `${JSON.stringify(normalizeConfig(config), null, 2)}\n`, "utf8");
+  await mkdir(path.dirname(configPath), { recursive: true, mode: 0o700 });
+  await writeFile(`${configPath}.tmp`, `${JSON.stringify(normalizeConfig(config), null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+  await chmod(`${configPath}.tmp`, 0o600);
   await rename(`${configPath}.tmp`, configPath);
 };
 
@@ -256,6 +259,7 @@ const isProcessRunning = (pid) => {
 };
 
 const startService = async () => {
+  if (process.getuid?.() === 0) throw new Error("后台启动不能使用 root；请安装配置了普通用户的 systemd 服务，或切换到服务用户后启动");
   try {
     await readFile(configPath, "utf8");
   } catch {

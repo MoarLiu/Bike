@@ -1,6 +1,6 @@
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { readFile, stat } from "node:fs/promises";
+import { readFile, stat, chmod } from "node:fs/promises";
 import { createServer } from "node:http";
 import path from "node:path";
 import { pipeline } from "node:stream";
@@ -12,6 +12,9 @@ import {
   createFailureLimiter,
   loginAttemptKeys,
   normalizeTrustedProxyCount,
+  normalizeOptionalBoolean,
+  normalizePositiveInteger,
+  environmentInteger,
   resolveClientAddress,
   tooManyAuthFailuresPayload,
 } from "./request-guards.mjs";
@@ -20,6 +23,7 @@ import { handleSyncApi } from "./sync-api.mjs";
 import { createSyncStore } from "./sync-store.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+process.umask(0o077);
 const projectRoot = path.resolve(__dirname, "..");
 const distDir = path.join(projectRoot, "dist");
 const defaultSyncDatabasePath = path.join(projectRoot, "data", "bike-sync.sqlite");
@@ -80,6 +84,7 @@ const readConfig = async () => {
   let parsed;
   try {
     parsed = JSON.parse(await readFile(configPath, "utf8"));
+    await chmod(configPath, 0o600);
   } catch (error) {
     throw new Error(
       `无法读取认证配置：${configPath}\n请复制 config/bike.config.example.json 为 config/bike.config.json 后再启动。\n${error instanceof Error ? error.message : String(error)}`,
@@ -119,14 +124,14 @@ const readConfig = async () => {
 
   return {
     host: parsed.host || "127.0.0.1",
-    port: Number(parsed.port || process.env.PORT || 4173),
+    port: normalizePositiveInteger(parsed.port ?? environmentInteger(process.env.PORT, "PORT"), "port", 4173, { maximum: 65535 }),
     auth: {
       username: String(auth.username),
       passwordHash: String(auth.passwordHash),
       sessionSecret: String(auth.sessionSecret),
-      sessionMaxAgeHours: Number(auth.sessionMaxAgeHours || 168),
-      secureCookies: Boolean(auth.secureCookies),
-      trustProxyHeaders: Boolean(auth.trustProxyHeaders),
+      sessionMaxAgeHours: normalizePositiveInteger(auth.sessionMaxAgeHours, "auth.sessionMaxAgeHours", 168, { maximum: 8760 }),
+      secureCookies: normalizeOptionalBoolean(auth.secureCookies, "auth.secureCookies"),
+      trustProxyHeaders: normalizeOptionalBoolean(auth.trustProxyHeaders, "auth.trustProxyHeaders"),
       trustedProxyCount: normalizeTrustedProxyCount(
         auth.trustedProxyCount,
         "auth.trustedProxyCount",
@@ -148,12 +153,12 @@ const readConfig = async () => {
       ).trim(),
     },
     sync: {
-      enabled: sync.enabled === true,
+      enabled: normalizeOptionalBoolean(sync.enabled, "sync.enabled"),
       databasePath: sync.databasePath
         ? path.resolve(projectRoot, String(sync.databasePath))
         : defaultSyncDatabasePath,
       deviceTokenHashes,
-      maxBodyBytes: Number(sync.maxBodyBytes || 10 * 1024 * 1024),
+      maxBodyBytes: normalizePositiveInteger(sync.maxBodyBytes, "sync.maxBodyBytes", 10 * 1024 * 1024, { maximum: 64 * 1024 * 1024 }),
     },
   };
 };
@@ -564,9 +569,8 @@ const handleRequest = async (
     }
     let credentialsValid = false;
     try {
-      credentialsValid =
-        username === config.auth.username &&
-        await verifyPassword(password, config.auth.passwordHash);
+      const passwordValid = await verifyPassword(password, config.auth.passwordHash);
+      credentialsValid = username === config.auth.username && passwordValid;
     } finally {
       limiter.finish(attemptKeys, { failed: !credentialsValid });
     }

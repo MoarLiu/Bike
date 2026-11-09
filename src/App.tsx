@@ -134,9 +134,10 @@ import {
   type NavigationState,
   type Suggestion,
 } from "./knowledge";
-import { sameDocumentContent } from "./documentSignature";
+import { sameDocumentContent, sameWorkspaceContent } from "./documentSignature";
 import {
   emptyEditHistory,
+  historyMemoryUsage,
   recordChange,
   redo,
   undo,
@@ -150,7 +151,7 @@ import {
   exportWorkspace,
   importDocument,
 } from "./exporters";
-import { documentToMarkdown, markdownLinkOrigins, parseMarkdownDocument } from "./markdown";
+import { documentToMarkdown, markdownLinkOrigins, markdownPlainText, markdownSourceMap, markdownTableCells, parseMarkdownDocument } from "./markdown";
 import { firstDocument, migrateWorkspace } from "./migrations";
 import { createStarterWorkspace } from "./sample";
 import {
@@ -158,6 +159,7 @@ import {
   getWorkspaceSaveRevision,
   isWorkspacePersisted,
   listWorkspaceRecoverySnapshots,
+  listWorkspaceRecoveryFiles,
   loadWorkspace,
   reloadWorkspaceIf,
   saveWorkspace as saveWorkspaceToStorage,
@@ -165,6 +167,7 @@ import {
   subscribeToWorkspaceChanges,
   subscribeToWorkspaceConflicts,
   type WorkspaceRecoverySnapshot,
+  type WorkspaceRecoveryFile,
   type WorkspaceSaveResult,
 } from "./storage";
 import { readPreference, writePreference } from "./navigationStore";
@@ -185,6 +188,7 @@ import {
 } from "./sync";
 import type { OutlineDocument, OutlineNode, ViewMode, Workspace } from "./types";
 import { uuid } from "./id";
+import { assertTreeBudget } from "../shared/bike-limits.mjs";
 import {
   addChild,
   cloneNodes,
@@ -205,6 +209,7 @@ import {
   normalizeColor,
   outdentNode,
   removeNode,
+  relocateNode,
   uid,
   updateNode,
 } from "./tree";
@@ -343,10 +348,12 @@ const replaceMarkdownTitle = (source: string, title: string) => {
   return [`# ${safeTitle}`, "", normalized].join("\n").trimEnd();
 };
 
+let cachedMarkdownLines: { source: string; lines: Array<{ line: string; start: number; end: number }> } | null = null;
 const markdownLineInfos = (source: string) => {
+  if (cachedMarkdownLines?.source === source) return cachedMarkdownLines.lines;
   const lines = source.split("\n");
   let offset = 0;
-  return lines.map((line) => {
+  const result = lines.map((line) => {
     const info = {
       line,
       start: offset,
@@ -355,6 +362,8 @@ const markdownLineInfos = (source: string) => {
     offset += line.length + 1;
     return info;
   });
+  cachedMarkdownLines = { source, lines: result };
+  return result;
 };
 
 const indentationWidth = (value: string) =>
@@ -730,12 +739,14 @@ function App() {
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
   const [ready, setReady] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [recoveryFiles, setRecoveryFiles] = useState<WorkspaceRecoveryFile[]>([]);
   const [mode, setMode] = useState<AppViewMode>("outline");
   const [markdownPaneMode, setMarkdownPaneMode] = useState<MarkdownPaneMode>("split");
   const [markdownDraft, setMarkdownDraft] = useState("");
   const [search, setSearch] = useState("");
   const [activeNodeId, setActiveNodeId] = useState<string | null>(null);
   const [focusNodeId, setFocusNodeId] = useState<string | null>(null);
+  const [navigationTarget, setNavigationTarget] = useState<{ documentId: string; nodeId: string } | null>(null);
   const [selectedTags, setSelectedTags] = useState<string[]>([]);
   const selectedTag = selectedTags[0] ?? null;
   const setSelectedTag = (tag: string | null) => setSelectedTags(tag ? [tag] : []);
@@ -773,11 +784,13 @@ function App() {
   const backupTimerRef = useRef<number | null>(null);
   const backupPayloadsRef = useRef(new Map<number, Workspace>());
   const backupFlightRef = useRef<Promise<void> | null>(null);
+  const backupErrorNoticeRef = useRef<string | null>(null);
   const navHistoryRef = useRef<{ entries: Array<{ documentId: string; nodeId: string | null }>; index: number }>({ entries: [], index: -1 });
   const [recentTicker, setRecentTicker] = useState(0);
   const [aiConfig, setAiConfig] = useState<AiApiConfig>(() => loadAiConfig());
   const [showAiConfig, setShowAiConfig] = useState(false);
   const [aiBusyKey, setAiBusyKey] = useState<string | null>(null);
+  const aiRequestRef = useRef<{ controller: AbortController; key: string } | null>(null);
   const [isCheckingUpdates, setIsCheckingUpdates] = useState(false);
   const [syncConfig, setSyncConfig] = useState<SyncConfig>(() => loadSyncConfig());
   const [syncState, setSyncState] = useState<SyncState>(() => {
@@ -819,6 +832,11 @@ function App() {
   const flushPendingEditsRef = useRef<() => Workspace | null>(() => null);
   const autoSyncTimerRef = useRef<number | null>(null);
   const autoSyncDirtyRef = useRef(false);
+  const syncAppliedWorkspaceRef = useRef<Workspace | null>(null);
+  const autoSyncObservedWorkspaceRef = useRef<Workspace | null>(null);
+  const modalOpenRef = useRef(false);
+  modalOpenRef.current = showTrash || showVersionHistory || showAiConfig || showSyncConfig ||
+    showConfirmDelete || showRecoverySnapshots || showBackupSettings;
 
   const [theme, setTheme] = useState<"light" | "dark">(
     () => readPreference("theme", "light") as "light" | "dark"
@@ -895,7 +913,7 @@ function App() {
       resumeSource: true,
       manual: false,
       wait: true,
-    });
+    }).catch((error: unknown) => ({ ok: false, code: "write-failed", ticket: undefined, error: error instanceof Error ? error.message : String(error) }));
     if (Number.isInteger(backup.ticket)) {
       backupTicketRef.current = Math.max(backupTicketRef.current, backup.ticket ?? 0);
       backupTicketReadyRef.current = true;
@@ -911,8 +929,11 @@ function App() {
     if (!backup.ok && backup.code === "external-change") {
       backupScheduleRef.current = reduceBackupSchedule(backupScheduleRef.current, { type: "pause", reason: "external-change" }, Date.now()).state;
       showNotice(backup.error || "发现外部备份变更，已暂停自动备份");
-    }
-    void bridge.getBackupStatus?.().then((status) => applyBackupStatus(status as typeof backupStatus));
+    } else if (!backup.ok && backup.code !== "stale-source" && backup.code !== "disabled") {
+      const message = backup.error || "自动备份未完成，请查看备份状态";
+      if (backupErrorNoticeRef.current !== message) { backupErrorNoticeRef.current = message; showNotice(message); }
+    } else if (backup.ok) backupErrorNoticeRef.current = null;
+    void bridge.getBackupStatus?.().then((status) => applyBackupStatus(status as typeof backupStatus)).catch(() => {});
     await runBackupJob(finished.enqueue);
   });
 
@@ -1059,8 +1080,8 @@ function App() {
   });
 
   const persistSyncState = useEventCallback((next: SyncState) => {
-    saveSyncState(next);
     setSyncState(next);
+    saveSyncState(next);
   });
 
   const clearAutoSyncTimer = useEventCallback(() => {
@@ -1250,12 +1271,19 @@ function App() {
     return findNode(activeDocument.nodes, activeNodeId);
   }, [activeDocument, activeNodeId]);
 
+  const navigationNodes = useMemo(() => {
+    if (!activeDocument) return [];
+    return navigationTarget?.documentId === activeDocument.id
+      ? expandAncestors(activeDocument.nodes, navigationTarget.nodeId).nodes as OutlineNode[]
+      : activeDocument.nodes;
+  }, [activeDocument, navigationTarget]);
+
   const focusNode = useMemo(() => {
     if (!activeDocument || !focusNodeId) return null;
-    return findNode(activeDocument.nodes, focusNodeId);
-  }, [activeDocument, focusNodeId]);
+    return findNode(navigationNodes, focusNodeId);
+  }, [activeDocument, navigationNodes, focusNodeId]);
 
-  const visibleNodes = focusNode ? [focusNode] : activeDocument?.nodes ?? [];
+  const visibleNodes = focusNode ? [focusNode] : navigationNodes;
 
   const tags = useMemo(() => {
     if (!activeDocument) return [];
@@ -1328,6 +1356,7 @@ function App() {
     if (history !== historyRef.current) {
       historyRef.current = history;
       bumpHistoryVersion((version) => version + 1);
+      if (historyMemoryUsage(history).overBudget) showNotice("本次操作超过撤销内存预算，已保留最近一次撤销；更早的记录已释放");
     }
     maybeCaptureAutoSnapshots(current, next);
     return replaceWorkspace(next);
@@ -1343,10 +1372,14 @@ function App() {
         if (document.id !== current.activeDocumentId) return document;
         const before = document as MarkdownDocument;
         const updated = updater(before);
-        if (updated === before) return document;
+        if (updated === before || sameDocumentContent(before, updated)) return document;
+        try { assertTreeBudget(updated.nodes); }
+        catch (error) { showNotice(error instanceof Error ? error.message : "主题结构超过处理预算"); return document; }
         changed = true;
         if (!options.preserveMarkdown && typeof before.markdownSource === "string") {
           showNotice("已切换为结构化编辑，原始 Markdown 将由当前大纲重新生成");
+        } else if (options.preserveMarkdown && typeof before.markdownSource === "string" && updated.markdownSource === undefined) {
+          showNotice("这个主题无法直接映射到原 Markdown 源码，已按当前大纲重建；撤销可恢复原格式");
         }
         const stamped = { ...updated, updatedAt: now() };
         return options.preserveMarkdown ? stamped : clearDocumentMarkdown(stamped);
@@ -1363,6 +1396,8 @@ function App() {
     let nextNodes: OutlineNode[] | null = null;
     patchActiveDocumentStable((document) => {
       const nodes = updater(document.nodes, document);
+      try { assertTreeBudget(nodes); }
+      catch (error) { showNotice(error instanceof Error ? error.message : "主题结构超过处理预算"); return document; }
       nextNodes = nodes;
       return nodes === document.nodes ? document : { ...document, nodes };
     }, options);
@@ -1370,12 +1405,11 @@ function App() {
   };
   const updateActiveNodesStable = useEventCallback(updateActiveNodes);
 
-  const setActiveNodes = useEventCallback((nodes: OutlineNode[]) =>
-    patchActiveDocumentStable((document) =>
-      nodes === document.nodes ? document : { ...document, nodes },
-      { label: "拖拽主题" },
-    ),
-  );
+  const setActiveNodes = useEventCallback((sourceId: string, targetId: string, zone: OutlineDropZone) => {
+    flushPendingEdits();
+    updateActiveNodesStable((nodes) => relocateNode(nodes, sourceId, targetId, zone, focusNodeId),
+      { label: "拖拽主题", nodeId: sourceId });
+  });
 
   const parseMarkdownIntoDocument = (
     document: MarkdownDocument,
@@ -1576,21 +1610,17 @@ function App() {
       showNotice(nodeId ? "目标主题已不存在" : "目标文档已不存在");
       return;
     }
-    const expanded = nodeId ? expandAncestors(targetDocument.nodes, nodeId) : { nodes: targetDocument.nodes, found: true };
-    if (nodeId && !expanded.found) { showNotice("目标主题已不存在"); return; }
-    const nextNodes = expanded.nodes as OutlineNode[];
+    const nextNodes = targetDocument.nodes;
+    if (nodeId && !findNode(nextNodes, nodeId)) { showNotice("目标主题已不存在"); return; }
     const targetExists = !nodeId || Boolean(findNode(nextNodes, nodeId));
+    setNavigationTarget((previous) => nodeId ? previous?.documentId === documentId && previous.nodeId === nodeId ? previous : { documentId, nodeId } : null);
     if (!nodeId) setFocusNodeId(null);
     if (modeRef.current === "markdown") { modeRef.current = "outline"; setMode("outline"); }
     if (focusNodeId && nodeId) {
       const focusRoot = findNode(nextNodes, focusNodeId);
       if (!focusRoot || !findNode([focusRoot], nodeId)) setFocusNodeId(null);
     }
-    replaceWorkspace({
-      ...current,
-      activeDocumentId: documentId,
-      documents: current.documents.map((item) => item.id === documentId ? { ...item, nodes: nextNodes } : item),
-    });
+    if (current.activeDocumentId !== documentId) replaceWorkspace({ ...current, activeDocumentId: documentId });
     setActiveNodeId(targetExists && nodeId ? nodeId : firstNodeId(nextNodes));
     setLocatedNodeId(nodeId, documentId);
     rememberNavigation(documentId, nodeId);
@@ -1677,7 +1707,8 @@ function App() {
   const createLinkedDocument = useEventCallback((nodeId: string, text: string, query: { start: number; end: number }, title: string, field: "text" | "note" | "markdown" = "text") => {
     const inserted = insertLinkAtQuery(text, query, { documentName: title });
     const id = uuid();
-    commitWorkspace((workspace) => {
+    let bindingError: string | null = null;
+    const committed = commitWorkspace((workspace) => {
       const created: OutlineDocument = {
         id,
         title,
@@ -1697,19 +1728,22 @@ function App() {
               target: { documentId: id },
               labelMode: "auto",
             });
+            if (result.error) bindingError = result.error;
             const next = { ...(result.document as MarkdownDocument), updatedAt: now() };
         return field === "markdown" ? next : clearDocumentMarkdown(next);
           }),
         ],
       };
     }, { label: "创建文档并链接", group: null });
+    if (!committed) return;
     if (field === "text") labelBaselineRef.current.set(nodeId, inserted.text);
     if (field === "markdown") {
       if (markdownParseTimerRef.current) window.clearTimeout(markdownParseTimerRef.current);
       markdownDraftRef.current = { documentId: workspaceRef.current?.activeDocumentId ?? null, value: inserted.text, dirty: false };
       setMarkdownDraft(inserted.text);
     }
-    showNotice("已创建文档并插入链接。撤销只会移除链接，新文档会保留，也可以移入回收站。");
+    showNotice(bindingError ? `文档已创建，但稳定链接未建立：${bindingError}。可以从候选中重新选择这个文档。`
+      : "已创建文档并插入链接。撤销只会移除链接，新文档会保留，也可以移入回收站。");
   });
 
 
@@ -1759,7 +1793,7 @@ function App() {
   }, [activeDocument, mode]);
 
   const performHistoryStep = useEventCallback((direction: "undo" | "redo") => {
-    if (!ready || storageConflictRef.current || recoveryBusyRef.current || syncBusyRef.current || historyBusyRef.current) return;
+    if (!ready || modalOpenRef.current || storageConflictRef.current || recoveryBusyRef.current || syncBusyRef.current || historyBusyRef.current) return;
     if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
     flushPendingEdits();
     const current = workspaceRef.current;
@@ -1809,6 +1843,7 @@ function App() {
     const isUndo = key === "z" && !event.shiftKey;
     const isRedo = (key === "z" && event.shiftKey) || key === "y";
     if (!isUndo && !isRedo) return;
+    if (modalOpenRef.current) return;
 
     const element = event.target instanceof HTMLElement ? event.target : null;
     if (element?.closest('[role="dialog"]')) return;
@@ -1860,7 +1895,7 @@ function App() {
         document.execCommand(action);
         return;
       }
-      if (showTrash || showVersionHistory || showAiConfig || showSyncConfig || showConfirmDelete) return;
+      if (modalOpenRef.current) return;
       performHistoryStep(action);
   });
 
@@ -2006,7 +2041,9 @@ function App() {
     if (syncBusyRef.current || recoveryBusyRef.current || historyBusyRef.current || storageConflictRef.current) return;
     const current = flushPendingEdits() ?? workspaceRef.current;
     if (!current) return;
-    const result = restoreTrashEntry(current, entryId);
+    let result;
+    try { result = restoreTrashEntry(current, entryId); }
+    catch (error) { showNotice(error instanceof Error ? error.message : "恢复失败，原副本已保留"); return; }
     if (!result) return;
     clearEditHistory();
     setActiveNodeId(firstNodeId(result.document.nodes));
@@ -2128,10 +2165,11 @@ function App() {
 
   const handleNodeText = useEventCallback((id: string, text: string, options?: EditOptions) => {
     patchActiveDocumentStable((document) => withFieldText(document, { nodeId: id, field: "text", text }),
-      options ?? { label: "编辑主题", group: `text:${id}` });
+      { ...(options ?? { label: "编辑主题", group: `text:${id}` }), preserveMarkdown: true });
   });
 
   const handleNodePatch = useEventCallback((id: string, patch: Partial<OutlineNode>) => {
+    if ("collapsed" in patch) setNavigationTarget(null);
     const keys = Object.keys(patch);
     const isNote = keys.length === 1 && keys[0] === "note";
     patchActiveDocumentStable((document) => {
@@ -2168,16 +2206,28 @@ function App() {
       note?: string;
       existingChildren?: string[];
     },
+    signal?: AbortSignal,
   ) => {
     const config = ensureAiConfig();
     if (!config) return null;
-    return runAiNodeAction(config, action, context);
+    return runAiNodeAction(config, action, context, { signal });
   });
+
+  const cancelAiAction = useEventCallback(() => {
+    const request = aiRequestRef.current;
+    if (!request) return;
+    request.controller.abort(new Error("AI 请求已取消"));
+    aiRequestRef.current = null;
+    setAiBusyKey(null);
+    showNotice("AI 请求已取消，可以继续编辑");
+  });
+  useEffect(() => () => aiRequestRef.current?.controller.abort(), []);
 
   const handleStructuredAiAction = useEventCallback(async (
     action: AiNodeAction,
     targetId: StructuredAiTargetId,
   ) => {
+    if (aiRequestRef.current) { showNotice("AI 请求仍在进行，可先取消"); return; }
     const currentWorkspace = flushPendingEdits() ?? workspaceRef.current;
     const document = currentWorkspace?.documents.find(
       (item) => item.id === currentWorkspace.activeDocumentId,
@@ -2189,6 +2239,8 @@ function App() {
     if (!isDocumentRoot && !node) return;
 
     const busyKey = `structured:${targetId}:${action}`;
+    const request = { controller: new AbortController(), key: busyKey };
+    aiRequestRef.current = request;
     setAiBusyKey(busyKey);
     showNotice(action === "generate" ? "AI 正在生成子主题..." : "AI 正在润色主题...");
     try {
@@ -2199,8 +2251,9 @@ function App() {
         existingChildren: (isDocumentRoot ? document.nodes : node?.children ?? [])
           .map((child) => child.text)
           .filter(Boolean),
-      });
+      }, request.controller.signal);
       if (!result) return;
+      if (request.controller.signal.aborted || aiRequestRef.current !== request) return;
 
       const latestWorkspace = flushPendingEdits() ?? workspaceRef.current;
       const latestDocument = latestWorkspace?.documents.find((item) => item.id === document.id);
@@ -2240,7 +2293,7 @@ function App() {
     } catch (error) {
       showNotice(error instanceof Error ? error.message : "AI 操作失败");
     } finally {
-      setAiBusyKey((current) => (current === busyKey ? null : current));
+      if (aiRequestRef.current === request) { aiRequestRef.current = null; setAiBusyKey((current) => (current === busyKey ? null : current)); }
     }
   });
 
@@ -2250,8 +2303,11 @@ function App() {
     source: string,
   ) => {
     if (!activeDocument) return null;
+    if (aiRequestRef.current) { showNotice("AI 请求仍在进行，可先取消"); return null; }
     const sourceDocumentId = activeDocument.id;
     const busyKey = `markdown:${action}`;
+    const request = { controller: new AbortController(), key: busyKey };
+    aiRequestRef.current = request;
     setAiBusyKey(busyKey);
     showNotice(action === "generate" ? "AI 正在生成 Markdown 子主题..." : "AI 正在润色 Markdown 主题...");
     try {
@@ -2259,8 +2315,9 @@ function App() {
         documentTitle: activeDocument.title,
         topicText: target.text,
         existingChildren: [],
-      });
+      }, request.controller.signal);
       if (!result) return null;
+      if (request.controller.signal.aborted || aiRequestRef.current !== request) return null;
 
       const latestWorkspace = workspaceRef.current;
       const latestDocument = latestWorkspace?.documents.find((item) => item.id === sourceDocumentId);
@@ -2296,7 +2353,7 @@ function App() {
       showNotice(error instanceof Error ? error.message : "AI 操作失败");
       return null;
     } finally {
-      setAiBusyKey((current) => (current === busyKey ? null : current));
+      if (aiRequestRef.current === request) { aiRequestRef.current = null; setAiBusyKey((current) => (current === busyKey ? null : current)); }
     }
   });
 
@@ -2306,7 +2363,9 @@ function App() {
       showNotice(error);
       return false;
     }
-    const saved = saveAiConfig(config);
+    let saved;
+    try { saved = saveAiConfig(config); }
+    catch (error) { showNotice(`API 配置保存失败：${error instanceof Error ? error.message : String(error)}`); return false; }
     setAiConfig(saved);
     setShowAiConfig(false);
     showNotice("API 密钥配置已保存");
@@ -2752,10 +2811,12 @@ function App() {
     if ((format === "opml" || format === "freemind") && knowledgeEditable(document.knowledge) && (document.knowledge.references.length || document.knowledge.relations.length)) {
       showNotice("这个格式不能完整保留链接身份和关系");
     }
-    const result = exportDocument(document, format, { metadata });
+    let result;
+    try { result = exportDocument(document, format, { metadata }); }
+    catch (error) { showNotice(error instanceof Error ? error.message : "导出失败，原数据已保留"); return; }
     if (metadata && result.error) { showNotice(result.error); return; }
     downloadText(result.filename, result.content, result.mime);
-    showNotice(result.error ? result.error : `已导出 ${result.filename}${result.lossy ? "（稳定 id 未保留）" : ""}`);
+    showNotice(result.error ? result.error : `已导出 ${result.filename}${result.lossy ? `：${result.lossReasons?.join("；") || "此格式无法完整保留原数据"}` : ""}`);
   });
 
   const exportActivePdf = useEventCallback(async () => {
@@ -2858,7 +2919,7 @@ function App() {
       return;
     }
     if (result.revision && bikeBridge.acceptBackupBaseline) {
-      const accepted = await bikeBridge.acceptBackupBaseline(result.revision, { workspace: next, sourceRevision: getWorkspaceSaveRevision(next), semanticHash: backupContentHash(next) });
+      const accepted = await bikeBridge.acceptBackupBaseline(result.revision, { workspace: next, sourceRevision: getWorkspaceSaveRevision(next), semanticHash: backupContentHash(next), ticket: ++backupTicketRef.current });
       if (accepted.ok !== true) {
         showNotice("外部备份再次变化，自动备份仍暂停，请重新查看外部变更");
         return;
@@ -2876,9 +2937,27 @@ function App() {
   });
 
   const applySyncedWorkspace = useEventCallback((next: Workspace) => {
-    replaceWorkspace(next);
-    setActiveNodeId(firstNodeIdInWorkspace(next));
-    setFocusNodeId(null);
+    const current = workspaceRef.current;
+    const previousById = new Map(current?.documents.map((document) => [document.id, document]));
+    const documents = next.documents.map((document) => {
+      const previous = previousById.get(document.id);
+      return previous && sameDocumentContent(previous, document) ? previous : document;
+    });
+    const activeDocumentId = documents.some((document) => document.id === current?.activeDocumentId)
+      ? current!.activeDocumentId : next.activeDocumentId;
+    const unchanged = current && activeDocumentId === current.activeDocumentId &&
+      documents.length === current.documents.length && documents.every((document, index) => document === current.documents[index]) &&
+      next.trash === current.trash;
+    const merged = unchanged ? current : { ...next, documents, activeDocumentId };
+    syncAppliedWorkspaceRef.current = merged;
+    if (merged === current) return merged;
+    replaceWorkspace(merged);
+    const activeDocument = documents.find((document) => document.id === activeDocumentId);
+    if (!activeDocument || !activeNodeIdRef.current || !findNode(activeDocument.nodes, activeNodeIdRef.current)) {
+      setActiveNodeId(firstNodeIdInWorkspace(merged));
+    }
+    if (focusNodeId && (!activeDocument || !findNode(activeDocument.nodes, focusNodeId))) setFocusNodeId(null);
+    return merged;
   });
 
   // Another tab or window saved a newer workspace: catch up, but only while this
@@ -2988,7 +3067,7 @@ function App() {
       // Refuse the replacement if another save lands after this backed-up read.
       const result = await saveWorkspace(current);
       if (!result.ok) {
-        if (!result.conflict) showNotice(`保存失败：${result.error.message}`);
+        showNotice(result.conflict ? "下载备份后工作区再次更新，已停止覆盖；请重新读取最新版本后重试" : `保存失败：${result.error.message}`);
         return;
       }
       storageConflictRef.current = false;
@@ -3076,6 +3155,7 @@ function App() {
     }
     syncBusyRef.current = true;
     setSyncBusy(true);
+    autoSyncDirtyRef.current = false;
     let retryAfterEdit = false;
     if (!options.silent) showNotice("正在同步文档...");
     try {
@@ -3087,30 +3167,34 @@ function App() {
         activeSync.state,
         { onCheckpoint: persistSyncState },
       );
-      if ((flushPendingEdits() ?? workspaceRef.current) !== currentWorkspace) {
+      if (!sameWorkspaceContent(flushPendingEdits() ?? workspaceRef.current!, currentWorkspace)) {
         retryAfterEdit = true;
         showNotice("同步期间有新编辑，已保留本机内容，请稍后再次同步");
         return;
       }
       await captureSyncSnapshots(currentWorkspace, result.workspace);
-      if ((flushPendingEdits() ?? workspaceRef.current) !== currentWorkspace || storageConflictRef.current) {
+      if (!sameWorkspaceContent(flushPendingEdits() ?? workspaceRef.current!, currentWorkspace) || storageConflictRef.current) {
         retryAfterEdit = true;
         showNotice("保存同步前快照期间有新编辑，已保留本机内容，请稍后再次同步");
         return;
       }
-      const nextWorkspace = retainLocalTrash(currentWorkspace, result.workspace);
-      applySyncedWorkspace(nextWorkspace);
-      const saved = await saveWorkspace(nextWorkspace);
-      if (!saved.ok) throw saved.error;
+      const retained = retainLocalTrash(workspaceRef.current ?? currentWorkspace, result.workspace);
+      const nextWorkspace = applySyncedWorkspace(retained) ?? retained;
+      if (nextWorkspace !== currentWorkspace) {
+        const saved = await saveWorkspace(nextWorkspace);
+        if (!saved.ok) throw saved.error;
+        if (saved.target === "localstorage") throw new Error("同步内容暂存于备用存储，尚未确认下载基线；请恢复本机主存储后重试");
+      }
       persistSyncState(result.state);
-      retryAfterEdit = workspaceRef.current !== nextWorkspace;
+      retryAfterEdit = !sameWorkspaceContent(workspaceRef.current!, nextWorkspace);
       autoSyncDirtyRef.current = retryAfterEdit;
       const changed =
         result.summary.uploaded > 0 ||
         result.summary.downloaded > 0 ||
         result.summary.deleted > 0 ||
         result.summary.conflicts.length > 0;
-      if (!options.silent || changed) showNotice(summarizeSyncResult(result.summary));
+      if (result.summary.checkpointErrors?.length) showNotice(`同步已完成，进度保存曾失败 ${result.summary.checkpointErrors.length} 次；本次进度已重新保存`);
+      else if (!options.silent || changed) showNotice(summarizeSyncResult(result.summary));
     } catch (error) {
       showNotice(options.silent ? `后台同步失败：${syncErrorMessage(error)}` : syncErrorMessage(error));
     } finally {
@@ -3141,12 +3225,14 @@ function App() {
   });
 
   useEffect(() => {
+    const previous = autoSyncObservedWorkspaceRef.current;
+    autoSyncObservedWorkspaceRef.current = workspace;
     if (!workspace || !ready || storageConflict || !syncConfig.autoSync) return;
     // A copy reloaded from another page's save is that page's to sync.
-    if (workspace === refreshedWorkspaceRef.current) return;
-    autoSyncDirtyRef.current = true;
+    if (workspace === refreshedWorkspaceRef.current || workspace === syncAppliedWorkspaceRef.current) return;
+    if (!previous || !sameWorkspaceContent(previous, workspace)) autoSyncDirtyRef.current = true;
+    if (!autoSyncDirtyRef.current) return;
     scheduleAutoSync();
-    return () => clearAutoSyncTimer();
   }, [workspace, ready, storageConflict, syncConfig.autoSync, syncConfig.serverUrl]);
 
   useEffect(() => {
@@ -3246,11 +3332,12 @@ function App() {
         showNotice("保存拉取前快照期间有新编辑，已保留本机内容，未替换工作区");
         return;
       }
-      const nextWorkspace = retainLocalTrash(currentWorkspace, result.workspace);
-      applySyncedWorkspace(nextWorkspace);
+      const retained = retainLocalTrash(currentWorkspace, result.workspace);
+      const nextWorkspace = applySyncedWorkspace(retained) ?? retained;
       clearEditHistory();
       const saved = await saveWorkspace(nextWorkspace);
       if (!saved.ok) throw saved.error;
+      if (saved.target === "localstorage") throw new Error("拉取内容暂存于备用存储，尚未确认下载基线；请恢复本机主存储后重试");
       persistSyncState(result.state);
       showNotice(`已从服务端拉取 ${result.workspace.documents.length} 个文档`);
     } catch (error) {
@@ -3324,7 +3411,7 @@ function App() {
         imported = importDocument(source, file.name, { dropMetadata: true });
       }
       if ("documents" in imported) {
-        const currentWorkspace = workspaceRef.current;
+        const currentWorkspace = flushPendingEdits() ?? workspaceRef.current;
         const shouldReplace = window.confirm(
           `导入工作区「${file.name}」会替换当前所有文档。继续前会先下载一份当前工作区备份。`,
         );
@@ -3411,8 +3498,20 @@ function App() {
       inputRefs.current.set(id, element);
     } else {
       inputRefs.current.delete(id);
+      labelBaselineRef.current.delete(id);
     }
   });
+  const handleLabelFocus = useEventCallback((id: string, value: string) => { labelBaselineRef.current.set(id, value); });
+  const handleLinkSuggestions = useEventCallback((query: string) => workspaceRef.current ? suggestLinkTargets(workspaceRef.current, query) : { items: [], requiresExplicit: false, highlight: -1 });
+  const handleNodeLinkFollow = useEventCallback((raw: string, source: Omit<LinkOrigin, "documentId">) => {
+    const current = workspaceRef.current;
+    if (current) followWikiLink(raw, { ...source, documentId: current.activeDocumentId });
+  });
+  const handleMindMapLabel = useEventCallback((id: string, value: string) => {
+    const document = workspaceRef.current?.documents.find((item) => item.id === workspaceRef.current?.activeDocumentId);
+    publishNodeLabel(id, document ? findNode(document.nodes, id)?.text ?? value : value, value);
+  });
+  const isStructuredAiBusy = useCallback((id: StructuredAiTargetId) => Boolean(aiBusyKey?.startsWith(`structured:${id}:`)), [aiBusyKey]);
 
   if (loadError) {
     return (
@@ -3423,6 +3522,8 @@ function App() {
           <button type="button" onClick={() => initializeWorkspace()}>
             重试
           </button>
+          <button type="button" onClick={() => setRecoveryFiles(listWorkspaceRecoveryFiles())}>查找备用副本</button>
+          {recoveryFiles.map((file, index) => <p key={file.id}><button type="button" onClick={() => downloadText(`bike-recovery-${index + 1}.json`, file.content, "application/json")}>下载备用副本 {index + 1}</button></p>)}
         </section>
       </main>
     );
@@ -3760,11 +3861,12 @@ function App() {
               </button>
             </div>
 
+            {aiBusyKey && <button type="button" onClick={cancelAiAction} title="取消 AI 请求"><X size={16} />取消 AI</button>}
             <button
               className="icon-button"
               type="button"
               onClick={() => performHistoryStep("undo")}
-              disabled={!canUndo}
+              disabled={!canUndo || syncBusy || historyBusy || recoveryBusy}
               title="撤销 (⌘Z / Ctrl+Z)"
               aria-label="撤销"
             >
@@ -3774,7 +3876,7 @@ function App() {
               className="icon-button"
               type="button"
               onClick={() => performHistoryStep("redo")}
-              disabled={!canRedo}
+              disabled={!canRedo || syncBusy || historyBusy || recoveryBusy}
               title="重做 (⇧⌘Z / Ctrl+Shift+Z)"
               aria-label="重做"
             >
@@ -3824,11 +3926,11 @@ function App() {
         <div className="toolstrip">
           {mode !== "markdown" && (
             <>
-              <button onClick={() => activeNodeId && insertAfter(activeNodeId)}>
+              <button onClick={() => activeNodeId ? insertAfter(activeNodeId) : insertChild(MINDMAP_ROOT_ID)}>
                 <Plus size={16} />
                 同级
               </button>
-              <button onClick={() => activeNodeId && insertChild(activeNodeId)}>
+              <button onClick={() => insertChild(activeNodeId ?? MINDMAP_ROOT_ID)}>
                 <Indent size={16} />
                 子级
               </button>
@@ -3907,13 +4009,13 @@ function App() {
                 onExportNode={exportNodeMarkdown}
                 onUpdateNodes={setActiveNodes}
                 onAiAction={handleStructuredAiAction}
-                isAiBusy={(id) => Boolean(aiBusyKey?.startsWith(`structured:${id}:`))}
-                onSuggestLinks={(query) => workspace ? suggestLinkTargets(workspace, query) : { items: [], requiresExplicit: false, highlight: -1 }}
+                isAiBusy={isStructuredAiBusy}
+                onSuggestLinks={handleLinkSuggestions}
                 onBindLink={bindNodeLink}
                 onCreateLink={createLinkedDocument}
                 onPublishLabel={publishNodeLabel}
-                onLabelFocus={(id, value) => labelBaselineRef.current.set(id, value)}
-                onFollowLink={(raw, source) => followWikiLink(raw, { ...source, documentId: activeDocument.id })}
+                onLabelFocus={handleLabelFocus}
+                onFollowLink={handleNodeLinkFollow}
                 locatedNodeId={locatedNodeId}
               />
             )}
@@ -3921,7 +4023,7 @@ function App() {
             {mode === "mindmap" && (
               <MindMap
                 title={focusNode?.text || activeDocument.title}
-                nodes={focusNode ? focusNode.children : activeDocument.nodes}
+                nodes={focusNode ? focusNode.children : navigationNodes}
                 rootTargetId={focusNode?.id ?? null}
                 viewportResetKey={focusNode?.id ?? activeDocument.id}
                 activeNodeId={activeNodeId}
@@ -3929,7 +4031,7 @@ function App() {
                 locationVersion={location.documentId === activeDocument.id ? location.version : 0}
                 onSelect={setActiveNodeId}
                 onTitle={updateTitle}
-                onText={(id, value) => publishNodeLabel(id, findNode(activeDocument.nodes, id)?.text ?? value, value)}
+                onText={handleMindMapLabel}
                 onPatch={handleNodePatch}
                 onInsertAfter={insertAfter}
                 onInsertChild={insertChild}
@@ -3946,7 +4048,7 @@ function App() {
                 showRelations={showRelations}
                 onToggleRelations={() => setShowRelations((value) => !value)}
                 onAiAction={handleStructuredAiAction}
-                isAiBusy={(id) => Boolean(aiBusyKey?.startsWith(`structured:${id}:`))}
+                isAiBusy={isStructuredAiBusy}
               />
             )}
 
@@ -4817,12 +4919,19 @@ function MarkdownView({
 }
 
 function MarkdownPreview({ content, documentId }: { content: string; documentId: string }) {
+  const blocks = useMemo(() => {
   const blocks: React.ReactNode[] = [];
-  const lines = content.replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n").split("\n");
+  try {
+  const mapping = markdownSourceMap(content);
+  const lines = mapping.text.split("\n");
   const lineOffsets: number[] = [];
   let offset = 0;
   for (const line of lines) { lineOffsets.push(offset); offset += line.length + 1; }
-  const inline = (text: string, key: string, start: number) => renderInlineMarkdown(text, key, { documentId, kind: "markdown", start, end: start + text.length });
+  const sourceFor = (text: string, start: number, projected?: number[]): MarkdownRenderSource => {
+    const sourceOffsets = projected ?? mapping.offsets.slice(start, start + text.length + 1);
+    return { documentId, kind: "markdown", start: sourceOffsets[0] ?? -1, end: sourceOffsets[sourceOffsets.length - 1] ?? -1, sourceOffsets, rawDocument: content };
+  };
+  const inline = (text: string, key: string, start: number, projected?: number[]) => renderInlineMarkdown(text, key, sourceFor(text, start, projected));
   let index = 0;
 
   while (index < lines.length) {
@@ -4852,13 +4961,14 @@ function MarkdownPreview({ content, documentId }: { content: string; documentId:
       continue;
     }
 
-    const heading = line.match(/^\s{0,3}(#{1,6})\s+(.*?)\s*#*\s*$/);
+    const heading = line.match(/^\s{0,3}(#{1,6})\s+(.*?)\s*$/);
     if (heading) {
       const level = Math.min(heading[1].length, 6);
       const Tag = `h${level}` as keyof JSX.IntrinsicElements;
+      const text = heading[2].replace(/\s+#+\s*$/u, "").trim();
       blocks.push(
         <Tag key={`heading-${index}`}>
-          {inline(heading[2], `heading-${index}`, lineOffsets[index] + line.indexOf(heading[2], heading[1].length))}
+          {inline(text, `heading-${index}`, lineOffsets[index] + line.indexOf(text, heading[1].length))}
         </Tag>,
       );
       index += 1;
@@ -4869,19 +4979,20 @@ function MarkdownPreview({ content, documentId }: { content: string; documentId:
       const tableStart = index;
       const tableLines = [lines[index], lines[index + 1]];
       index += 2;
-      while (index < lines.length && lines[index].includes("|") && lines[index].trim()) {
+      const framed = tableLines[0].trimStart().startsWith("|");
+      while (index < lines.length && lines[index].includes("|") && lines[index].trim() && (!framed || lines[index].trimStart().startsWith("|"))) {
         tableLines.push(lines[index]);
         index += 1;
       }
-      const headers = splitMarkdownTableRow(tableLines[0]);
-      const rows = tableLines.slice(2).map(splitMarkdownTableRow);
+      const headers = markdownTableCells(tableLines[0]);
+      const rows = tableLines.slice(2).map(markdownTableCells);
       blocks.push(
         <table key={`table-${index}`} className="markdown-preview-table">
           <thead>
             <tr>
               {headers.map((cell, cellIndex) => (
                 <th key={`head-${cellIndex}`}>
-                  {inline(cell, `table-head-${index}-${cellIndex}`, markdownCellOffset(tableLines[0], headers, cellIndex, lineOffsets[tableStart]))}
+                  {inline(cell.text, `table-head-${index}-${cellIndex}`, lineOffsets[tableStart], cell.offsets.map((at) => mapping.offsets[lineOffsets[tableStart] + at]))}
                 </th>
               ))}
             </tr>
@@ -4891,7 +5002,7 @@ function MarkdownPreview({ content, documentId }: { content: string; documentId:
               <tr key={`row-${rowIndex}`}>
                 {row.map((cell, cellIndex) => (
                   <td key={`cell-${rowIndex}-${cellIndex}`}>
-                    {inline(cell, `table-cell-${index}-${rowIndex}-${cellIndex}`, markdownCellOffset(tableLines[rowIndex + 2], row, cellIndex, lineOffsets[tableStart + rowIndex + 2]))}
+                    {inline(cell.text, `table-cell-${index}-${rowIndex}-${cellIndex}`, lineOffsets[tableStart + rowIndex + 2], cell.offsets.map((at) => mapping.offsets[lineOffsets[tableStart + rowIndex + 2] + at]))}
                   </td>
                 ))}
               </tr>
@@ -4904,7 +5015,7 @@ function MarkdownPreview({ content, documentId }: { content: string; documentId:
 
     const listItem = line.match(/^(\s*)(?:[-*+]|\d+[.)])\s+(?:\[( |x|X)\]\s+)?(.*)$/);
     if (listItem) {
-      const items: Array<{ indent: number; checked?: boolean; text: string; source: LinkOrigin }> = [];
+      const items: Array<{ indent: number; checked?: boolean; text: string; source: MarkdownRenderSource }> = [];
       while (index < lines.length) {
         const item = lines[index].match(/^(\s*)(?:[-*+]|\d+[.)])\s+(?:\[( |x|X)\]\s+)?(.*)$/);
         if (!item) break;
@@ -4912,7 +5023,7 @@ function MarkdownPreview({ content, documentId }: { content: string; documentId:
           indent: item[1].replace(/\t/g, "    ").length,
           checked: item[2] ? item[2].toLowerCase() === "x" : undefined,
           text: item[3],
-          source: { documentId, kind: "markdown", start: lineOffsets[index] + lines[index].length - item[3].length, end: lineOffsets[index] + lines[index].length },
+          source: sourceFor(item[3], lineOffsets[index] + lines[index].length - item[3].length),
         });
         index += 1;
       }
@@ -4960,6 +5071,11 @@ function MarkdownPreview({ content, documentId }: { content: string; documentId:
       </p>,
     );
   }
+  return blocks;
+  } catch (error) {
+    return [<p key="preview-error" role="alert">预览已停止：{error instanceof Error ? error.message : "内容超过处理预算"}。源码仍保留在编辑框中。</p>];
+  }
+  }, [content, documentId]);
 
   return (
     <div className="markdown-preview" aria-label="Markdown 预览">
@@ -5047,6 +5163,7 @@ const buildMarkdownPreviewList = (
     stack.push({ indent: item.indent, children: node.children });
   });
 
+  assertTreeBudget(roots);
   return roots;
 };
 
@@ -5073,13 +5190,14 @@ const renderMarkdownPreviewList = (
   </ul>
 );
 
-const renderInlineMarkdown = (text: string, keyPrefix: string, source: LinkOrigin): React.ReactNode[] => {
+type MarkdownRenderSource = LinkOrigin & { sourceOffsets?: number[]; rawDocument?: string };
+const renderInlineMarkdown = (text: string, keyPrefix: string, source: MarkdownRenderSource): React.ReactNode[] => {
   const wikiLinks = scanLinks(text);
   if (wikiLinks.length) {
     const linked: React.ReactNode[] = [];
     let cursor = 0;
     wikiLinks.forEach((link, index) => {
-      if (link.start > cursor) linked.push(...renderInlineMarkdown(text.slice(cursor, link.start), `${keyPrefix}-${index}`, { ...source, start: source.start + cursor }));
+      if (link.start > cursor) linked.push(...renderInlineMarkdown(text.slice(cursor, link.start), `${keyPrefix}-${index}`, { ...source, start: source.sourceOffsets?.[cursor] ?? source.start + cursor, sourceOffsets: source.sourceOffsets?.slice(cursor, link.start + 1) }));
       linked.push(
         <button
           key={`${keyPrefix}-wiki-${link.start}`}
@@ -5087,7 +5205,10 @@ const renderInlineMarkdown = (text: string, keyPrefix: string, source: LinkOrigi
           className="wiki-link-chip"
           onClick={(event) => {
             event.preventDefault();
-            openWikiLinkHandler?.(link.raw, { ...source, start: source.start < 0 ? -1 : source.start + link.start, end: source.start + link.end });
+            const start = source.sourceOffsets?.[link.start] ?? (source.start < 0 ? -1 : source.start + link.start);
+            const end = source.sourceOffsets?.[link.end] ?? source.start + link.end;
+            const { sourceOffsets, rawDocument, ...origin } = source;
+            openWikiLinkHandler?.(link.raw, { ...origin, start, end, sourceRaw: rawDocument?.slice(start, end) ?? link.raw });
           }}
         >
           {link.label}
@@ -5095,7 +5216,7 @@ const renderInlineMarkdown = (text: string, keyPrefix: string, source: LinkOrigi
       );
       cursor = link.end;
     });
-    if (cursor < text.length) linked.push(...renderInlineMarkdown(text.slice(cursor), `${keyPrefix}-end`, { ...source, start: source.start + cursor }));
+    if (cursor < text.length) linked.push(...renderInlineMarkdown(text.slice(cursor), `${keyPrefix}-end`, { ...source, start: source.sourceOffsets?.[cursor] ?? source.start + cursor, sourceOffsets: source.sourceOffsets?.slice(cursor) }));
     return linked;
   }
   const nodes: React.ReactNode[] = [];
@@ -5105,8 +5226,11 @@ const renderInlineMarkdown = (text: string, keyPrefix: string, source: LinkOrigi
   let match: RegExpExecArray | null;
 
   while ((match = tokenPattern.exec(text))) {
+    let slashes = 0;
+    for (let i = match.index - 1; i >= 0 && text[i] === "\\"; i--) slashes++;
+    if (slashes % 2) continue;
     if (match.index > lastIndex) {
-      nodes.push(text.slice(lastIndex, match.index));
+      nodes.push(markdownPlainText(text.slice(lastIndex, match.index)));
     }
 
     const key = `${keyPrefix}-${match.index}`;
@@ -5144,7 +5268,7 @@ const renderInlineMarkdown = (text: string, keyPrefix: string, source: LinkOrigi
   }
 
   if (lastIndex < text.length) {
-    nodes.push(text.slice(lastIndex));
+    nodes.push(markdownPlainText(text.slice(lastIndex)));
   }
 
   return nodes;
@@ -5163,7 +5287,7 @@ interface OutlineViewProps {
   onRemove: (id: string) => void;
   onCopyLink: (id: string) => void;
   onExportNode: (id: string) => void;
-  onUpdateNodes: (nodes: OutlineNode[]) => void;
+  onUpdateNodes: (sourceId: string, targetId: string, zone: OutlineDropZone) => void;
   onAiAction: (action: AiNodeAction, targetId: StructuredAiTargetId) => void;
   isAiBusy: (id: StructuredAiTargetId) => boolean;
   onSuggestLinks?: (query: string) => { items: Suggestion[]; requiresExplicit: boolean; highlight: number };
@@ -5676,15 +5800,7 @@ function OutlineView(props: OutlineViewProps) {
 
     const dropZone = dropState?.id === targetId ? dropState.zone : dropZoneForEvent(e);
 
-    let next = removeNode(props.nodes, sourceId);
-    if (dropZone === "before") {
-      next = insertSiblingBefore(next, targetId, sourceNode);
-    } else if (dropZone === "after") {
-      next = insertSiblingAfter(next, targetId, sourceNode);
-    } else {
-      next = addChild(next, targetId, sourceNode);
-    }
-    props.onUpdateNodes(next);
+    props.onUpdateNodes(sourceId, targetId, dropZone);
     draggedIdRef.current = null;
     draggedNodeRef.current = null;
     setDropState(null);
@@ -6336,7 +6452,7 @@ function MindMap({
           transform: `translate3d(${viewport.x}px, ${viewport.y}px, 0) scale(${viewport.scale})`,
         }}
       >
-        <svg
+        {useMemo(() => (<svg
           className="mindmap"
           width={layout.width}
           height={layout.height}
@@ -6474,7 +6590,8 @@ function MindMap({
               </div>
             </foreignObject>
           ))}
-        </svg>
+        </svg>), [layout, title, showRelations, visibleRelations, renderedItems, renderedActiveNodeId,
+          editingNodeId, editingDraft, onSelect, onInsertChild, onAiAction, isAiBusy, rootTargetId, onText, onTitle])}
       </div>
       {contextMenu && contextItem && (
         <MindMapContextMenu
@@ -6674,17 +6791,26 @@ function createMindMapLayout(nodes: OutlineNode[]) {
   let cursor = 0;
   let maxDepth = 0;
 
-  const visit = (node: OutlineNode, depth: number, parentId: string | null): number => {
+  const centers = new Map<string, number>();
+  const stack: Array<{ node: OutlineNode; depth: number; parentId: string | null; finish: boolean }> =
+    nodes.map((node) => ({ node, depth: 0, parentId: null, finish: false })).reverse();
+  while (stack.length) {
+    const frame = stack.pop()!;
+    const { node, depth, parentId } = frame;
+    const children = node.collapsed ? [] : node.children;
+    if (!frame.finish && children.length) {
+      stack.push({ ...frame, finish: true });
+      for (let i = children.length - 1; i >= 0; i--) stack.push({ node: children[i], depth: depth + 1, parentId: node.id, finish: false });
+      continue;
+    }
     maxDepth = Math.max(maxDepth, depth);
     const metrics = mindMapMetrics(node, depth);
-    const children = node.collapsed ? [] : node.children;
-    let y: number;
-    if (!children.length) {
-      y = pad + cursor;
-      cursor += metrics.height + yGap;
-    } else {
-      const childYs = children.map((child) => visit(child, depth + 1, node.id));
-      y = (Math.min(...childYs) + Math.max(...childYs)) / 2 - metrics.height / 2;
+    let y = pad + cursor;
+    if (!children.length) cursor += metrics.height + yGap;
+    else {
+      let minimum = Infinity, maximum = -Infinity;
+      for (const child of children) { const center = centers.get(child.id)!; minimum = Math.min(minimum, center); maximum = Math.max(maximum, center); }
+      y = (minimum + maximum) / 2 - metrics.height / 2;
     }
     items.push({
       node,
@@ -6696,10 +6822,8 @@ function createMindMapLayout(nodes: OutlineNode[]) {
       width: metrics.width,
       height: metrics.height,
     });
-    return y + metrics.height / 2;
-  };
-
-  nodes.forEach((node) => visit(node, 0, null));
+    centers.set(node.id, y + metrics.height / 2);
+  }
   const itemMap = new Map(items.map((item) => [item.node.id, item]));
   const maxRight = items.reduce((right, item) => Math.max(right, item.x + item.width), 0);
   const maxBottom = items.reduce((bottom, item) => Math.max(bottom, item.y + item.height), 0);

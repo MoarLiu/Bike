@@ -57,21 +57,23 @@ test("source revisions order windows even when their counters collide or restart
 });
 
 test("accepting an external baseline rechecks the file and saved content before resuming", async () => {
-  const { service, files } = memoryService();
+  const { service, files, savedSources } = memoryService();
   await service.setAuto(true);
   await service.enqueue({ workspace: { id: "local" }, sourceRevision: 1, wait: true });
   files.set("/icloud/bike-workspace.json", JSON.stringify({ id: "external" }));
   await service.enqueue({ workspace: { id: "edit" }, sourceRevision: 2, wait: true });
   const inspected = await service.inspect();
-  const wrong = await service.acceptBaseline(inspected.fileHash, { sourceRevision: 3, workspace: { id: "wrong" } });
+  savedSources.set("window", { sourceRevision: 3, workspace: { id: "external" } });
+  const wrong = await service.acceptBaseline(inspected.fileHash, { ownerId: "window", ticket: 3, sourceRevision: 3, workspace: { id: "wrong" } });
   assert.equal(wrong.code, "stale-source");
   assert.equal(service.status().paused, "external-change");
-  const accepted = await service.acceptBaseline(inspected.fileHash, { sourceRevision: 3, workspace: { id: "external" } });
+  const accepted = await service.acceptBaseline(inspected.fileHash, { ownerId: "window", ticket: 3, sourceRevision: 3, workspace: { id: "external" } });
   assert.equal(accepted.ok, true);
   assert.equal(service.status().paused, null);
   assert.equal((await service.enqueue({ workspace: { id: "next edit" }, sourceRevision: 4, wait: true })).ok, true);
   assert.match(files.get("/icloud/bike-workspace.json"), /next edit/);
-  const changed = await service.acceptBaseline(inspected.fileHash, { sourceRevision: 5, workspace: { id: "external" } });
+  savedSources.set("window", { sourceRevision: 5, workspace: { id: "external" } });
+  const changed = await service.acceptBaseline(inspected.fileHash, { ownerId: "window", ticket: 5, sourceRevision: 5, workspace: { id: "external" } });
   assert.equal(changed.code, "external-change");
 });
 
@@ -128,6 +130,7 @@ function memoryService() {
   let settings = "";
   let currentNow = 0;
   const timers = [];
+  const savedSources = new Map();
   const service = createBackupService({
     fs: {
       mkdir: async () => {},
@@ -153,6 +156,10 @@ function memoryService() {
     readSettings: async () => settings,
     writeSettings: async (value) => { settings = value; },
     migrate: async (workspace) => workspace,
+    verifySavedSource: async ({ ownerId, sourceRevision, workspace }) => {
+      const saved = savedSources.get(ownerId);
+      return saved?.sourceRevision === sourceRevision && JSON.stringify(saved.workspace) === JSON.stringify(workspace);
+    },
     setTimer: (callback, delay) => {
       const timer = { callback, delay };
       timers.push(timer);
@@ -163,8 +170,25 @@ function memoryService() {
       if (index >= 0) timers.splice(index, 1);
     },
   });
-  return { service, files, timers, setNow: (value) => { currentNow = value; } };
+  return { service, files, timers, savedSources, setNow: (value) => { currentNow = value; } };
 }
+
+test("forged revisions and old-window baselines cannot cancel or raise the normal backup floor", async () => {
+  const { service, files, savedSources } = memoryService();
+  await service.setAuto(true);
+  await service.enqueue({ workspace: { id: "local" }, sourceRevision: 10, wait: true });
+  const inspected = await service.inspect();
+  savedSources.set("current", { workspace: { id: "local" }, sourceRevision: 10 });
+  for (const input of [
+    { ownerId: "old", sourceRevision: 10 },
+    { ownerId: "current", sourceRevision: Number.MAX_SAFE_INTEGER },
+  ]) {
+    assert.equal((await service.acceptBaseline(inspected.fileHash, { ...input, ticket: 999, workspace: { id: "local" } })).code, "stale-source");
+  }
+  assert.equal(service.status().lastTicket, 1);
+  assert.equal((await service.enqueue({ workspace: { id: "next" }, sourceRevision: 11, wait: true })).ok, true);
+  assert.match(files.get("/icloud/bike-workspace.json"), /next/);
+});
 
 test("external file changes pause automatic backup instead of overwriting", async () => {
   const { service, files } = memoryService();

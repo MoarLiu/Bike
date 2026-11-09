@@ -11,14 +11,21 @@ import {
 } from "./markdown";
 import { finalizeMarkdownExport, readBikeMetadata, restoreMarkdownIdentity, readableRelations } from "./knowledge";
 import pdfFontUrl from "./assets/NotoSansSC-ChineseSimplified.ttf?url";
+import { assertDocumentBudget, assertTextBudget, assertWorkspaceBudget, MAX_DOCUMENT_NODES, MAX_DESKTOP_DEPTH } from "../shared/bike-limits.mjs";
 
+const xmlText = (value: string) => Array.from(value).map((character) => {
+  const code = character.codePointAt(0)!;
+  return code === 9 || code === 10 || code === 13 || (code >= 0x20 && code <= 0xd7ff) ||
+    (code >= 0xe000 && code <= 0xfffd) || (code >= 0x10000 && code <= 0x10ffff) ? character : "�";
+}).join("");
 const escapeXml = (value: string) =>
-  value
+  xmlText(value)
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&apos;");
+const escapeXmlAttribute = (value: string) => escapeXml(value).replace(/\n/g, "&#10;").replace(/\r/g, "&#13;").replace(/\t/g, "&#9;");
 
 const documentTitle = (document: OutlineDocument) =>
   document.title || DEFAULT_DOCUMENT_TITLE;
@@ -59,13 +66,13 @@ const colorToRgb = (color: string, rgb: RgbFactory) => {
 };
 
 const sanitizeFilenameBase = (value: string) => {
-  const sanitized = value
+  const sanitized = Array.from(value
     .trim()
     .replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_")
     .replace(/\s+/g, " ")
     .replace(/^\.+/, "")
-    .replace(/[.\s]+$/g, "")
-    .slice(0, 120);
+    .replace(/[.\s]+$/g, ""))
+    .slice(0, 120).join("");
 
   if (!sanitized) return DEFAULT_DOCUMENT_TITLE;
   if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i.test(sanitized)) {
@@ -80,12 +87,12 @@ const exportFilename = (title: string, extension: string) =>
 const opmlOptionalAttrs = (attrs: Record<string, string | number | boolean | undefined>) =>
   Object.entries(attrs)
     .filter(([, value]) => value !== undefined && value !== "" && value !== false)
-    .map(([key, value]) => ` ${key}="${escapeXml(String(value))}"`)
+    .map(([key, value]) => ` ${key}="${escapeXmlAttribute(String(value))}"`)
     .join("");
 
 const opmlNode = (node: OutlineNode, depth = 2): string => {
   const pad = "  ".repeat(depth);
-  const attrs = `text="${escapeXml(nodeText(node))}" _note="${escapeXml(
+  const attrs = `text="${escapeXmlAttribute(node.text)}" _note="${escapeXmlAttribute(
     nodeNote(node),
   )}" _checked="${node.checked ? "true" : "false"}"${opmlOptionalAttrs({
     _isTodo: node.isTodo,
@@ -116,9 +123,9 @@ const opmlNode = (node: OutlineNode, depth = 2): string => {
 const freemindNode = (node: OutlineNode, depth = 1): string => {
   const pad = "  ".repeat(depth);
   const children = nodeChildren(node);
-  if (!children.length) return `${pad}<node TEXT="${escapeXml(nodeText(node))}"/>`;
+  if (!children.length) return `${pad}<node TEXT="${escapeXmlAttribute(node.text)}"/>`;
   return [
-    `${pad}<node TEXT="${escapeXml(nodeText(node))}">`,
+    `${pad}<node TEXT="${escapeXmlAttribute(node.text)}">`,
     ...children.map((child) => freemindNode(child, depth + 1)),
     `${pad}</node>`,
   ].join("\n");
@@ -131,7 +138,10 @@ const htmlNode = (node: OutlineNode): string => {
     : "";
   const checked = node.checked ? " data-checked=\"true\"" : "";
   const note = nodeNote(node) ? `<p>${escapeXml(nodeNote(node))}</p>` : "";
-  return `<li${checked}><span>${escapeXml(nodeText(node))}</span>${note}${childHtml}</li>`;
+  const code = typeof node.codeBlock === "string" ? `<pre><code>${escapeXml(node.codeBlock)}</code></pre>` : "";
+  const table = node.table?.length ? `<table>${node.table.map((row) => `<tr>${row.map((cell) => `<td>${escapeXml(cell)}</td>`).join("")}</tr>`).join("")}</table>` : "";
+  const image = node.imageName ? `<p>图片引用：${escapeXml(node.imageName)}</p>` : "";
+  return `<li${checked}><span>${escapeXml(nodeText(node))}</span>${note}${code}${table}${image}${childHtml}</li>`;
 };
 
 const printableNode = (node: OutlineNode): string => {
@@ -183,6 +193,7 @@ export const exportDocument = (
   format: "json" | "markdown" | "opml" | "freemind" | "html",
   options?: { metadata?: boolean },
 ) => {
+  assertDocumentBudget(document);
   const title = documentTitle(document);
 
   if (format === "json") {
@@ -202,6 +213,7 @@ export const exportDocument = (
       content: exported.content,
       lossy: exported.lossy,
       error: exported.error,
+      lossReasons: exported.lossReasons,
     };
   }
 
@@ -209,6 +221,8 @@ export const exportDocument = (
     return {
       filename: exportFilename(title, "opml"),
       mime: "text/x-opml",
+      lossy: true,
+      lossReasons: ["OPML 不包含稳定 id、引用身份与主题关系；XML 非法字符会替换为 �"],
       content: [
         `<?xml version="1.0" encoding="UTF-8"?>`,
         `<opml version="2.0">`,
@@ -225,10 +239,12 @@ export const exportDocument = (
     return {
       filename: exportFilename(title, "mm"),
       mime: "application/xml",
+      lossy: true,
+      lossReasons: ["FreeMind 仅保留主题文字和层级，备注、代码、表格、格式、引用身份与关系会丢失"],
       content: [
         `<?xml version="1.0" encoding="UTF-8"?>`,
         `<map version="1.0.1">`,
-        `  <node TEXT="${escapeXml(title)}">`,
+        `  <node TEXT="${escapeXmlAttribute(title)}">`,
         ...document.nodes.map((node) => freemindNode(node, 2)),
         `  </node>`,
         `</map>`,
@@ -239,6 +255,8 @@ export const exportDocument = (
   return {
     filename: exportFilename(title, "html"),
     mime: "text/html",
+    lossy: true,
+    lossReasons: ["HTML 用于阅读，不包含可回导的稳定 id 和引用身份；图片保留为引用"],
     content: [
       `<!doctype html>`,
       `<html lang="zh-CN">`,
@@ -249,11 +267,14 @@ export const exportDocument = (
   };
 };
 
-export const exportWorkspace = (workspace: Workspace) => ({
+export const exportWorkspace = (workspace: Workspace) => {
+  assertWorkspaceBudget(workspace);
+  return ({
   filename: "bike-workspace.json",
   mime: "application/json",
   content: JSON.stringify(workspace, null, 2),
-});
+  });
+};
 
 export const downloadText = (filename: string, content: string, mime: string) => {
   const blob = new Blob([content], { type: mime });
@@ -315,6 +336,7 @@ const nodePdfFontSize = (node: OutlineNode, depth: number) => {
 };
 
 export const exportDocumentAsPdf = async (outlineDocument: OutlineDocument) => {
+  assertDocumentBudget(outlineDocument);
   const [{ PDFDocument, rgb }, fontkitModule] = await Promise.all([
     import("pdf-lib"),
     import("@pdf-lib/fontkit"),
@@ -465,7 +487,7 @@ export const exportDocumentAsPdf = async (outlineDocument: OutlineDocument) => {
 };
 
 const parseOutlineElement = (element: Element): OutlineNode => ({
-  ...createNode(element.getAttribute("text") || element.getAttribute("title") || "未命名主题"),
+  ...createNode(element.getAttribute("text") ?? element.getAttribute("title") ?? "未命名主题"),
   note: element.getAttribute("_note") || "",
   checked: element.getAttribute("_checked") === "true",
   collapsed: element.getAttribute("_collapsed") === "true",
@@ -500,6 +522,7 @@ export const importDocument = (
   filename: string,
   options?: { dropMetadata?: boolean },
 ): OutlineDocument | Workspace => {
+  assertTextBudget(content);
   const now = new Date().toISOString();
   const lowerFilename = filename.toLowerCase();
 
@@ -531,6 +554,13 @@ export const importDocument = (
   const xml = parser.parseFromString(content, "application/xml");
   const error = xml.querySelector("parsererror");
   if (error) throw new Error("无法解析导入文件");
+  let elements = 0;
+  const stack: Array<{ element: Element; depth: number }> = [{ element: xml.documentElement, depth: 0 }];
+  while (stack.length) {
+    const frame = stack.pop()!;
+    if (++elements > MAX_DOCUMENT_NODES + 10 || frame.depth > MAX_DESKTOP_DEPTH + 3) throw new Error("XML 主题数量或层级超过处理预算，原文件与工作区已保留");
+    for (const element of Array.from(frame.element.children)) stack.push({ element, depth: frame.depth + 1 });
+  }
 
   if (lowerFilename.endsWith(".mm")) {
     const root = xml.getElementsByTagName("node")[0];

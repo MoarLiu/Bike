@@ -2,6 +2,8 @@ import {
   SyncConflictError,
   SyncNotFoundError,
   SyncValidationError,
+  SyncPayloadTooLargeError,
+  SyncBusyError,
 } from "./sync-store.mjs";
 
 const securityHeaders = {
@@ -38,14 +40,20 @@ export const readJsonRequestBody = (request, maxBytes) =>
     const chunks = [];
     let totalBytes = 0;
     let settled = false;
+    const tooLarge = () => {
+      settled = true;
+      chunks.length = 0;
+      request.pause?.();
+      reject(new SyncPayloadTooLargeError(maxBytes));
+    };
+    const declared = Number(request.headers?.["content-length"]);
+    if (Number.isFinite(declared) && declared > maxBytes) { tooLarge(); return; }
     request.on("data", (chunk) => {
       if (settled) return;
       const buffer = typeof chunk === "string" ? Buffer.from(chunk, "utf8") : chunk;
       totalBytes += buffer.length;
       if (totalBytes > maxBytes) {
-        settled = true;
-        request.destroy();
-        reject(new SyncValidationError("请求体过大"));
+        tooLarge();
         return;
       }
       chunks.push(buffer);
@@ -72,6 +80,22 @@ export const readJsonRequestBody = (request, maxBytes) =>
   });
 
 export const handleSyncError = (response, error, headers = {}) => {
+  if (error instanceof SyncPayloadTooLargeError) {
+    const socket = response.req?.socket;
+    response.once?.("finish", () => {
+      if (!socket) return;
+      socket.end();
+      const deadline = setTimeout(() => socket.destroy(), 1000);
+      deadline.unref?.();
+      socket.once("close", () => clearTimeout(deadline));
+    });
+    sendJson(response, 413, { error: "payload_too_large", message: error.message, maxBytes: error.maxBytes }, { ...headers, Connection: "close" });
+    return true;
+  }
+  if (error instanceof SyncBusyError) {
+    sendJson(response, 503, { error: "database_busy", message: error.message, retryable: true }, { ...headers, "Retry-After": "1" });
+    return true;
+  }
   if (error instanceof SyncConflictError) {
     sendJson(response, 409, {
       error: "revision_conflict",
@@ -149,6 +173,7 @@ export const handleSyncApi = async (
         sendJson(response, 200, syncStore.getDocumentOperations({
           id,
           after: url.searchParams.get("after"),
+          limit: url.searchParams.get("limit") ?? undefined,
         }), headers);
         return;
       }

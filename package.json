@@ -1,6 +1,6 @@
 {
   "name": "bike",
-  "version": "1.6.0",
+  "version": "1.6.1",
   "private": true,
   "description": "Bike is a local-first outline note and mind map app with optional iCloud Drive backup.",
   "main": "electron/main.cjs",
@@ -10,6 +10,10 @@
     "build": "tsc && vite build",
     "preview": "vite preview --host 127.0.0.1",
     "test": "node --test tests/*.test.mjs server/*.test.mjs mcp/*.test.mjs electron/*.test.mjs",
+    "check": "npm test && npm run check:contracts && npm run build && npm run mcp:smoke && git diff --check",
+    "check:contracts": "node scripts/check-shared-contracts.mjs",
+    "test:runtime": "node scripts/verify-runtime.mjs",
+    "test:electron-runtime": "node scripts/verify-runtime.mjs --electron",
     "auth:hash": "node scripts/hash-password.mjs",
     "setup:sync": "bash scripts/setup-sync-server.sh",
     "mcp:bike": "node mcp/bike-server.mjs",
@@ -42,6 +46,7 @@
     "concurrently": "^10.0.7",
     "electron": "^42.11.18",
     "electron-builder": "^26.18.0",
+    "playwright": "1.65.0",
     "typescript": "^5.5.4",
     "vite": "^8.3.6",
     "wait-on": "^8.0.0"
@@ -56,6 +61,7 @@
     "files": [
       "dist/**/*",
       "electron/**/*",
+      "!electron/**/*.test.mjs",
       "mcp/bike-core.mjs",
       "mcp/bike-server.mjs",
       "shared/*.mjs",

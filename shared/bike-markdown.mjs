@@ -2,10 +2,50 @@
 const uid = () => createId("node");
 const createNode = (text = "") => ({ id: uid(), text, note: "", checked: false, collapsed: false, color: "plain", children: [] });
 import { codeMask, createId, scanLinks } from "./bike-knowledge.mjs";
+import { assertTextBudget, assertTreeBudget, MAX_DOCUMENT_NODES } from "./bike-limits.mjs";
 export const DEFAULT_DOCUMENT_TITLE = "未命名文档";
 export const DEFAULT_NODE_TEXT = "未命名主题";
 const nodeChildren = (node) => Array.isArray(node.children) ? node.children : [];
 const normalizeSource = (content) => content.replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n");
+export const markdownSourceMap = (content) => {
+    let text = "";
+    const offsets = [];
+    for (let i = content.charCodeAt(0) === 0xfeff ? 1 : 0; i < content.length; i++) {
+        offsets.push(i);
+        if (content[i] === "\r") { text += "\n"; if (content[i + 1] === "\n") i++; }
+        else text += content[i];
+    }
+    offsets.push(content.length);
+    return { text, offsets };
+};
+export const markdownPlainText = (value) => value.replace(/\\([\\`*_[\]{}()#+\-.!>|])/gu, "$1");
+export const markdownTableCells = (row) => {
+    const cells = [];
+    let start = 0, end = row.length;
+    while (start < end && /\s/u.test(row[start])) start++;
+    while (end > start && /\s/u.test(row[end - 1])) end--;
+    if (row[start] === "|") start++;
+    if (row[end - 1] === "|") end--;
+    let text = "", offsets = [];
+    const finish = (at) => {
+        let left = 0, right = text.length;
+        while (left < right && /\s/u.test(text[left])) left++;
+        while (right > left && /\s/u.test(text[right - 1])) right--;
+        const positions = offsets.slice(left, right);
+        positions.push(right < offsets.length ? offsets[right] : at);
+        cells.push({ text: text.slice(left, right), offsets: positions });
+        text = ""; offsets = [];
+    };
+    for (let i = start; i < end; i++) {
+        if (row[i] === "\\" && (row[i + 1] === "|" || row[i + 1] === "\\")) {
+            offsets.push(i); text += row[++i]; continue;
+        }
+        if (row[i] === "|") { finish(i); continue; }
+        offsets.push(i); text += row[i];
+    }
+    finish(end);
+    return cells;
+};
 const normalizeMatchText = (value) => unescapeMarkdownInline(value).replace(/\s+/g, " ").trim().toLowerCase();
 const pathKey = (path) => path.join(".");
 const appendNote = (node, value, separator = "\n") => {
@@ -101,12 +141,18 @@ const markdownCodeForExport = (value, language = "", indent = "") => {
         `${indent}${fence}`,
     ].join("\n");
 };
-const markdownTableCellForExport = (value) => markdownInlineForExport(value).replace(/\|/g, "\\|");
+const markdownTableCellForExport = (value) => {
+    if (value === "") return "";
+    let rendered = markdownInlineForExport(value);
+    const links = scanLinks(rendered);
+    for (let i = links.length - 1; i >= 0; i--) rendered = rendered.slice(0, links[i].start) + links[i].raw.replace(/\\/gu, "\\\\") + rendered.slice(links[i].end);
+    return rendered.replace(/\|/g, "\\|");
+};
 const tableToMarkdown = (table, indent = "") => {
     const rows = table.filter((row) => row.length);
     if (!rows.length)
         return [];
-    const columnCount = Math.max(...rows.map((row) => row.length));
+    const columnCount = rows.reduce((maximum, row) => Math.max(maximum, row.length), 0);
     const paddedRows = rows.map((row) => Array.from({ length: columnCount }, (_, index) => row[index] ?? ""));
     const cells = paddedRows.map((row) => `${indent}| ${row.map(markdownTableCellForExport).join(" | ")} |`);
     const separator = `${indent}| ${Array.from({ length: columnCount }, () => "---").join(" | ")} |`;
@@ -201,42 +247,38 @@ const listItemMatch = (line) => {
 };
 const quoteLineMatch = (line) => line.match(/^([ \t]*)>\s?(.*)$/);
 const imageBlockMatch = (line) => line.match(/^([ \t]*)!\[([^\]]*)\]\(([^)]+)\)\s*$/);
-const tableDelimiterLine = (line) => /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(line);
+const tableDelimiterLine = (line) => {
+    const cells = splitTableRow(line);
+    return cells.length > 0 && cells.every((cell) => /^:?-{3,}:?$/.test(cell));
+};
 const isTableStart = (lines, index) => lines[index]?.includes("|") && tableDelimiterLine(lines[index + 1] ?? "");
 const splitEscapedPipe = (value) => {
     const cells = [];
     let cell = "";
-    let escaping = false;
-    Array.from(value).forEach((char) => {
-        if (escaping) {
-            cell += char;
-            escaping = false;
-            return;
-        }
-        if (char === "\\") {
-            escaping = true;
-            return;
-        }
+    for (const char of value) {
         if (char === "|") {
+            let slashes = 0;
+            for (let i = cell.length - 1; i >= 0 && cell[i] === "\\"; i--) slashes++;
+            if (slashes % 2) { cell = cell.slice(0, -1) + "|"; continue; }
             cells.push(cell);
             cell = "";
-            return;
+            continue;
         }
         cell += char;
-    });
-    if (escaping)
-        cell += "\\";
+    }
     cells.push(cell);
     return cells;
 };
 const splitTableRow = (line) => {
-    const trimmed = line.trim().replace(/^\|/, "").replace(/\|$/, "");
-    return splitEscapedPipe(trimmed).map((cell) => unescapeMarkdownInline(cell.trim()));
+    return markdownTableCells(line).map((cell) => unescapeMarkdownInline(cell.text));
 };
 const parseTable = (lines, startIndex) => {
     const tableLines = [lines[startIndex], lines[startIndex + 1]];
     let index = startIndex + 2;
-    while (index < lines.length && lines[index].includes("|") && lines[index].trim()) {
+    const framed = lines[startIndex].trimStart().startsWith("|");
+    while (index < lines.length && lines[index].includes("|") && lines[index].trim() &&
+        (!framed || lines[index].trimStart().startsWith("|")) &&
+        !headingMatch(lines[index]) && !listItemMatch(lines[index]) && !quoteLineMatch(lines[index])) {
         tableLines.push(lines[index]);
         index += 1;
     }
@@ -257,6 +299,7 @@ const nextSpecialBlock = (lines, index) => {
         /^\s{0,3}(```|~~~)/.test(line));
 };
 const parseMarkdown = (content, previousDocument) => {
+    assertTextBudget(content);
     const lines = normalizeSource(content).split("\n");
     const syntaxMask = codeMask(normalizeSource(content));
     const lineOffsets = [];
@@ -273,11 +316,14 @@ const parseMarkdown = (content, previousDocument) => {
     const headingStack = [];
     const listStack = [];
     const createParsedNode = makeNodeFactory();
+    let createdNodes = 0;
     let title = DEFAULT_DOCUMENT_TITLE;
     let hasTitle = false;
+    let titleRange = null;
     let lastNode = null;
     const currentParent = () => listStack[listStack.length - 1] ?? headingStack[headingStack.length - 1];
     const addNode = (text, overrides = {}) => {
+        if (++createdNodes > MAX_DOCUMENT_NODES) throw new Error("Markdown 主题数量超过处理预算，原数据已保留");
         const parent = currentParent();
         const siblings = parent ? parent.node.children : roots;
         const path = parent ? [...parent.path, siblings.length] : [siblings.length];
@@ -328,6 +374,8 @@ const parseMarkdown = (content, previousDocument) => {
                 if (!hasTitle && heading.text) {
                     title = unescapeMarkdownInline(heading.rawText, { preserveWiki: false, preserveTags: false });
                     hasTitle = true;
+                    const at = line.indexOf(heading.rawText);
+                    titleRange = { start: lineOffsets[index] + at, end: lineOffsets[index] + at + heading.rawText.length };
                     index += 1;
                     continue;
                 }
@@ -344,6 +392,7 @@ const parseMarkdown = (content, previousDocument) => {
             const node = createParsedNode(heading.text, path, {
                 headingLevel: Math.min(Math.max(markdownLevel - 1, 1), 3),
             });
+            if (++createdNodes > MAX_DOCUMENT_NODES) throw new Error("Markdown 主题数量超过处理预算，原数据已保留");
             siblings.push(node);
             captureField(node, "text", index, index);
             headingStack.push({ node, path, markdownLevel });
@@ -372,6 +421,7 @@ const parseMarkdown = (content, previousDocument) => {
                 checked: listItem.isTodo ? listItem.checked : false,
                 isTodo: listItem.isTodo,
             });
+            if (++createdNodes > MAX_DOCUMENT_NODES) throw new Error("Markdown 主题数量超过处理预算，原数据已保留");
             siblings.push(node);
             captureField(node, "text", startLine, index);
             listStack.push({ node, path, indent: listItem.indent });
@@ -456,8 +506,10 @@ const parseMarkdown = (content, previousDocument) => {
         }
     }
     const nodes = roots.length ? roots : [createParsedNode(DEFAULT_NODE_TEXT, [0])];
+    assertTreeBudget(nodes);
     reuseMarkdownNodeIds(previousDocument, nodes, content);
     const source = normalizeSource(content);
+    const originalOffsets = markdownSourceMap(content).offsets;
     const links = scanLinks(source);
     const linkOrigins = new Map();
     let linkCursor = 0;
@@ -474,7 +526,7 @@ const parseMarkdown = (content, previousDocument) => {
             if (match < 0)
                 continue;
             used.add(match);
-            linkOrigins.set(link.start, { nodeId: field.node.id, field: field.field, start: fieldLinks[match].start, end: fieldLinks[match].end });
+            linkOrigins.set(originalOffsets[link.start], { nodeId: field.node.id, field: field.field, start: fieldLinks[match].start, end: fieldLinks[match].end });
         }
     }
     return {
@@ -482,7 +534,30 @@ const parseMarkdown = (content, previousDocument) => {
         hasTitle,
         nodes,
         linkOrigins,
+        fields,
+        titleRange,
     };
+};
+
+// Preserve list markers, heading levels, notes, fences and unrelated whitespace
+// while updating the source range that owns a renamed structured topic.
+export const rewriteMarkdownLabel = (document, { nodeId = null, nextLabel }) => {
+    if (typeof document.markdownSource !== "string") return document.markdownSource;
+    const source = normalizeSource(document.markdownSource);
+    const parsed = parseMarkdown(source, document);
+    let range = parsed.titleRange;
+    let prefix = "", suffix = "";
+    if (nodeId) {
+        const field = parsed.fields.find((item) => item.field === "text" && item.node.id === nodeId);
+        if (!field) return undefined;
+        if (field.node.text === nextLabel) return source;
+        range = field;
+        const raw = source.slice(range.start, range.end);
+        prefix = raw.match(/^[ \t]*(?:#{1,6}\s+|(?:[-*+]|\d+[.)])\s+(?:\[(?: |x|X)\]\s*)?)/)?.[0] ?? raw.match(/^[ \t]*/)[0];
+        if (headingMatch(raw)) suffix = raw.match(/\s+#+\s*$/)?.[0] ?? "";
+    } else if (parsed.title === nextLabel) return source;
+    if (!range) return undefined;
+    return source.slice(0, range.start) + prefix + markdownInlineForExport(nextLabel) + suffix + source.slice(range.end);
 };
 // Equal counts or paths cannot distinguish edits from deleted/replaced nodes.
 // Preserve unique anchors, then match only unambiguous, related one-to-one gaps.
@@ -498,7 +573,9 @@ const reuseMarkdownNodeIds = (previous, parsed, content) => {
         const result = new Map();
         for (const node of nodes) {
             const key = normalizeMatchText(node.text);
-            result.set(key, [...(result.get(key) ?? []), node]);
+            const candidates = result.get(key) ?? [];
+            candidates.push(node);
+            result.set(key, candidates);
         }
         return result;
     };
@@ -540,7 +617,8 @@ const reuseMarkdownNodeIds = (previous, parsed, content) => {
         return prefix + suffix >= Math.max(1, Math.ceil(Math.min(a.length, b.length) / 2));
     };
     const visit = (before, after) => {
-        const anchors = after.map((node, index) => ({ index, oldIndex: before.indexOf(matches.get(node)) })).filter((item) => item.oldIndex >= 0);
+        const oldIndices = new Map(before.map((node, index) => [node, index]));
+        const anchors = after.map((node, index) => ({ index, oldIndex: oldIndices.get(matches.get(node)) ?? -1 })).filter((item) => item.oldIndex >= 0);
         const ordered = anchors.every((anchor, index) => !index || anchor.oldIndex > anchors[index - 1].oldIndex);
         const boundaries = [{ index: -1, oldIndex: -1 }, ...anchors, { index: after.length, oldIndex: before.length }];
         if (ordered)

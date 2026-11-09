@@ -3,6 +3,7 @@ import test from "node:test";
 import { loadAppCallback, loadTypescript } from "./helpers/typescript.mjs";
 
 const editHistory = loadTypescript("src/editHistory.ts");
+const signatures = loadTypescript("src/documentSignature.ts");
 const tree = loadTypescript("src/tree.ts");
 const knowledge = loadTypescript("src/knowledge.ts");
 const { migrateWorkspace } = loadTypescript("src/migrations.ts");
@@ -22,13 +23,18 @@ function fixture() {
     ...tree,
     ...knowledge,
     ...editHistory,
+    ...signatures,
+    assertTreeBudget: () => {},
     workspaceRef: { current: workspace },
     backupLocalPauseRef: { current: null },
     backupScheduleRef: { current: knowledge.createBackupSchedule() },
     backupPayloadsRef: { current: new Map() },
+    backupErrorNoticeRef: { current: null },
+    backupTicketRef: { current: 0 },
     historyRef: { current: editHistory.emptyEditHistory() },
     activeNodeIdRef: { current: "one" },
     ready: true,
+    modalOpenRef: { current: false },
     syncBusyRef: { current: false },
     historyBusyRef: { current: false },
     recoveryBusyRef: { current: false },
@@ -47,6 +53,7 @@ function fixture() {
     },
     setActiveNodeId: (id) => { bindings.activeNodeIdRef.current = id; },
     setFocusNodeId: () => {},
+    setNavigationTarget: () => {},
     setPendingCaretFocus: () => {},
     setNodeClipboard: () => {},
     flushFocusedStructuredInput: () => bindings.workspaceRef.current,
@@ -87,12 +94,33 @@ test("structural editor commands enter the same undo stack without leaking text 
 
 test("dragged tree updates and format changes are individually reversible", () => {
   const f = fixture();
-  f.callback("setActiveNodes")([...f.workspace.documents[0].nodes].reverse());
+  f.callback("setActiveNodes")("two", "one", "before");
   f.callback("handleNodePatch")("two", { bold: true, color: "green" });
   f.callback("performHistoryStep")("undo");
   assert.equal(f.bindings.workspaceRef.current.documents[0].nodes[0].bold, false);
   f.callback("performHistoryStep")("undo");
   assert.deepEqual(f.bindings.workspaceRef.current.documents[0].nodes.map((node) => node.id), ["one", "two"]);
+});
+
+test("navigation reveals a collapsed ancestor without persisting it or invalidating undo", () => {
+  const f = fixture();
+  f.bindings.workspaceRef.current.documents[0].nodes = [{
+    ...tree.createNode("Parent"), id: "one", collapsed: true,
+    children: [{ ...tree.createNode("Child"), id: "child" }],
+  }, f.workspace.documents[0].nodes[1]];
+  f.callback("handleNodeText")("two", "Edited");
+  const edited = f.bindings.workspaceRef.current;
+  Object.assign(f.bindings, {
+    window: { setTimeout: () => 0 },
+    setLocatedNodeId: () => {}, rememberNavigation: () => {},
+    setMode: () => {},
+  });
+  f.callback("openKnowledgeTarget")("doc", "child");
+  assert.equal(f.bindings.workspaceRef.current.documents, edited.documents);
+  assert.equal(f.bindings.workspaceRef.current.documents[0].nodes[0].collapsed, true);
+  f.callback("performHistoryStep")("undo");
+  assert.equal(f.bindings.workspaceRef.current.documents[0].nodes[1].text, "Two");
+  assert.ok(!f.notices.some((notice) => notice.includes("已清空撤销")));
 });
 
 test("version restoration refuses to overwrite edits made while its snapshot is pending", async () => {

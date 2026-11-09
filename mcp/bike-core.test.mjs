@@ -211,8 +211,8 @@ test("falls back to legacy workspace path when renamed Bike path is absent", asy
   assert.equal(config.workspacePath, legacyWorkspacePath);
 });
 
-test("migrateWorkspace skips malformed documents while preserving valid ones", () => {
-  const workspace = migrateWorkspace({
+test("migrateWorkspace refuses partial migration and preserves the original documents", () => {
+  const original = {
     version: 1,
     activeDocumentId: "doc_valid",
     documents: [
@@ -225,11 +225,10 @@ test("migrateWorkspace skips malformed documents while preserving valid ones", (
         nodes: [{ id: "node_valid", text: "Keep me", children: [] }],
       },
     ],
-  });
-
-  assert.equal(workspace.documents.length, 1);
-  assert.equal(workspace.activeDocumentId, "doc_valid");
-  assert.equal(workspace.documents[0].nodes[0].text, "Keep me");
+  };
+  assert.throws(() => migrateWorkspace(original), /第 1 个文档无法读取/);
+  assert.equal(original.documents.length, 2);
+  assert.equal(original.documents[1].nodes[0].text, "Keep me");
 });
 
 test("migrateWorkspace preserves valid trash entries", () => {

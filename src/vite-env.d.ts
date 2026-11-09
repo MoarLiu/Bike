@@ -25,7 +25,7 @@ interface BikeDesktopBridge {
   enqueueBackup?: (payload: unknown) => Promise<{ ok: boolean; code?: string; path?: string; revision?: string; error?: string; ticket?: number }>;
   inspectBackup?: () => Promise<{ ok: boolean; exists?: boolean; path?: string; fileHash?: string | null; baselineHash?: string | null; paused?: string | null; error?: string; code?: string }>;
   replaceBackupWithLocal?: (payload: unknown) => Promise<{ ok: boolean; code?: string; path?: string; revision?: string; error?: string }>;
-  acceptBackupBaseline?: (hash: string, saved?: { workspace: unknown; sourceRevision?: number; semanticHash?: string }) => Promise<Record<string, unknown>>;
+  acceptBackupBaseline?: (hash: string, saved?: { workspace: unknown; sourceRevision?: number; semanticHash?: string; ticket?: number }) => Promise<Record<string, unknown>>;
   onBackupFlush?: (callback: () => void) => () => void;
   finishBackupFlush?: () => void;
   checkForUpdates?: () => Promise<{
@@ -39,6 +39,7 @@ interface BikeDesktopBridge {
     error?: string;
   }>;
   invokeAiProvider?: (payload: {
+    requestId?: string;
     endpoint: "chat_completions" | "responses";
     baseUrl: string;
     apiKey: string;
@@ -48,6 +49,7 @@ interface BikeDesktopBridge {
     data?: unknown;
     error?: string;
   }>;
+  cancelAiRequest?: (requestId: string) => Promise<unknown>;
   invokeSyncRequest?: (payload: {
     serverUrl: string;
     pathname: string;

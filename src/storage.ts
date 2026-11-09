@@ -1,6 +1,8 @@
 import type { Workspace } from "./types";
 import { uuid } from "./id";
 import { migrateWorkspace } from "./migrations";
+import { assertWorkspaceBudget } from "../shared/bike-limits.mjs";
+import { sha256Hex } from "./knowledge";
 
 const DB_NAME = "bike-db";
 const LEGACY_DB_NAME = "local-outline-db";
@@ -29,6 +31,7 @@ export type WorkspaceRecoverySnapshot = {
   savedAt: number;
   baseRevision: number | null;
 };
+export type WorkspaceRecoveryFile = { id: string; content: string };
 
 type StoredMeta = { revision: number; savedAt: number; writer: string | null; saveId: string | null };
 
@@ -113,11 +116,17 @@ const isRevision = (value: unknown): value is number =>
 const asRecord = (value: unknown): Record<string, unknown> =>
   value && typeof value === "object" ? value as Record<string, unknown> : {};
 
-const workspaceSignature = (workspace: Workspace) =>
-  JSON.stringify(migrateWorkspace(workspace), (_key, value: unknown) =>
+const workspaceSignatures = new WeakMap<Workspace, string>();
+const workspaceSignature = (workspace: Workspace) => {
+  const cached = workspaceSignatures.get(workspace);
+  if (cached) return cached;
+  const signature = sha256Hex(JSON.stringify(workspace, (_key, value: unknown) =>
     value && typeof value === "object" && !Array.isArray(value)
       ? Object.fromEntries(Object.entries(value).sort(([left], [right]) => left.localeCompare(right)))
-      : value);
+      : value));
+  workspaceSignatures.set(workspace, signature);
+  return signature;
+};
 
 const sameWorkspace = (left: Workspace, right: Workspace) =>
   workspaceSignature(left) === workspaceSignature(right);
@@ -192,12 +201,31 @@ const readDatabase = async (dbName: string): Promise<DatabaseRead> => {
   }
 };
 
+const recoveryCache = new Map<string, { raw: string; meta: string | null; result: FallbackRead }>();
+const cacheRecovery = (key: string, raw: string, meta: string | null, read: () => FallbackRead): FallbackRead => {
+  const cached = recoveryCache.get(key);
+  if (cached?.raw === raw && cached.meta === meta) return cached.result;
+  let result: FallbackRead;
+  try { result = read(); } catch (error) { result = { status: "error", error: toError(error) }; }
+  recoveryCache.delete(key);
+  recoveryCache.set(key, { raw, meta, result });
+  let retained = 0;
+  for (const entry of recoveryCache.values()) retained += entry.raw.length * 2;
+  while (recoveryCache.size > 16 || retained > 16 * 1024 * 1024) {
+    const oldest = recoveryCache.keys().next().value!;
+    retained -= recoveryCache.get(oldest)!.raw.length * 2;
+    recoveryCache.delete(oldest);
+  }
+  return result;
+};
+
 const readFallbackWorkspace = (workspaceKey: string, metaKey: string): FallbackRead => {
   try {
     const raw = localStorage.getItem(workspaceKey);
     if (!raw) return { status: "empty" };
-    const workspace = migrateWorkspace(JSON.parse(raw));
     const rawMeta = localStorage.getItem(metaKey);
+    return cacheRecovery(workspaceKey, raw, rawMeta, () => {
+    const workspace = migrateWorkspace(JSON.parse(raw));
     let meta: Record<string, unknown> = {};
     try {
       meta = asRecord(JSON.parse(rawMeta ?? "null"));
@@ -213,6 +241,7 @@ const readFallbackWorkspace = (workspaceKey: string, metaKey: string): FallbackR
       metaKey,
       rawMeta,
     };
+    });
   } catch (error) {
     return { status: "error", error: toError(error) };
   }
@@ -225,13 +254,16 @@ const readFallbackSnapshots = (): { snapshots: FallbackSnapshot[]; error?: Error
     // Snapshot contents and metadata share one immutable key. Each page writes
     // a new key before removing its previous one, so a failed write retains it.
     const keys = Array.from({ length: localStorage.length }, (_, index) => localStorage.key(index));
+    const present = new Set(keys);
+    for (const key of recoveryCache.keys()) if (!present.has(key)) recoveryCache.delete(key);
     for (const id of keys) {
       if (!id?.startsWith(FALLBACK_SNAPSHOT_PREFIX)) continue;
       const raw = localStorage.getItem(id);
       if (!raw) continue;
       try {
+        const cached = cacheRecovery(id, raw, null, () => {
         const envelope = asRecord(JSON.parse(raw));
-        snapshots.push({
+        return {
           status: "loaded", id, raw,
           workspace: migrateWorkspace(envelope.workspace),
           savedAt: typeof envelope.savedAt === "string" ? timestamp(envelope.savedAt) : 0,
@@ -240,7 +272,10 @@ const readFallbackSnapshots = (): { snapshots: FallbackSnapshot[]; error?: Error
           pendingSaveIds: Array.isArray(envelope.pendingSaveIds)
             ? envelope.pendingSaveIds.filter((id): id is string => typeof id === "string")
             : undefined,
+        };
         });
+        if (cached.status === "loaded") snapshots.push(cached);
+        else if (cached.status === "error") error ??= cached.error;
       } catch (cause) {
         error ??= toError(cause);
       }
@@ -259,6 +294,26 @@ const readFallbackSnapshots = (): { snapshots: FallbackSnapshot[]; error?: Error
   }
   snapshots.sort((left, right) => right.savedAt - left.savedAt);
   return { snapshots, error };
+};
+
+// Raw download remains available even when migration or IndexedDB cannot read
+// the workspace. This function never adopts or writes any recovery copy.
+export const listWorkspaceRecoveryFiles = (): WorkspaceRecoveryFile[] => {
+  const files: WorkspaceRecoveryFile[] = [];
+  try {
+    const keys = Array.from({ length: localStorage.length }, (_, index) => localStorage.key(index));
+    for (const id of keys) {
+      if (!id || (!id.startsWith(FALLBACK_SNAPSHOT_PREFIX) && ![FALLBACK_KEY, LEGACY_FALLBACK_KEY].includes(id))) continue;
+      const raw = localStorage.getItem(id);
+      if (!raw) continue;
+      let content = raw;
+      if (id.startsWith(FALLBACK_SNAPSHOT_PREFIX)) {
+        try { const envelope = JSON.parse(raw); if (envelope.workspace) content = JSON.stringify(envelope.workspace, null, 2); } catch { /* Preserve the complete original file. */ }
+      }
+      files.push({ id, content });
+    }
+  } catch { /* Existing download entries remain usable. */ }
+  return files;
 };
 
 export const listWorkspaceRecoverySnapshots = (current?: Workspace | null): WorkspaceRecoverySnapshot[] =>
@@ -603,6 +658,8 @@ export const saveWorkspace = (
   workspace: Workspace,
   options: { overwrite?: boolean } = {},
 ): Promise<WorkspaceSaveResult> => {
+  try { assertWorkspaceBudget(workspace); }
+  catch (error) { return Promise.resolve({ ok: false, error: toError(error) }); }
   const epoch = adoptEpoch;
   const sequence = ++saveSequence;
   const saveId = uuid();

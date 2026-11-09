@@ -354,4 +354,12 @@ Electron 本地版复用 Web 前端的同步界面。打包后的 Electron 渲�
 
 ## 后续演进
 
+1.6.1 为 JSON 请求返回结构化 `413 payload_too_large`，响应含 `maxBytes`；客户端应调整文档大小或服务端限制后再重试。`maxBodyBytes` 必须为数值整数，最高 64 MiB，默认 10 MiB。数据库争写超过有界等待后返回 `503 database_busy` 和 `Retry-After: 1`，revision CAS 仍然生效。
+
+`GET /api/documents/:id/operations?after=0&limit=100` 每页最多 500 条、最多约 2 MiB；默认 100 条。读取端必须在 `hasMore` 为 true 时用返回的 `nextAfter` 继续请求，不能把单页视为完整日志。现阶段 tombstone 和 operations 不物理清理，长期部署需要监控数据库磁盘增长。
+
+生产反向代理应绑定后端到 loopback 或用防火墙仅允许受信代理直连；`trustProxyHeaders` 必须为 JSON 布尔值，短代理链会回退到 socket 地址。HTTPS 对外部署应显式设置 `auth.secureCookies: true`；本机 HTTP 调试使用 false。
+
+服务进程默认私有 umask，配置和 SQLite/附属文件为 0600，新建数据目录为 0700。旧 systemd 更新会安装 `UMask=0077` drop-in，保留原来的运行用户。Web/Sync 共用数据库时应使用相同服务账户或由管理员设置专用共享目录 ACL；不要把数据库放进用户主目录根或通用系统目录。无 systemd 的后台启动拒绝 root，请切换服务用户后运行。升级前保留配置、数据库和 WAL 的一致备份。
+
 服务端已经提供文档 operation log 底座。要达到真正多人同文档实时编辑，还需要把各端编辑器里的标题、节点文本、插入、删除、移动等 UI 事件映射为稳定操作，并实现客户端操作应用/回放、冲突变换或 CRDT 合并策略。

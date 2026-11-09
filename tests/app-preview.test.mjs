@@ -15,7 +15,7 @@ function preview(content, onClick) {
   const names = new Set(["MarkdownPreview", "renderInlineMarkdown", "renderMarkdownPreviewList", "buildMarkdownPreviewList", "markdownCellOffset", "splitMarkdownTableRow", "splitEscapedPipe", "isTableSeparator", "isTableStart"]);
   const source = ast.statements.filter((node) => names.has(node.name?.text) || (ts.isVariableStatement(node) && node.declarationList.declarations.some((item) => names.has(item.name.getText(ast))))).map((node) => node.getText(ast)).join("\n");
   const code = ts.transpileModule(`${source}\nMarkdownPreview({ content, documentId: "source" });`, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText;
-  const result = vm.runInNewContext(code, { require: createRequire(import.meta.url), exports: {}, scanLinks: knowledge.scanLinks, content, openWikiLinkHandler: onClick });
+  const result = vm.runInNewContext(code, { require: createRequire(import.meta.url), exports: {}, ...markdown, assertTreeBudget: () => {}, scanLinks: knowledge.scanLinks, useMemo: (callback) => callback(), content, openWikiLinkHandler: onClick });
   const buttons = [];
   const walk = (element) => {
     if (Array.isArray(element)) { element.forEach(walk); return; }
@@ -58,4 +58,28 @@ test("preview of structured notes uses each node's saved binding", () => {
   assert.equal(buttons.length, 2);
   buttons.forEach((button) => button.props.onClick({ preventDefault() {} }));
   assert.deepEqual(opened, ["target0", "target1"]);
+});
+
+test('BOM, CRLF and escaped table pipes retain exact source ranges and bound identities', () => {
+  const raw = '[[方案|别名]]';
+  const content = `\uFEFF# 文档\r\n\r\n| 名称 | 链接 |\r\n| --- | --- |\r\n| A\\|B | ${raw.replace('|', '\\|')} |\r\n\r\n后续段落 ${raw}`;
+  const document = markdown.parseMarkdownDocument(content, { documentId: 'source' });
+  // The actual persisted editor normalizes BOM/CRLF during parse; preview also
+  // accepts raw imported text and must describe the original submitted bytes.
+  document.markdownSource = content;
+  const last = content.lastIndexOf(raw);
+  const escaped = raw.replace('|', '\\|');
+  document.knowledge = { version: 1, references: [
+    { id: 'table', source: { kind: 'markdown', start: content.indexOf(escaped), end: content.indexOf(escaped) + escaped.length, raw: escaped }, target: { documentId: 'table-target' }, labelMode: 'custom' },
+    { id: 'paragraph', source: { kind: 'markdown', start: last, end: last + raw.length, raw }, target: { documentId: 'paragraph-target' }, labelMode: 'custom' },
+  ], relations: [] };
+  const workspace = { documents: [document, { id: 'table-target', title: '方案', nodes: [] }, { id: 'paragraph-target', title: '方案', nodes: [] }] };
+  const spans = [], targets = [];
+  const buttons = preview(content, (raw, source) => { spans.push(source); targets.push(knowledge.resolveWikiLink(workspace, raw, source)); });
+  assert.equal(buttons.length, 2);
+  buttons.forEach((button) => button.props.onClick({ preventDefault() {} }));
+  assert.equal(content.slice(spans[0].start, spans[0].end), escaped);
+  assert.equal(content.slice(spans[1].start, spans[1].end), raw);
+  assert.deepEqual(targets.map((target) => target.documentId), ['table-target', 'paragraph-target']);
+  assert.deepEqual(targets.map((target) => target.status), ['resolved', 'resolved']);
 });

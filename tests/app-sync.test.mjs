@@ -4,6 +4,7 @@ import { loadAppCallback } from "./helpers/typescript.mjs";
 import { loadTypescript } from "./helpers/typescript.mjs";
 
 const { retainLocalTrash } = loadTypescript("src/trash.ts");
+const { sameWorkspaceContent } = loadTypescript("src/documentSignature.ts");
 
 const deferred = () => {
   let resolve;
@@ -22,6 +23,7 @@ function fixture() {
   let retries = 0;
   let pendingDraft;
   const bindings = {
+    sameWorkspaceContent,
     syncBusyRef: { current: false },
     storageConflictRef: { current: false },
     recoveryBusyRef: { current: false },
@@ -61,7 +63,7 @@ function fixture() {
     retries: () => retries,
     setDraft: (workspace) => { pendingDraft = workspace; },
     callback: (name = "syncNow") => loadAppCallback(name, bindings),
-    result: (workspace = initial) => ({
+    result: (workspace = { ...initial, documents: [{ ...initial.documents[0], title: "downloaded" }] }) => ({
       workspace, state: { documentRevisions: { doc: 2 } },
       summary: { uploaded: 0, downloaded: 1, deleted: 0, conflicts: [] },
     }),
@@ -83,6 +85,32 @@ test("sync retains edits made while a request is pending and keeps upload checkp
   assert.deepEqual(f.saves, [f.initial]);
   assert.equal(f.retries(), 1);
   assert.equal(f.bindings.syncBusyRef.current, false);
+});
+
+test("zero-change sync uses the real result application and preserves selection, focus and workspace identity", async () => {
+  const f = fixture();
+  const active = { id: "selected", text: "Selected", children: [] };
+  f.initial.documents[0].nodes = [active];
+  const selections = [], focuses = [];
+  Object.assign(f.bindings, {
+    ...loadTypescript("src/tree.ts"), ...loadTypescript("src/documentSignature.ts"),
+    activeNodeIdRef: { current: active.id }, focusNodeId: active.id,
+    syncAppliedWorkspaceRef: { current: null },
+    replaceWorkspace: (value) => { f.bindings.workspaceRef.current = value; },
+    setActiveNodeId: (id) => selections.push(id), setFocusNodeId: (id) => focuses.push(id),
+    firstNodeIdInWorkspace: (value) => value.documents[0].nodes[0]?.id ?? null,
+  });
+  f.bindings.applySyncedWorkspace = f.callback("applySyncedWorkspace");
+  const operation = f.callback()();
+  await f.started.promise;
+  f.remote.resolve({ ...f.result(f.initial), summary: { uploaded: 0, downloaded: 0, deleted: 0, conflicts: [] } });
+  await operation;
+  assert.equal(f.bindings.workspaceRef.current, f.initial);
+  assert.deepEqual(selections, []);
+  assert.deepEqual(focuses, []);
+  assert.equal(f.saves.length, 1);
+  assert.equal(f.retries(), 0);
+  assert.equal(f.bindings.autoSyncDirtyRef.current, false);
 });
 
 test("edits made while sync snapshots are being saved are retained", async () => {

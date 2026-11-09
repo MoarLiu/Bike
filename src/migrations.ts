@@ -1,6 +1,7 @@
 import type { OutlineDocument, OutlineNode, TrashEntry, Workspace } from "./types";
 import { createNode, normalizeColor, uid } from "./tree";
 import { uuid } from "./id";
+import { assertDocumentBudget, assertWorkspaceBudget } from "../shared/bike-limits.mjs";
 
 export const CURRENT_WORKSPACE_VERSION = 1;
 
@@ -42,7 +43,7 @@ const normalizeNode = (
 
   const node: OutlineNode = {
     ...rawNode,
-    ...createNode(textOr(rawNode.text, fallbackText)),
+    text: textOr(rawNode.text, fallbackText),
     id: uniqueId(rawNode.id, usedIds),
     note: textOr(rawNode.note, ""),
     checked: rawNode.checked === true,
@@ -84,6 +85,8 @@ export const migrateDocument = (
   usedIds = new Set<string>(),
 ): OutlineDocument => {
   if (!isRecord(rawDocument)) throw new Error("导入文件不是有效文档");
+  if (!Array.isArray(rawDocument.nodes)) throw new Error("文档缺少有效的主题数组，原数据未被替换");
+  assertDocumentBudget(rawDocument);
 
   const now = new Date().toISOString();
   const updatedAt = textOr(rawDocument.updatedAt, now);
@@ -111,7 +114,7 @@ export const migrateDocument = (
     markdownSource,
     markdownUpdatedAt,
     isShortcut: typeof rawDocument.isShortcut === "boolean" ? rawDocument.isShortcut : undefined,
-    nodes: nodes.length ? nodes : [normalizeNode(null, usedIds)],
+    nodes,
   };
 };
 
@@ -130,12 +133,12 @@ export const migrateTrash = (
       !isRecord(rawEntry.document) ||
       !textOr(rawEntry.document.id, "").trim() ||
       !Array.isArray(rawEntry.document.nodes)
-    ) return [];
+    ) throw new Error("回收站包含无效记录，原工作区未被替换");
     let document: OutlineDocument;
     try {
       document = migrateDocument(rawEntry.document);
-    } catch {
-      return [];
+    } catch (error) {
+      throw new Error(`回收站文档无法读取：${error instanceof Error ? error.message : String(error)}`);
     }
     const candidate = textOr(rawEntry.id, "").trim();
     const id = candidate && !entryIds.has(candidate) ? candidate : `trash_${uuid()}`;
@@ -154,13 +157,17 @@ export const migrateWorkspace = (rawWorkspace: unknown): Workspace => {
   if (!isRecord(rawWorkspace) || !Array.isArray(rawWorkspace.documents)) {
     throw new Error("导入文件不是有效工作区");
   }
+  if (rawWorkspace.version !== undefined && rawWorkspace.version !== CURRENT_WORKSPACE_VERSION) {
+    throw new Error(`工作区版本 ${String(rawWorkspace.version)} 暂不支持，原数据已保留`);
+  }
+  assertWorkspaceBudget(rawWorkspace);
 
   const usedIds = new Set<string>();
-  const documents = rawWorkspace.documents.flatMap((document) => {
+  const documents = rawWorkspace.documents.map((document, index) => {
     try {
-      return [migrateDocument(document, usedIds)];
-    } catch {
-      return [];
+      return migrateDocument(document, usedIds);
+    } catch (error) {
+      throw new Error(`第 ${index + 1} 个文档无法读取：${error instanceof Error ? error.message : String(error)}；原工作区未被替换`);
     }
   });
   if (!documents.length) throw new Error("工作区至少需要一个文档");

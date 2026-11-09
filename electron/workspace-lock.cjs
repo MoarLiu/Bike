@@ -32,6 +32,7 @@ const readWorkspaceLock = async (lockPath) => {
   return {
     raw,
     ownerToken: parseWorkspaceLock(raw).ownerToken,
+    pid: parseWorkspaceLock(raw).pid,
     modifiedAt: stats.mtimeMs,
   };
 };
@@ -59,7 +60,7 @@ const removeStaleLock = async (lockPath, options = {}) => {
   const { staleMs } = { ...defaultLockOptions, ...options };
   try {
     const lock = await readWorkspaceLock(lockPath);
-    if (Date.now() - lock.modifiedAt >= staleMs) {
+    if (Date.now() - lock.modifiedAt >= staleMs && !isProcessAlive(lock.pid)) {
       if (lock.ownerToken) {
         await releaseWorkspaceWriteLock(lockPath, lock.ownerToken);
       } else {
@@ -69,6 +70,11 @@ const removeStaleLock = async (lockPath, options = {}) => {
   } catch (error) {
     if (error.code !== "ENOENT") throw error;
   }
+};
+const isProcessAlive = (pid) => {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
+  try { process.kill(pid, 0); return true; }
+  catch (error) { return error.code !== "ESRCH"; }
 };
 
 const lockFileContent = (workspacePath, ownerToken) =>
@@ -93,6 +99,7 @@ const acquireWorkspaceWriteLock = async (workspacePath, options = {}) => {
       await fs.writeFile(lockPath, lockFileContent(workspacePath, ownerToken), {
         encoding: "utf8",
         flag: "wx",
+        mode: 0o600,
       });
       return async () => releaseWorkspaceWriteLock(lockPath, ownerToken);
     } catch (error) {
@@ -120,8 +127,13 @@ const writeFileAtomically = async (filePath, content) => {
     directory,
     `.${basename}.${process.pid}.${Date.now()}.${crypto.randomBytes(4).toString("hex")}.tmp`,
   );
-  await writeFileDurably(tempPath, content);
+  const original = await assertRegularWriteTarget(filePath);
   try {
+    await writeFileDurably(tempPath, content, original ? original.mode & 0o777 : 0o600);
+    const latest = await assertRegularWriteTarget(filePath);
+    if (original ? !latest || ["ino", "dev", "mtimeMs", "size", "mode"].some((key) => original[key] !== latest[key]) : latest) {
+      throw new Error("写入期间目标文件已变化，已保留原文件，请重试");
+    }
     await fs.rename(tempPath, filePath);
     await fsyncDirectory(directory);
   } catch (error) {
@@ -130,14 +142,22 @@ const writeFileAtomically = async (filePath, content) => {
   }
 };
 
-const writeFileDurably = async (filePath, content) => {
-  const handle = await fs.open(filePath, "w");
+const writeFileDurably = async (filePath, content, mode) => {
+  const handle = await fs.open(filePath, "wx", mode);
   try {
     await handle.writeFile(content, "utf8");
     await handle.sync();
   } finally {
     await handle.close();
   }
+};
+const assertRegularWriteTarget = async (filePath) => {
+  try {
+    const stats = await fs.lstat(filePath);
+    if (stats.isSymbolicLink()) throw new Error("工作区路径是符号链接，已拒绝写入；请配置实际文件路径");
+    if (!stats.isFile()) throw new Error("写入目标不是普通文件");
+    return stats;
+  } catch (error) { if (error.code === "ENOENT") return null; throw error; }
 };
 
 const fsyncDirectory = async (directory) => {
@@ -154,6 +174,8 @@ const fsyncDirectory = async (directory) => {
 };
 
 module.exports = {
+  assertRegularWriteTarget,
+  isProcessAlive,
   acquireWorkspaceWriteLock,
   readWorkspaceLock,
   releaseWorkspaceWriteLock,

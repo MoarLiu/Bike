@@ -1,0 +1,147 @@
+{
+  "runtime": "v22.13.0",
+  "platform": "darwin",
+  "arch": "arm64",
+  "machine": "Apple M4",
+  "collectedAt": "2026-11-09T02:59:43.884Z",
+  "evidence": "Node module measurement; excludes renderer paint and debounce",
+  "sample": {
+    "documents": 100,
+    "libraryNodes": 20000,
+    "singleDocumentNodes": 20000,
+    "independentEdits": 200,
+    "searches": 20
+  },
+  "indexMs": 252.13429099999996,
+  "searches": {
+    "medianMs": 0.007791999999881227,
+    "p95Ms": 0.041249999999990905,
+    "maximumMs": 165.518375
+  },
+  "editing": {
+    "medianMs": 159.27120899999863,
+    "p95Ms": 240.65370900000016,
+    "maximumMs": 1163.924458
+  },
+  "historyEntries": 200,
+  "memory": [
+    {
+      "edit": 0,
+      "rss": 178159616,
+      "heapTotal": 95387648,
+      "heapUsed": 58779960,
+      "external": 1900145,
+      "arrayBuffers": 16875
+    },
+    {
+      "edit": 20,
+      "rss": 405471232,
+      "heapTotal": 139051008,
+      "heapUsed": 75861336,
+      "external": 23012761,
+      "arrayBuffers": 16875,
+      "estimatedBytes": 13093596,
+      "retainedObjects": 40062,
+      "overBudget": false
+    },
+    {
+      "edit": 40,
+      "rss": 423985152,
+      "heapTotal": 165199872,
+      "heapUsed": 82757176,
+      "external": 65237913,
+      "arrayBuffers": 16875,
+      "estimatedBytes": 16311196,
+      "retainedObjects": 40122,
+      "overBudget": false
+    },
+    {
+      "edit": 60,
+      "rss": 430718976,
+      "heapTotal": 185319424,
+      "heapUsed": 89628672,
+      "external": 59959769,
+      "arrayBuffers": 16875,
+      "estimatedBytes": 19528796,
+      "retainedObjects": 40182,
+      "overBudget": false
+    },
+    {
+      "edit": 80,
+      "rss": 436977664,
+      "heapTotal": 201293824,
+      "heapUsed": 93753048,
+      "external": 54678299,
+      "arrayBuffers": 16875,
+      "estimatedBytes": 22746396,
+      "retainedObjects": 40242,
+      "overBudget": false
+    },
+    {
+      "edit": 100,
+      "rss": 444612608,
+      "heapTotal": 216694784,
+      "heapUsed": 100598968,
+      "external": 49400155,
+      "arrayBuffers": 16875,
+      "estimatedBytes": 25963996,
+      "retainedObjects": 40302,
+      "overBudget": false
+    },
+    {
+      "edit": 120,
+      "rss": 457474048,
+      "heapTotal": 230260736,
+      "heapUsed": 107454712,
+      "external": 49400155,
+      "arrayBuffers": 16875,
+      "estimatedBytes": 29181636,
+      "retainedObjects": 40362,
+      "overBudget": false
+    },
+    {
+      "edit": 140,
+      "rss": 461996032,
+      "heapTotal": 243040256,
+      "heapUsed": 114320464,
+      "external": 49400155,
+      "arrayBuffers": 16875,
+      "estimatedBytes": 32399276,
+      "retainedObjects": 40422,
+      "overBudget": false
+    },
+    {
+      "edit": 160,
+      "rss": 478871552,
+      "heapTotal": 252149760,
+      "heapUsed": 121163592,
+      "external": 49400155,
+      "arrayBuffers": 16875,
+      "estimatedBytes": 35616916,
+      "retainedObjects": 40482,
+      "overBudget": false
+    },
+    {
+      "edit": 180,
+      "rss": 486457344,
+      "heapTotal": 258637824,
+      "heapUsed": 128005768,
+      "external": 49400155,
+      "arrayBuffers": 16875,
+      "estimatedBytes": 38834556,
+      "retainedObjects": 40542,
+      "overBudget": false
+    },
+    {
+      "edit": 200,
+      "rss": 494026752,
+      "heapTotal": 267485184,
+      "heapUsed": 134853256,
+      "external": 49400155,
+      "arrayBuffers": 16875,
+      "estimatedBytes": 42052196,
+      "retainedObjects": 40602,
+      "overBudget": false
+    }
+  ]
+}

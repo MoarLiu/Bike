@@ -330,6 +330,7 @@ sudo_cmd() {
   "\${args[@]}"
 }
 ${installFunctions("migrate_web_service_state", "start_web_service")}
+${installFunctions("migrate_private_service", "uninstall_action")}
 ${installFunctions("update_web_action", "install_sync_action")}
 update_web_action
 update_web_action
@@ -346,7 +347,7 @@ test("update-web adds persistent session storage before restarting an old unit a
   assert.equal(statSync(dropin).mode & 0o777, 0o644);
   assert.equal(existsSync(`${dropin}.new`), false);
   assert.deepEqual(result.stdout.trim().split("\n"), [
-    "files-updated", "unit-reloaded", "service-restarted",
+    "files-updated", "unit-reloaded", "unit-reloaded", "service-restarted",
     "files-updated", "service-restarted",
   ]);
 });
@@ -356,7 +357,9 @@ test("update-web keeps a custom state directory and never replaces the service u
   assert.equal(result.status, 0, result.stderr);
   assert.equal(readFileSync(unit, "utf8"), original);
   assert.equal(existsSync(dropin), false);
-  assert.doesNotMatch(result.stdout, /unit-reloaded/);
+  assert.equal((result.stdout.match(/unit-reloaded/g) ?? []).length, 1);
+  const privateDropin = path.join(path.dirname(dropin), '60-bike-private-umask.conf');
+  assert.equal(readFileSync(privateDropin, 'utf8'), '[Service]\nUMask=0077\n');
 });
 
 test("update-web does not restart when the state directory migration fails", (t) => {
