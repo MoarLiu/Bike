@@ -23,7 +23,22 @@
 
 ## 远端验证
 
-候选提交的远端 CI、标签、GitHub Release 和发布后下载校验将在执行完成后记录。
+[Bike 1.7.0](https://github.com/MoarLiu/Bike/releases/tag/v1.7.0) 于 2026-11-09 23:26:40（Asia/Shanghai）公开发布，并设为当前稳定 Release。
+
+发布源码提交为 `3c90ba6dae23a1688859cada674fff3b29c5efa0`，标签 `v1.7.0` 指向该提交。候选分支、main 和标签均执行同一源码提交的 CI。
+
+| 检查入口 | 证据 | 结果 |
+| --- | --- | --- |
+| 候选分支 | [CI 运行](https://github.com/MoarLiu/Bike/actions/runs/42643596185) | Linux、macOS、Node 22.22.2 三项任务全部通过 |
+| main | [CI 运行](https://github.com/MoarLiu/Bike/actions/runs/42644214142) | Linux、macOS、Node 22.22.2 三项任务全部通过 |
+| v1.7.0 标签 | [CI 运行](https://github.com/MoarLiu/Bike/actions/runs/42644213778) | Linux、macOS、Node 22.22.2 三项任务全部通过 |
+
+- 九个 Release 资产均可通过无需登录的公开地址下载。全部文件的字节数和 SHA-256 与本地最终制品一致，配套独立摘要及汇总校验文件匹配。
+- 重新下载的 DMG 通过完整性与应用严格签名校验。只读挂载后再次通过 13 项附件、7 项基础及 7 项受控更新流程，错误列表为空。实际版本为 1.7.0，运行架构为 arm64，Rosetta 状态为 false。
+- 重新下载的 Web/Sync/MCP 归档在 Node 22.13.0 上再次通过 9 项干净安装与覆盖升级检查。
+- 资产包含 DMG、ZIP、对应的两个 blockmap 和两个独立 SHA-256 文件、`latest-mac.yml`、Web/Sync/MCP 归档及 `SHA256SUMS-1.7.0.txt`。
+
+本记录在发布后单独提交。发布源码与安装包对应上述标签提交，原始远端 CI、公开下载和运行验证记录保存在本地 `release/1.7.0/verification/`。
 
 ## 签名与更新边界
 
