@@ -2,6 +2,7 @@
 import fs from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 import path from "node:path";
+import { BIKE_TEMPLATES } from "../shared/bike-templates.mjs";
 import { assertTextBudget, assertValueBudget } from "../shared/bike-limits.mjs";
 
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -86,6 +87,7 @@ const readPackageVersion = async () => {
 };
 
 const writeCommonInputSchema = {
+  requestId: z.string().min(1).max(200).optional().describe("Live dry-run 返回的请求身份，用于确认和幂等查询"),
   expectedRevision: z.string().min(1).describe("调用方读取到的 workspace revision"),
   dryRun: z.boolean().optional().default(true).describe("默认 true；false 时才真实落盘"),
   reason: z.string().max(300).optional().default("").describe("写入原因，用于快照和审计摘要"),
@@ -140,6 +142,10 @@ export const createBikeMcpServer = async ({
     },
   );
 
+  if (workspaceStore.status) server.registerTool("get_proposal_status", {
+    title: "Get Proposal Status", description: "查询 Live 提案审批和持久提交回执", inputSchema: { requestId: z.string().min(1).max(200) },
+    annotations: { readOnlyHint: true, openWorldHint: false },
+  }, async ({ requestId }) => textToolResult(await workspaceStore.status(requestId)));
   const snapshot = () => workspaceStore.load();
   const guarded = (callback) => async (...args) => {
     try { return await callback(...args); }
@@ -590,7 +596,7 @@ export const createBikeMcpServer = async ({
           role: "user",
           content: {
             type: "text",
-            text: `请先通过 Bike MCP 读取 ${targetText(args)}，再用 ${args.style} 风格总结。保留大纲层级中的关键判断、待办和备注，不要引入大纲外的信息。`,
+            text: `请先通过 Bike MCP 读取 ${targetText(args)}，再用 ${args.style} 风格总结。${BIKE_TEMPLATES.summarize_outline.instruction}`,
           },
         },
       ],
@@ -614,7 +620,7 @@ export const createBikeMcpServer = async ({
           role: "user",
           content: {
             type: "text",
-            text: `请先读取 ${targetText(args)}，面向 ${args.audience} 读者整理成 PRD。请保留需求背景、目标、范围、用户场景、功能点、非目标、风险和验收标准。`,
+            text: `请先读取 ${targetText(args)}，面向 ${args.audience} 读者。${BIKE_TEMPLATES.outline_to_prd.instruction}`,
           },
         },
       ],
@@ -661,13 +667,16 @@ export const createBikeMcpServer = async ({
           role: "user",
           content: {
             type: "text",
-            text: `请先读取 ${targetText(args)}，审查大纲结构。重点指出层级混乱、重复项、缺失前提、不可执行任务、风险遗漏和可以合并的节点，并给出修改建议。`,
+            text: `请先读取 ${targetText(args)}。${BIKE_TEMPLATES.review_outline_structure.instruction}`,
           },
         },
       ],
     }),
   );
 
+  server.registerPrompt("outline_to_meeting", {
+    title: "Outline To Meeting Notes", description: "把给定大纲整理为会议纪要", argsSchema: { documentId: z.string().min(1), nodeId: z.string().optional() },
+  }, async (args) => ({ messages: [{ role: "user", content: { type: "text", text: `请先读取 ${targetText(args)}。${BIKE_TEMPLATES.outline_to_meeting.instruction}` } }] }));
   return server;
 };
 
@@ -682,6 +691,7 @@ const printHelp = () => {
 
 Usage:
   npm run mcp:bike
+  npm run mcp:bike -- --live
   BIKE_WORKSPACE_PATH=/path/to/bike-workspace.json npm run mcp:bike
 
 Environment:
@@ -705,7 +715,7 @@ const main = async () => {
     return;
   }
 
-  const store = await createWorkspaceStore();
+  const store = process.argv.includes("--live") ? await (await import("./bike-live.mjs")).createLiveWorkspaceStore() : await createWorkspaceStore();
 
   if (process.argv.includes("--show-config")) {
     process.stdout.write(

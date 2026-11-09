@@ -158,15 +158,24 @@ export async function verifyElectron() {
     const second = spawn(executable ?? require('electron'), executable ? [] : [root], { cwd: root, env: { ...process.env, ELECTRON_RUN_AS_NODE: '', BIKE_TEST_USER_DATA: userData, VITE_DEV_SERVER_URL: '' }, stdio: 'ignore' });
     await new Promise((resolve, reject) => { const timer = setTimeout(() => { second.kill(); reject(new Error('second instance did not exit')); }, 10000); second.once('exit', (code) => { clearTimeout(timer); code === 0 ? resolve() : reject(new Error(`second instance exit ${code}`)); }); second.once('error', reject); });
     assert.equal((await app.windows()).length, 1);
+    await page.evaluate(async () => {
+      const db = await new Promise((resolve) => { const request = indexedDB.open('bike-db'); request.onsuccess = () => resolve(request.result); });
+      await new Promise((resolve) => { const tx = db.transaction('workspace-store', 'readwrite'), store = tx.objectStore('workspace-store'), request = store.get('workspace'); request.onsuccess = () => store.put({ ...request.result, version: 3 }, 'workspace'); tx.oncomplete = resolve; }); db.close();
+    });
+    await page.reload(); await page.locator('[data-node-id=outside]').waitFor();
     let sawRequest;
     const requestStarted = new Promise((resolve) => { sawRequest = resolve; });
     aiServer = createHttpServer((request, response) => { request.resume(); response.writeHead(200, { 'Content-Type': 'application/json' }); response.write('{"output_text":'); sawRequest(); });
     await new Promise((resolve) => aiServer.listen(0, '127.0.0.1', resolve));
     await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].webContents.send('open-api-config'));
-    await page.getByLabel('API baseurl').fill(`http://127.0.0.1:${aiServer.address().port}/v1`);
-    await page.locator('.api-key-input input').fill('local-fixture');
-    await page.getByLabel('大模型', { exact: true }).fill('fixture');
-    await page.getByRole('button', { name: '保存', exact: true }).click();
+    const configDialog = page.getByRole('dialog', { name: 'AI 配置', exact: true });
+    await configDialog.waitFor();
+    await configDialog.getByLabel('API baseurl').fill(`http://127.0.0.1:${aiServer.address().port}/v1`);
+    await configDialog.locator('.api-key-input input').fill('local-fixture');
+    await configDialog.getByLabel('大模型', { exact: true }).fill('fixture');
+    await configDialog.locator('.config-error').waitFor({ state: 'hidden' });
+    await configDialog.getByRole('button', { name: '保存', exact: true }).click();
+    await configDialog.waitFor({ state: 'hidden' });
     await page.locator('[data-node-id=outside] [title="AI 助手"]').click();
     await page.getByRole('button', { name: '生成', exact: true }).click();
     await requestStarted;

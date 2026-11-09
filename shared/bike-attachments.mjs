@@ -104,9 +104,10 @@ export const workspaceAttachmentAssets = (workspace) => {
 };
 
 export const workspaceFormatVersion = (workspace) => {
-  if (workspace.version !== undefined && workspace.version !== 1 && workspace.version !== 2) {
+  if (workspace.version !== undefined && workspace.version !== 1 && workspace.version !== 2 && workspace.version !== 3) {
     throw new Error(`工作区版本 ${String(workspace.version)} 暂不支持，原数据已保留`);
   }
+  if (workspace.version === 3) return 3;
   const documents = [...workspace.documents, ...(workspace.trash ?? []).map((entry) => entry.document)];
   return workspace.version === 2 || documents.some((document) => document.attachments !== undefined ||
     collectAttachmentRefs(document.nodes).length > 0) ? 2 : 1;

@@ -330,7 +330,11 @@ export const firstBalancedJsonSlice = (value: string) => {
   return null;
 };
 
-const cleanAiText = (text: string) => Array.from(text.replace(/[\u0000-\u001f\u007f]/gu, " ").replace(/\s+/gu, " ").trim().normalize("NFC")).slice(0, 120).join("");
+const cleanAiText = (text: string) => {
+  const normalized = text.replace(/[\u0000-\u001f\u007f]/gu, " ").replace(/\s+/gu, " ").trim().normalize("NFC");
+  if (Array.from(normalized).length > 120) throw new Error("AI 主题文字超过 120 个字符，请缩小范围后重新生成");
+  return normalized;
+};
 
 const generatedTextKeys = ["text", "title", "name", "label", "content", "heading", "topic"] as const;
 const generatedChildrenKeys = [
@@ -372,7 +376,8 @@ const sanitizeGeneratedNodes = (value: unknown): AiGeneratedNode[] => {
   let visited = 0;
   while (stack.length) {
     const frame = stack[stack.length - 1];
-    if (frame.at >= frame.items.length || frame.target.length >= 8 || frame.depth > 3) { stack.pop(); continue; }
+    if (frame.at >= frame.items.length) { stack.pop(); continue; }
+    if (frame.target.length >= 8 || frame.depth > 3) throw new Error("AI 子主题超过每组 8 项或 3 层预算，请缩小范围后重新生成");
     if (++visited > 1000) throw new Error("AI 生成节点超过处理预算");
     const item = frame.items[frame.at++];
     const text = generatedNodeText(item);
@@ -402,7 +407,8 @@ export const generatedNodesToOutlineNodes = (
   nodes: AiGeneratedNode[] | undefined,
   depth = 1,
 ): OutlineNode[] => {
-  if (!nodes?.length || depth > 3) return [];
+  if (!nodes?.length) return [];
+  if (depth > 3) throw new Error("AI 子主题超过 3 层预算");
   return nodes.map((item) => {
     const node = createNode(item.text.trim());
     node.children = generatedNodesToOutlineNodes(item.children, depth + 1);
@@ -410,19 +416,19 @@ export const generatedNodesToOutlineNodes = (
   });
 };
 
-export const runAiNodeAction = async (
+export const requestAiJson = async (
   config: AiApiConfig,
-  action: AiNodeAction,
-  context: AiActionContext,
+  instructions: string,
+  context: unknown,
   options: { signal?: AbortSignal; timeoutMs?: number; maxResponseBytes?: number } = {},
-): Promise<AiActionResult> => {
+): Promise<unknown> => {
   const error = validateAiConfig(config);
   if (error) throw new Error(error);
 
   const normalized = normalizeAiConfig(config);
   const messages: AiMessage[] = [
     { role: "system", content: systemPrompt },
-    { role: "user", content: buildPrompt(action, context) },
+    { role: "user", content: `${instructions}\n\n输入资料\n${typeof context === "string" ? context : JSON.stringify(context)}` },
   ];
   const body = requestBodyFor(normalized, messages);
   const invokePayload = {
@@ -468,6 +474,12 @@ export const runAiNodeAction = async (
     const text = extractTextFromResponse(data);
     if (!text.trim()) throw new Error("AI 返回内容为空");
     signal.throwIfAborted();
-    return normalizeActionResult(action, parseJsonText(text));
+    const parsed = parseJsonText(text);
+    assertValueBudget(parsed, { maxDepth: 64, maxBytes: MAX_AI_RESPONSE_BYTES, maxValues: 20_000 });
+    return parsed;
   });
 };
+
+export const runAiNodeAction = async (config: AiApiConfig, action: AiNodeAction, context: AiActionContext,
+  options: { signal?: AbortSignal; timeoutMs?: number; maxResponseBytes?: number } = {}): Promise<AiActionResult> =>
+  normalizeActionResult(action, await requestAiJson(config, buildPrompt(action, context), "", options));

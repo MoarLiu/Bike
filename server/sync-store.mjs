@@ -1,3 +1,7 @@
+import { createAssetStore } from './asset-store.mjs';
+import os from 'node:os';
+import fs from 'node:fs/promises';
+import { createOperationStore } from './operation-store.mjs';
 import { mkdir, chmod, open } from "node:fs/promises";
 import path from "node:path";
 import { assertDocumentBudget, assertValueBudget } from "../shared/bike-limits.mjs";
@@ -289,6 +293,7 @@ export const createSyncStore = async (databasePath, { busyTimeoutMs = 1500 } = {
     });
   };
 
+  let operationStore;
   const getManifest = () => {
     const meta = readMeta();
     const normalized = normalizeOrder(meta.documentOrder, meta.activeDocumentId);
@@ -298,7 +303,8 @@ export const createSyncStore = async (databasePath, { busyTimeoutMs = 1500 } = {
       activeDocumentId: normalized.activeDocumentId,
       documentOrder: normalized.documentOrder,
       documents,
-      capabilities: ["attachments-v1"],
+      capabilities: ["attachments-v1", "node-operations-v2"],
+      ...(operationStore?.isEnabled() ? { requiredCapabilities: ["node-operations-v2"], protocol: 2 } : {}),
     };
   };
 
@@ -315,6 +321,7 @@ export const createSyncStore = async (databasePath, { busyTimeoutMs = 1500 } = {
   };
 
   const putDocument = ({ id, expectedRevision, document, capabilities = [] }) => transaction(() => {
+    operationStore?.assertLegacyWritable();
     const safeExpectedRevision = normalizeExpectedRevision(expectedRevision);
     const safeDocument = validateDocument(id, document);
     const existing = db.prepare("SELECT * FROM documents WHERE id = ?").get(id);
@@ -374,6 +381,7 @@ export const createSyncStore = async (databasePath, { busyTimeoutMs = 1500 } = {
   });
 
   const deleteDocument = ({ id, expectedRevision }) => transaction(() => {
+    operationStore?.assertLegacyWritable();
     const safeExpectedRevision = normalizeExpectedRevision(expectedRevision);
     const existing = db.prepare("SELECT * FROM documents WHERE id = ?").get(id);
     if (!existing) throw new SyncNotFoundError("Document not found");
@@ -399,6 +407,7 @@ export const createSyncStore = async (databasePath, { busyTimeoutMs = 1500 } = {
 
   const patchManifest = ({ expectedRevision, activeDocumentId, documentOrder }) =>
     transaction(() => {
+      operationStore?.assertLegacyWritable();
       const safeExpectedRevision = normalizeExpectedRevision(expectedRevision);
       const meta = readMeta();
       if (safeExpectedRevision !== meta.revision) {
@@ -451,6 +460,7 @@ export const createSyncStore = async (databasePath, { busyTimeoutMs = 1500 } = {
 
   const appendDocumentOperations = ({ id, baseRevision, actorId, operations }) =>
     transaction(() => {
+      operationStore?.assertLegacyWritable();
       const document = getDocument(id);
       if (!document) throw new SyncNotFoundError("Document not found");
       if (document.deletedAt) throw new SyncNotFoundError("Document is deleted");
@@ -502,8 +512,14 @@ export const createSyncStore = async (databasePath, { busyTimeoutMs = 1500 } = {
       };
     });
 
+  operationStore = createOperationStore({ db, transaction, getManifest, getDocument, updatePresence: updateManifestForDocumentPresence });
+
+  const temporaryAssetDirectory = databasePath === ":memory:" ? await fs.mkdtemp(path.join(os.tmpdir(), "bike-sync-assets-")) : null;
+  const assets = await createAssetStore({ directory: temporaryAssetDirectory ?? `${databasePath}.assets` });
   return {
-    close: () => db.close(),
+    assets,
+    operations: operationStore,
+    close: () => { db.close(); if (temporaryAssetDirectory) void fs.rm(temporaryAssetDirectory, { recursive: true, force: true }); },
     getManifest,
     getDocument,
     putDocument,

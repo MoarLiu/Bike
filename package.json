@@ -1,9 +1,9 @@
 {
   "name": "bike",
-  "version": "1.7.0",
+  "version": "2.0.0",
   "private": true,
   "description": "Bike is a local-first outline note and mind map app with optional iCloud Drive backup.",
-  "main": "electron/main.cjs",
+  "main": "electron/entry.cjs",
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
@@ -31,7 +31,10 @@
     "electron:start": "vite build && electron .",
     "electron:test": "node --test electron/*.test.mjs",
     "electron:dist:signed": "npm run check && node scripts/build-signed-mac.mjs",
-    "electron:dist:mac": "npm run build && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac --arm64 --publish never"
+    "electron:dist:mac": "npm run build && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac --arm64 --publish never",
+    "test:2.0-runtime": "node scripts/verify-2.0.mjs",
+    "test:ui-runtime": "node scripts/verify-ui.mjs",
+    "test:compatibility-runtime": "node scripts/verify-compatibility.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",
@@ -71,7 +74,8 @@
       "mcp/bike-core.mjs",
       "mcp/bike-server.mjs",
       "shared/*.mjs",
-      "package.json"
+      "package.json",
+      "mcp/bike-live.mjs"
     ],
     "afterPack": "scripts/after-pack.cjs",
     "asar": true,

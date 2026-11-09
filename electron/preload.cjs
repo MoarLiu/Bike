@@ -1,6 +1,28 @@
 const { contextBridge, ipcRenderer } = require("electron");
 
 const bikeBridge = {
+  syncAttachments: (assets) => ipcRenderer.invoke("attachment-sync", { assets }),
+  cancelAttachmentSync: () => ipcRenderer.invoke("attachment-sync-cancel"),
+  onAttachmentSyncProgress: (callback) => {
+    const handler = (_event, progress) => callback(progress);
+    ipcRenderer.on("attachment-sync-progress", handler);
+    return () => ipcRenderer.removeListener("attachment-sync-progress", handler);
+  },
+  getLiveMcpState: () => ipcRenderer.invoke("live-mcp-state"),
+  startLiveMcp: (grant) => ipcRenderer.invoke("live-mcp-start", grant),
+  stopLiveMcp: () => ipcRenderer.invoke("live-mcp-stop"),
+  onLiveMcpRequest: (callback) => {
+    const handler = (_event, request) => Promise.resolve().then(() => callback(request)).then(
+      (result) => ipcRenderer.send("live-mcp-response", { id: request.id, ok: true, result }),
+      (error) => ipcRenderer.send("live-mcp-response", { id: request.id, ok: false, error: error instanceof Error ? error.message : String(error) }),
+    );
+    ipcRenderer.on("live-mcp-request", handler);
+    return () => ipcRenderer.removeListener("live-mcp-request", handler);
+  },
+  onLiveMcpRevoke: (callback) => {
+    ipcRenderer.on("live-mcp-revoked", callback);
+    return () => ipcRenderer.removeListener("live-mcp-revoked", callback);
+  },
   scanAttachments: (protectedAssets) => ipcRenderer.invoke("attachment-scan", { protectedAssets }),
   cleanAttachments: (protectedAssets, ticket) => ipcRenderer.invoke("attachment-clean", { protectedAssets, ticket }),
   importAttachments: (payload) => ipcRenderer.invoke("attachment-import", payload),

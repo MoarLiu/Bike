@@ -1,8 +1,18 @@
 :root {
   color-scheme: light;
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
-    "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  --font-ui: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  --font-size-body: 13px;
+  --font-size-compact: 12px;
+  --font-size-caption: 11px;
+  --font-size-dialog-title: 18px;
+  --control-weight: 620;
+  --dialog-width: 540px;
+  --dialog-content-width: 720px;
+  --dialog-wide-width: 960px;
+  font-family: var(--font-ui);
+  font-size: var(--font-size-body);
+  line-height: 1.45;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
@@ -290,13 +300,14 @@ button:disabled {
   border-radius: var(--radius);
   background: var(--surface);
   box-shadow: var(--shadow-soft);
+  font-size: var(--font-size-body);
 }
 
 .loading-error h1 {
   margin: 0;
   color: var(--text);
-  font-size: 20px;
-  line-height: 1.2;
+  font-size: var(--font-size-dialog-title);
+  line-height: 1.25;
 }
 
 .loading-error p {
@@ -305,18 +316,26 @@ button:disabled {
 }
 
 .loading-error button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   width: fit-content;
-  min-height: 34px;
+  min-height: 38px;
   padding: 0 14px;
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-sm);
   color: var(--text);
   background: var(--surface-raised);
+  font-family: var(--font-ui);
+  font-size: var(--font-size-body);
+  font-weight: var(--control-weight);
+  line-height: 1.2;
 }
 
 .loading-error-actions {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   gap: 8px;
 }
 
@@ -341,6 +360,42 @@ button:disabled {
   color: var(--text);
   background: var(--surface-raised);
   text-align: left;
+  font-family: var(--font-ui);
+  font-size: var(--font-size-body);
+  line-height: 1.45;
+}
+
+.sidebar-utility-actions {
+  display: grid;
+  gap: 4px;
+}
+
+.sidebar-utility-actions button {
+  display: flex;
+  min-width: 0;
+  min-height: 32px;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  background: transparent;
+  font-family: var(--font-ui);
+  font-size: var(--font-size-compact);
+  font-weight: var(--control-weight);
+  line-height: 1.45;
+  text-align: left;
+  cursor: pointer;
+}
+
+.sidebar-utility-actions button:hover {
+  color: var(--text);
+  background: var(--surface-subtle);
+}
+
+.sidebar-utility-actions svg {
+  flex: 0 0 auto;
 }
 
 .shell {
@@ -990,14 +1045,31 @@ button:disabled {
 .toolstrip {
   display: flex;
   min-width: 0;
-  align-items: center;
+  align-items: flex-start;
   gap: 6px;
   justify-content: flex-start;
   padding: 12px 18px 10px;
   border-bottom: 1px solid var(--border);
   background: rgba(255, 255, 255, 0.96);
+}
+
+.toolstrip-tools,
+.toolstrip-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.toolstrip-tools {
+  flex: 1 1 auto;
+  min-width: 0;
   overflow-x: auto;
   scrollbar-width: thin;
+}
+
+.toolstrip-actions {
+  flex: 0 0 auto;
+  margin-left: auto;
 }
 
 .toolstrip button {
@@ -3090,7 +3162,7 @@ svg.ai-button-glyph {
 
 .api-config-dialog {
   display: grid;
-  width: min(540px, 100%);
+  width: min(var(--dialog-width), 100%);
   gap: 15px;
   padding: 24px;
   border: 1px solid var(--border);
@@ -3239,7 +3311,7 @@ svg.ai-button-glyph {
 }
 
 .sync-toggle-row small {
-  color: var(--muted);
+  color: var(--text-muted);
   line-height: 1.4;
 }
 
@@ -3285,7 +3357,7 @@ svg.ai-button-glyph {
 
 .workspace-dialog {
   display: grid;
-  width: min(720px, 100%);
+  width: min(var(--dialog-content-width), 100%);
   max-height: min(720px, calc(100vh - 48px));
   gap: 16px;
   padding: 24px;
@@ -3930,16 +4002,18 @@ svg.ai-button-glyph {
 .markdown-source-wrap > .wiki-input-wrap { height: 100%; min-height: 260px; }
 .link-input-popup { position: absolute; left: 4px; right: 4px; z-index: 40; overflow: auto; }
 .link-input-popup > .link-autocomplete { position: relative; inset: auto; width: 100%; max-height: inherit; }
-.search-controls { display: grid; gap: 6px; padding: 0 12px 10px; font-size: 12px; }
-.search-controls details > label { display: block; margin: 8px 0; }
-.search-controls select { width: 100%; min-height: 76px; }
+.search-controls { display: grid; gap: 8px; padding: 0 12px 10px; font-size: var(--font-size-body); line-height: 1.45; }
+.search-controls details > label { margin: 10px 0; }
+.search-filter-field { display: grid; gap: 6px; }
+.search-filter-field > span { font-size: var(--font-size-compact); font-weight: var(--control-weight); }
+.search-controls select { width: 100%; min-height: 76px; padding: 6px 8px; font-size: var(--font-size-body); line-height: 1.45; }
 .search-controls summary { color: var(--text-muted); font-weight: 620; cursor: pointer; }
 .search-controls small { color: var(--text-muted); font-size: 11px; line-height: 1.45; }
 .search-controls input[type="checkbox"] { margin: 0 6px 0 0; accent-color: var(--primary); }
 .search-control-actions, .saved-filter-row { display: flex; align-items: center; gap: 6px; }
 .saved-filter-row { flex-wrap: wrap; padding: 4px; }
 .saved-filter-row .document-item { flex: 1; min-width: 100px; }
-.control-button.compact { min-height: 30px; padding-inline: 9px; font-size: 12px; }
+.control-button.compact { min-height: 32px; padding-inline: 10px; font-size: var(--font-size-compact); }
 .control-button.danger { color: var(--danger); }
 .control-button.danger:hover:not(:disabled) { border-color: var(--danger); background: var(--danger-soft); }
 .knowledge-panel { font-size: 13px; line-height: 1.45; }
@@ -3975,3 +4049,63 @@ svg.ai-button-glyph {
 .document-item-main span { overflow: hidden; text-overflow: ellipsis; }
 .outline-link-popup { position: absolute; left: 0; right: 0; z-index: 40; overflow: auto; }
 .outline-link-popup > .link-autocomplete { position: relative; inset: auto; width: 100%; max-height: inherit; }
+
+.proposal-dialog { width: min(var(--dialog-wide-width), 100%); }
+.proposal-groups { overflow: auto; padding: 0; min-height: 0; }
+.proposal-group { border-bottom: 1px solid var(--border); padding: 14px 0; }
+.proposal-group > label { display: flex; align-items: center; gap: 10px; }
+.proposal-group > label > span { margin-left: auto; color: var(--text-muted); }
+.proposal-group input[type=checkbox] { width: 16px; height: 16px; }
+.proposal-change { padding: 9px 0; }
+.proposal-change summary { cursor: pointer; overflow-wrap: anywhere; }
+.proposal-diff { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 10px 0; }
+.proposal-diff > div { min-width: 0; }
+.proposal-diff pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 240px; overflow: auto; padding: 12px; background: var(--surface-subtle); color: var(--text); border-radius: 6px; }
+.workflow-actions { display: flex; flex-wrap: wrap; gap: 6px; margin: 12px 0; }
+.operation-history { max-height: 55vh; overflow: auto; padding: 14px 20px; }
+.operation-history article { padding: 12px 0; border-bottom: 1px solid var(--border); }
+
+.sidebar-actions.knowledge-entry { grid-template-columns: 1fr; }
+.knowledge-entry button { white-space: nowrap; }
+.config-body { display: grid; gap: 14px; overflow: auto; max-height: 60vh; }
+.config-body > label { display: flex; align-items: center; gap: 10px; font-size: 13px; }
+.config-body select { min-width: 160px; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); color: var(--text); }
+.config-body input[type=checkbox] { width: 16px; height: 16px; }
+.config-body p { color: var(--text-muted); font-size: 13px; line-height: 1.65; }
+.config-body pre, .operation-history pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 280px; overflow: auto; font-size: 12px; }
+
+/* Shared control and modal conventions, including the 2.0 workflows. */
+.control-button, .toolstrip button, .sidebar-actions button, .api-key-input button,
+.api-config-dialog footer button, .workspace-dialog footer button, .trash-item-actions button,
+.confirm-actions button { font-family: var(--font-ui); font-weight: var(--control-weight); line-height: 1.2; white-space: nowrap; }
+.api-key-input button, .api-config-dialog footer button, .workspace-dialog footer button,
+.confirm-actions button { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 38px; padding: 0 14px; font-size: var(--font-size-body); border-radius: var(--radius-sm); }
+.control-button svg, .api-config-dialog footer svg, .workspace-dialog footer svg { flex-shrink: 0; }
+.checkbox-field { display: flex; align-items: center; gap: 8px; font-size: var(--font-size-body); line-height: 1.45; }
+.checkbox-field input[type=checkbox], .sync-toggle-row input[type=checkbox] { flex: 0 0 16px; width: 16px; height: 16px; min-height: 16px; margin: 0; accent-color: var(--primary); }
+.dialog-close { flex: 0 0 30px; padding: 0; font-family: var(--font-ui); }
+.api-config-dialog, .workspace-dialog { display: flex; flex-direction: column; gap: 16px; min-height: 0; max-height: calc(100vh - 48px); padding: 24px; border-radius: 14px; }
+.api-config-dialog > header, .workspace-dialog > header, .api-config-dialog > footer, .workspace-dialog > footer { flex-shrink: 0; }
+.api-config-dialog h3, .workspace-dialog h3, .confirm-dialog h3 { font-family: var(--font-ui); font-size: var(--font-size-dialog-title); font-weight: 760; line-height: 1.25; }
+.api-config-dialog p, .workspace-dialog > p, .confirm-dialog p { font-size: var(--font-size-body); line-height: 1.5; }
+.workspace-dialog .history-body, .workspace-dialog .trash-list, .workspace-dialog .operation-history,
+.workspace-dialog .proposal-groups { flex: 1 1 auto; min-height: 0; overflow: auto; max-height: none; }
+.history-dialog { width: min(var(--dialog-wide-width), 100%); }
+.proposal-dialog { width: min(var(--dialog-wide-width), 100%); }
+.workspace-dialog footer button.primary { border-color: var(--primary); color: #fff; background: var(--primary); }
+.workspace-dialog footer button.primary:hover:not(:disabled) { border-color: var(--primary-hover); background: var(--primary-hover); }
+.operation-history { padding: 0; font-size: var(--font-size-body); line-height: 1.5; }
+.operation-history article > .control-button { margin: 8px 6px 0 0; }
+.operation-history small { color: var(--text-muted); font-size: var(--font-size-caption); }
+.confirm-dialog { padding: 24px; border-radius: 14px; }
+.confirm-actions button { font-size: var(--font-size-body); }
+.config-body > .config-field { display: grid; gap: 7px; }
+.config-body > .checkbox-field { gap: 8px; }
+.config-body pre, .operation-history pre, .proposal-diff pre { font-family: var(--font-mono); font-size: var(--font-size-compact); line-height: 1.55; }
+.export-trigger { display: inline-flex; align-items: center; gap: 6px; }
+.export-trigger.selected { border-color: var(--primary); color: var(--primary); background: var(--primary-soft); }
+.export-menu { position: fixed; z-index: 240; width: 200px; max-height: calc(100vh - 24px); overflow: auto; padding: 6px; border: 1px solid var(--border-strong); border-radius: var(--radius); color: var(--text); background: var(--surface); box-shadow: var(--shadow); }
+.export-menu-item { display: flex; width: 100%; min-height: 32px; align-items: center; padding: 7px 10px; border: 0; border-radius: var(--radius-sm); color: var(--text); background: transparent; font-family: var(--font-ui); font-size: var(--font-size-body); font-weight: 500; line-height: 1.2; text-align: left; cursor: pointer; }
+.export-menu-item:hover, .export-menu-item:focus-visible { outline: 0; color: var(--primary); background: var(--primary-soft); }
+
+.search-controls details > .search-control-actions { margin-top: 10px; }

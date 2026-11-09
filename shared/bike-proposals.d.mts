@@ -1,0 +1,7 @@
+import type { Workspace } from '../src/types';
+import type { OperationSource, WorkspaceOperation, operationSummary } from './bike-operations.mjs';
+export interface ProposalGroup { id: string; label: string; dependsOn: string[]; operation: WorkspaceOperation; summary: Array<ReturnType<typeof operationSummary>[number] & { targetPath?: string; afterPath?: string }> }
+export interface WorkspaceProposal { resolutionBaselines?: Record<string, string | null>; resolves?: string[]; clientDigest?: string; candidateDigest?: string; origin?: Record<string, string>; id: string; workspaceId: string; source: OperationSource; label: string; reason: string; at: number; expiresAt: number; status: string; baselines: Record<string, string | null>; groups: ProposalGroup[] }
+export function createWorkspaceProposal(workspace: Workspace, candidates: Array<{ id: string; label: string; dependsOn?: string[]; workspace: Workspace }>, input: { id: string; source: OperationSource; label: string; reason?: string; workspaceId?: string; targetDocumentIds?: string[]; resolves?: string[]; at?: number }): WorkspaceProposal;
+export function proposalFreshness(workspace: Workspace, proposal: WorkspaceProposal, at?: number): 'expired' | 'stale' | 'current';
+export function acceptProposalGroups(workspace: Workspace, proposal: WorkspaceProposal, selectedIds: string[], at?: number): Workspace;

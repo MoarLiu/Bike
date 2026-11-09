@@ -8,12 +8,14 @@ const { _electron } = require('playwright');
 const root = path.resolve(new URL('..', import.meta.url).pathname);
 const executablePath = process.env.BIKE_ELECTRON_EXECUTABLE;
 if (!executablePath) throw new Error('BIKE_ELECTRON_EXECUTABLE must point to the packaged app');
+const workspaceVersion = Number(process.env.BIKE_PERFORMANCE_WORKSPACE_VERSION ?? 1);
+assert.ok([1, 3].includes(workspaceVersion), 'performance workspace must use version 1 or 3');
 const userData = await fs.mkdtemp(path.join(os.tmpdir(), 'bike-renderer-measure-'));
 const node = (id, extra = {}) => ({ id, text: `主题 ${id} 搜索标记`, note: '', checked: false, collapsed: false, color: 'plain', children: [], ...extra });
 const document = (id, nodes) => ({ id, title: id, createdAt: '2026-11-09T00:00:00.000Z', updatedAt: '2026-11-09T00:00:00.000Z', nodes });
-const workspace = (documents) => ({ version: 1, activeDocumentId: documents[0].id, documents });
+const workspace = (documents) => ({ version: workspaceVersion, activeDocumentId: documents[0].id, documents });
 const app = await _electron.launch({ executablePath, args: ['--js-flags=--expose-gc'], env: { ...process.env, BIKE_TEST_USER_DATA: userData, VITE_DEV_SERVER_URL: '' } });
-const results = { sample: { libraryDocuments: 100, libraryNodes: 20000, singleDocumentNodes: 20000, edits: 200, outline: 'large document children collapsed; root edited via UI' }, machine: os.cpus()[0]?.model, platform: process.platform, arch: process.arch, searches: {}, edits: [], memory: [], errors: [] };
+const results = { sample: { workspaceVersion, libraryDocuments: 100, libraryNodes: 20000, singleDocumentNodes: 20000, edits: 200, outline: 'large document children collapsed; root edited via UI' }, machine: os.cpus()[0]?.model, platform: process.platform, arch: process.arch, searches: {}, edits: [], memory: [], errors: [] };
 const stats = (times) => { const sorted = [...times].sort((a, b) => a - b); return { medianMs: sorted[Math.floor(sorted.length / 2)], p95Ms: sorted[Math.ceil(sorted.length * .95) - 1], maximumMs: sorted.at(-1) }; };
 try {
   const page = await app.firstWindow();
@@ -22,7 +24,33 @@ try {
   await page.locator('.shell').waitFor();
   const cdp = await page.context().newCDPSession(page);
   const importWorkspace = async (payload) => {
-    await page.locator('input[type=file]').setInputFiles({ name: 'performance.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(payload)) });
+    if (workspaceVersion === 3) {
+      // Each measurement starts from a persisted baseline in this temporary
+      // profile. Replacing two large v3 libraries is a separate operation-budget
+      // scenario and is not part of steady editing or search measurement.
+      await page.evaluate(async (workspace) => {
+        const db = await new Promise((resolve, reject) => {
+          const request = indexedDB.open('bike-db');
+          request.onsuccess = () => resolve(request.result);
+          request.onerror = () => reject(request.error);
+        });
+        try {
+          await new Promise((resolve, reject) => {
+            const tx = db.transaction('workspace-store', 'readwrite');
+            const store = tx.objectStore('workspace-store');
+            store.clear();
+            store.put(workspace, 'workspace');
+            store.put({ revision: 100 }, 'workspace-meta');
+            tx.oncomplete = resolve;
+            tx.onabort = () => reject(tx.error);
+          });
+          localStorage.clear();
+        } finally { db.close(); }
+      }, payload);
+      await page.reload();
+    } else {
+      await page.locator('input[type=file]').setInputFiles({ name: 'performance.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(payload)) });
+    }
     await page.getByRole('button', { name: payload.documents[0].title, exact: true }).waitFor();
   };
   const library = Array.from({ length: 100 }, (_, i) => document(`d${i}`, [node(`root${i}`, {

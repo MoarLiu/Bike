@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:net';
+import { createHash } from 'node:crypto';
 import { createSecretHash, createSessionSecret } from '../server/password.mjs';
 const archive = path.resolve(process.argv[2]);
 const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'bike-deploy-candidate-'));
@@ -65,9 +66,32 @@ try {
   const attachmentRead = await fetch(attachmentUrl, { headers: { Authorization: 'Bearer fixture-device' } });
   const attachmentBody = await attachmentRead.json();
   if (attachmentBody.revision !== 1 || attachmentBody.document.nodes[0].attachmentRefs[0].assetId !== assetId) throw new Error('upgrade or old-client write lost attachment metadata');
+  const currentManifest = await (await fetch(`http://127.0.0.1:${p}/api/sync/manifest`, { headers: attachmentHeaders })).json();
+  if (!currentManifest.capabilities?.includes('node-operations-v2')) throw new Error('node operation capability is unavailable');
+  const enabled = await fetch(`http://127.0.0.1:${p}/api/v2/enable`, { method: 'POST', headers: attachmentHeaders,
+    body: JSON.stringify({ expectedRevision: currentManifest.workspaceRevision }) });
+  if (!enabled.ok || (await enabled.json()).protocol !== 2) throw new Error('node operation protocol upgrade failed');
+  const protectedPut = await fetch(attachmentUrl, { method: 'PUT', headers: attachmentHeaders, body: JSON.stringify({ expectedRevision: 1, document: attached, capabilities: ['attachments-v1'] }) });
+  if (protectedPut.status !== 426) throw new Error('old protocol wrote into an upgraded space');
+  const checkpoint = await fetch(`http://127.0.0.1:${p}/api/v2/checkpoint`, { headers: attachmentHeaders });
+  if (!checkpoint.ok || (await checkpoint.json()).documents.length !== 2) throw new Error('upgraded checkpoint is unavailable');
+  const assetBytes = Buffer.from('deployment-original-attachment');
+  const hash = createHash('sha256').update(assetBytes).digest('hex');
+  const assetUrl = `http://127.0.0.1:${p}/api/v2/assets/${hash}`;
+  const leaseResponse = await fetch(`${assetUrl}/lease`, { method: 'POST', headers: attachmentHeaders,
+    body: JSON.stringify({ byteLength: assetBytes.length, mediaType: 'application/octet-stream' }) });
+  if (!leaseResponse.ok) throw new Error('deployment attachment lease failed');
+  const lease = await leaseResponse.json();
+  const chunk = await fetch(`${assetUrl}/chunks?uploadId=${lease.uploadId}&offset=0`, { method: 'PUT',
+    headers: { Authorization: 'Bearer fixture-device' }, body: assetBytes });
+  if (!chunk.ok) throw new Error('deployment attachment upload failed');
+  const installed = await fetch(`${assetUrl}/finish`, { method: 'POST', headers: attachmentHeaders, body: JSON.stringify({ uploadId: lease.uploadId }) });
+  if (!installed.ok) throw new Error('deployment attachment installation failed');
+  const downloaded = await fetch(assetUrl, { headers: attachmentHeaders });
+  if (!downloaded.ok || !Buffer.from(await downloaded.arrayBuffer()).equals(assetBytes)) throw new Error('deployment attachment bytes changed');
   await stop();
   const modes = {};
   for (const file of ['config/candidate.json', 'data/candidate.sqlite']) modes[file] = (await fs.stat(path.join(directory, file))).mode & 0o777;
   if (Object.values(modes).some((mode) => mode !== 0o600)) throw new Error('private file modes changed');
-  console.log(JSON.stringify({ runtime: process.version, platform: process.platform, checks: ['clean archive extraction', 'production dependency install', 'MCP entry, shared file-lock dependency and stdio smoke', 'real login Secure cookie', 'built Web page', 'Sync upload', 'attachment capability and HTTP 426 for old-client overwrite', 'archive upgrade and restart preserves revision, content and attachment metadata', 'private config/database permissions'], modes }, null, 2));
+  console.log(JSON.stringify({ runtime: process.version, platform: process.platform, checks: ['clean archive extraction', 'production dependency install', 'MCP entry, shared file-lock dependency and stdio smoke', 'real login Secure cookie', 'built Web page', 'Sync upload', 'attachment capability and HTTP 426 for old-client overwrite', 'archive upgrade and restart preserves revision, content and attachment metadata', 'v2 capability, explicit upgrade, checkpoint and old-protocol protection', 'original attachment lease, upload, verified installation and download', 'private config/database permissions'], modes }, null, 2));
 } finally { if (child) { child.kill('SIGTERM'); await new Promise((resolve) => child.once('exit', resolve)); } await fs.rm(directory, { recursive: true, force: true }); }

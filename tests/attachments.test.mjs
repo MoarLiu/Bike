@@ -27,7 +27,7 @@ test("desktop and MCP preserve v1 text and v2 attachment identities", () => {
     assert.deepEqual(loaded.documents[0].attachments, workspace.documents[0].attachments);
     assert.deepEqual(loaded.documents[0].nodes[0].attachmentRefs, workspace.documents[0].nodes[0].attachmentRefs);
     assert.throws(() => migrate({ ...workspace, version: 1 }), /version 2/);
-    assert.throws(() => migrate({ ...workspace, version: 3 }), /版本/);
+    assert.throws(() => migrate({ ...workspace, version: 4 }), /版本/);
     const unknown = document();
     unknown.attachments.version = 99;
     const before = JSON.stringify(unknown);

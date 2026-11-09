@@ -52,6 +52,8 @@ test("attachment backup copies only live and trash roots and verifies metadata",
   assert.equal(manifest.length, 1);
   assert.deepEqual(await createAttachmentService({ directory: destination }).read(asset.assetId, asset.metadata), Buffer.from("a file"));
   await assert.rejects(service.read(asset.assetId, { ...asset.metadata, byteLength: 99 }), /元数据/);
+  assert.ok(await service.transferSource(asset.assetId, asset.metadata));
+  await assert.rejects(service.transferSource(asset.assetId, { ...asset.metadata, mediaType: "application/pdf" }), /格式与清单/);
 });
 
 test("cleanup protects session imports, rechecks new roots, and restores quarantine on read", async (t) => {

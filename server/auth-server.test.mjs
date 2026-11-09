@@ -590,7 +590,7 @@ test("sync API stores documents and rejects stale revisions", async (t) => {
     activeDocumentId: null,
     documentOrder: [],
     documents: [],
-    capabilities: ["attachments-v1"],
+    capabilities: ["attachments-v1", "node-operations-v2"],
   });
 
   const createdResponse = await jsonRequest(baseUrl, "/api/documents/doc-a", {

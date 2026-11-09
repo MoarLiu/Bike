@@ -24,6 +24,7 @@ const { createBackupService, MESSAGES: backupMessages } = require("./backup-serv
 const devServer = resolveDevServer({ env: process.env, isPackaged: app.isPackaged });
 if (devServer.warning) console.warn(devServer.warning);
 const isDev = devServer.isDev;
+if (!process.env.BIKE_TEST_USER_DATA && app.getVersion().includes("-")) app.setPath("userData", path.join(app.getPath("appData"), "Bike-2-preview"));
 if (process.env.BIKE_TEST_USER_DATA) app.setPath("userData", path.resolve(process.env.BIKE_TEST_USER_DATA));
 const ownsInstance = isDev || app.requestSingleInstanceLock();
 if (!ownsInstance) app.quit();
@@ -36,6 +37,8 @@ const legacyWorkspaceFilename = "localoutline-workspace.json";
 let coreModulePromise;
 let backupServicePromise;
 let mainWindow = null;
+let liveService;
+const liveRendererRequests = new Map();
 let quitting = false;
 const aiRequests = new Map();
 const cancelledAiRequests = new Map();
@@ -123,7 +126,7 @@ const backupService = () => {
       writeSettings: (value) => writeFileAtomically(path.join(app.getPath("userData"), "backup-settings.json"), value),
       migrate: migrateWorkspacePayload,
       prepareAssets: async (workspace, directory, revision) => {
-        if (workspace.version !== 2) return;
+        if (workspace.version < 2) return;
         const assets = await attachmentIpc.library().copyWorkspaceAssets(workspace, path.join(directory, "attachments"));
         const manifestDirectory = path.join(directory, "attachment-manifests");
         await fs.mkdir(manifestDirectory, { recursive: true, mode: 0o700 });
@@ -409,6 +412,9 @@ const createAiEndpointUrl = (baseUrl, endpoint) => {
 };
 
 const allowedSyncMethodForPath = (pathname, method) => {
+  if (/^\/api\/v2\/(?:status|checkpoint|events)$/.test(pathname)) return method === "GET";
+  if (/^\/api\/v2\/(?:enable|operations)$/.test(pathname)) return method === "POST";
+  if (/^\/api\/v2\/receipts\/[^/]+$/.test(pathname)) return method === "GET";
   if (pathname === "/api/sync/manifest") return method === "GET" || method === "PATCH";
   if (pathname === "/api/documents") return method === "GET";
   if (/^\/api\/documents\/[^/]+\/operations$/.test(pathname)) {
@@ -433,8 +439,11 @@ const createSyncRequestUrl = (payload) => {
     throw new Error("同步服务地址不应包含用户名、密码、查询参数或锚点");
   }
   const parsedPath = new URL(rawPathname, "http://bike.local");
-  if (parsedPath.origin !== "http://bike.local" || parsedPath.search || parsedPath.hash) {
+  if (parsedPath.origin !== "http://bike.local" || parsedPath.hash || (parsedPath.search && !/^\/api\/v2\/(?:events|checkpoint)$/.test(parsedPath.pathname))) {
     throw new Error("同步 API 路径无效");
+  }
+  for (const [key, value] of parsedPath.searchParams) {
+    if (!["after", "limit", "expectedCursor"].includes(key) || !/^\d{1,16}$/.test(value)) throw new Error("同步分页参数无效");
   }
   const pathname = parsedPath.pathname;
   if (!allowedSyncMethodForPath(pathname, method)) {
@@ -444,7 +453,7 @@ const createSyncRequestUrl = (payload) => {
     method,
     token: typeof payload.token === "string" ? payload.token.trim() : "",
     body: "body" in payload ? payload.body : undefined,
-    url: `${baseUrl.toString().replace(/\/+$/, "")}${pathname}`,
+    url: `${baseUrl.toString().replace(/\/+$/, "")}${pathname}${parsedPath.search}`,
   };
 };
 
@@ -511,6 +520,7 @@ app.whenReady().then(() => {
 });
 
 app.on("before-quit", () => {
+  void liveService?.stop();
   quitting = true;
 });
 
@@ -531,6 +541,43 @@ const registerIpc = (channel, handler) => ipcMain.handle(channel, async (event, 
   if (!isTrustedIpcSender(event, mainWindow, isAllowedAppUrl)) return { ok: false, status: 403, code: "untrusted-sender", error: "请求来源无效，请重新打开 Bike" };
   return handler(event, payload);
 });
+const getLiveService = () => {
+  if (liveService) return liveService;
+  const { createLiveMcpService } = require("./live-mcp-service.cjs");
+  liveService = createLiveMcpService({ directory: app.getPath("userData"),
+    handle: (request) => new Promise((resolve, reject) => {
+      const owner = mainWindow;
+      if (!owner || owner.webContents.isDestroyed() || owner.webContents.isLoadingMainFrame()) { reject(new Error("Bike 窗口未就绪")); return; }
+      if (liveRendererRequests.size >= 16) { reject(new Error("Live 请求繁忙，请稍后重试")); return; }
+      const id = crypto.randomUUID();
+      const timer = setTimeout(() => { liveRendererRequests.delete(id); reject(new Error("读取屏障超时，请检查应用保存状态")); }, 20_000);
+      liveRendererRequests.set(id, { owner, resolve, reject, timer });
+      owner.webContents.send("live-mcp-request", { id, ...request });
+    }),
+    onRevoke: () => {
+      for (const request of liveRendererRequests.values()) { clearTimeout(request.timer); request.reject(new Error("Live 授权已失效")); }
+      liveRendererRequests.clear();
+      if (mainWindow && !mainWindow.webContents.isDestroyed()) mainWindow.webContents.send("live-mcp-revoked");
+    },
+  });
+  return liveService;
+};
+ipcMain.on("live-mcp-response", (event, payload) => {
+  const request = liveRendererRequests.get(payload?.id);
+  if (!request || request.owner !== mainWindow || !isTrustedIpcSender(event, request.owner, isAllowedAppUrl)) return;
+  clearTimeout(request.timer); liveRendererRequests.delete(payload.id);
+  if (payload.ok) request.resolve(payload.result); else request.reject(new Error(String(payload.error ?? "Live 请求失败").slice(0, 500)));
+});
+registerIpc("live-mcp-state", async () => ({ ...getLiveService().state(), command: process.execPath, args: app.isPackaged ? ["--mcp-live"] : [app.getAppPath(), "--mcp-live"] }));
+registerIpc("live-mcp-start", async (_event, payload) => getLiveService().start(payload ?? {}));
+registerIpc("live-mcp-stop", async () => getLiveService().stop());
+app.on("web-contents-created", (_event, contents) => {
+  contents.on("did-start-navigation", (_event, _url, inPlace, isMainFrame) => {
+    if (isMainFrame && !inPlace && mainWindow?.webContents === contents) void liveService?.stop();
+  });
+  contents.on("destroyed", () => { if (mainWindow?.webContents === contents) void liveService?.stop(); });
+});
+
 const attachmentIpc = installAttachmentIpc({ registerIpc, app, dialog, nativeImage, shell, getWindow: () => mainWindow, migrate: migrateWorkspacePayload });
 const savedNetworkConfig = async (kind) => {
   const { AI_CONFIG_KEY, LEGACY_AI_CONFIG_KEY } = await import("../shared/bike-settings.mjs");
@@ -646,7 +693,7 @@ registerIpc("load-icloud-backup", async () => {
       .catch(() => legacyPath);
     const raw = await fs.readFile(latestPath, "utf8");
     const payload = await migrateWorkspacePayload(JSON.parse(raw));
-    if (payload.version === 2) {
+    if (payload.version >= 2) {
       const cloudAssets = createAttachmentService({ directory: path.join(path.dirname(latestPath), "attachments") });
       await cloudAssets.copyWorkspaceAssets(payload, path.join(app.getPath("userData"), "attachments"));
     }
@@ -658,6 +705,34 @@ registerIpc("load-icloud-backup", async () => {
     };
   }
 });
+
+let attachmentSync;
+registerIpc("attachment-sync", async (_event, payload) => {
+  try {
+    const config = await savedNetworkConfig("sync");
+    if (!config?.token) throw new Error("请先保存同步服务地址和设备密钥");
+    attachmentSync ??= require("./attachment-sync.cjs").createAttachmentSync({ library: attachmentIpc.library(),
+      directory: path.join(app.getPath("userData"), "attachment-transfers"), onProgress: (progress) => {
+        if (mainWindow && !mainWindow.webContents.isDestroyed()) mainWindow.webContents.send("attachment-sync-progress", progress);
+      } });
+    const { MAX_IMPORT_BYTES } = await import("../shared/bike-attachments.mjs");
+    if (!Array.isArray(payload?.assets)) throw new Error("附件清单无效");
+    const batches = []; let batch = [], bytes = 0;
+    for (const item of payload.assets) {
+      if (batch.length && (batch.length >= 1000 || bytes + item.metadata.byteLength > MAX_IMPORT_BYTES)) { batches.push(batch); batch = []; bytes = 0; }
+      batch.push(item); bytes += item.metadata.byteLength;
+    }
+    if (batch.length) batches.push(batch);
+    const result = { complete: true, completed: 0, total: payload.assets.length, errors: [] };
+    for (const assets of batches) {
+      const current = await attachmentSync.run({ assets, config });
+      result.completed += current.completed; result.errors.push(...current.errors);
+      if (!current.complete) { result.complete = false; break; }
+    }
+    return { ok: true, ...result };
+  } catch (error) { return { ok: false, error: error.message }; }
+});
+registerIpc("attachment-sync-cancel", async () => { attachmentSync?.cancel(); return { ok: true }; });
 
 registerIpc("check-for-updates", async () => showUpdateDialog());
 
@@ -672,8 +747,9 @@ registerIpc("invoke-sync-request", async (_event, payload) => {
       ...(request.body === undefined ? {} : { "Content-Type": "application/json" }),
       ...(request.token ? { Authorization: `Bearer ${request.token}` } : {}),
     };
+    const { OPERATION_LIMITS } = await import("../shared/bike-operations.mjs");
     const response = await requestJson({ url: request.url, method: request.method, headers, body: request.body,
-      timeoutMs: Math.max(1, deadline - Date.now()), maxBytes: 80 * 1024 * 1024, requireJson: true });
+      timeoutMs: Math.max(1, deadline - Date.now()), maxBytes: request.url.includes("/api/v2/checkpoint") ? OPERATION_LIMITS.checkpointBytes : 80 * 1024 * 1024, requireJson: true });
     const data = response.data;
     if (!response.ok) {
       return {

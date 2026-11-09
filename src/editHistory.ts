@@ -1,3 +1,4 @@
+import { compensateWorkspaceChange, initialPositions } from "../shared/bike-operations.mjs";
 import type { OutlineDocument, Workspace } from "./types";
 import { sameDocumentContent } from "./documentSignature";
 import { withHistoryBudget } from "./historyBudget";
@@ -19,6 +20,7 @@ export type HistoryEntry = {
   label: string;
   at: number;
   changes: HistoryDocumentChange[];
+  creations?: Array<{ document: OutlineDocument; index: number }>;
   beforeSelection: HistorySelection;
   afterSelection: HistorySelection;
 };
@@ -87,10 +89,13 @@ export const recordChange = ({
   at = Date.now(),
 }: RecordChangeInput): EditHistory => {
   const changes = documentChanges(before, after);
-  if (!changes.length) return history;
+  const beforeIds = new Set(before.documents.map((document) => document.id));
+  const creations = after.documents.flatMap((document, index) => beforeIds.has(document.id) ? [] : [{ document, index }]);
+  if (!changes.length && !creations.length) return history;
 
   const previous = history.past[history.past.length - 1];
   const canMerge =
+    creations.length === 0 && !previous?.creations?.length &&
     group !== null &&
     Boolean(previous) &&
     history.future.length === 0 &&
@@ -132,6 +137,7 @@ export const recordChange = ({
         label,
         at,
         changes,
+        ...(creations.length ? { creations } : {}),
         beforeSelection: selection,
         afterSelection,
       },
@@ -153,6 +159,26 @@ const applyEntry = (
   const currentById = new Map(
     workspace.documents.map((document) => [document.id, document]),
   );
+  const creations = entry.creations ?? [];
+  for (const { document } of creations) {
+    const current = currentById.get(document.id);
+    if (direction === "undo" ? !current || !sameDocumentContent(current, document) : Boolean(current)) return { status: "stale", label: entry.label };
+  }
+  if (direction === "undo" && workspace.documents.length <= creations.length) return { status: "stale", label: entry.label };
+  if (workspace.version === 3 && entry.changes.length) {
+    const before = { ...workspace, documents: entry.changes.map((change) => change.before) };
+    const after = { ...workspace, documents: entry.changes.map((change) => change.after) };
+    const expected = direction === "undo" ? after : before;
+    const target = direction === "undo" ? before : after;
+    const compensated = compensateWorkspaceChange(workspace, target, expected, {
+      id: `history-${Date.now()}`, actorId: "history", clock: 1, positions: initialPositions(expected), source: { kind: direction, label: entry.label }, createdAt: now,
+    });
+    if (compensated.status !== "applied") return { status: "stale", label: entry.label };
+    let documents = compensated.workspace.documents;
+    if (direction === "undo") documents = documents.filter((document) => !creations.some((item) => item.document.id === document.id));
+    else for (const item of creations) { documents = [...documents]; documents.splice(item.index, 0, item.document); }
+    return { status: "applied", workspace: { ...compensated.workspace, documents }, entry };
+  }
   for (const change of entry.changes) {
     const current = currentById.get(change.id);
     const expected = direction === "undo" ? change.after : change.before;
@@ -171,9 +197,9 @@ const applyEntry = (
       }];
     }),
   );
-  const documents = workspace.documents.map((document) =>
-    replacementById.get(document.id) ?? document,
-  );
+  let documents = workspace.documents.map((document) => replacementById.get(document.id) ?? document);
+  if (direction === "undo") documents = documents.filter((document) => !creations.some((item) => item.document.id === document.id));
+  else for (const item of creations) { documents = [...documents]; documents.splice(item.index, 0, item.document); }
 
   return {
     status: "applied",

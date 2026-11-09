@@ -14,7 +14,12 @@ try {
   const modules = (await fs.readdir(path.join(root, 'shared'))).filter((file) => file.endsWith('.mjs'));
   for (const file of modules) await fs.copyFile(path.join(root, 'shared', file), path.join(directory, 'shared', file));
   const checks = [];
+  // Dictionary and identity-return APIs use caller-owned schemas and are
+  // covered by the operation/proposal replay tests rather than key inference.
   const api = {
+    'bike-operations': ['createWorkspaceOperation', 'applyWorkspaceOperation', 'invertWorkspaceOperation'],
+    'bike-proposals': ['createWorkspaceProposal'],
+    'bike-replica': ['createReplicaState', 'recordReplicaCommit', 'projectReplicaWorkspace'],
     'bike-knowledge': ['insertLinkAtQuery', 'buildKnowledgeIndex', 'searchKnowledge', 'suggestLinkTargets', 'renameTarget', 'copiedKnowledgeFragment', 'moveSubtreeConnections', 'remapCollidingIds', 'attachReference', 'finalizeMarkdownExport', 'expandAncestors', 'createBackupSchedule', 'reduceBackupSchedule'],
     'bike-markdown': ['markdownSourceMap', 'markdownTableCells', 'parseMarkdownToNodes', 'markdownLinkOrigins'],
     'bike-limits': ['assertTreeBudget', 'assertValueBudget'],

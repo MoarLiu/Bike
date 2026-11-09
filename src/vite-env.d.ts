@@ -12,7 +12,18 @@ interface BikeUpdateState {
   error?: string;
 }
 
+interface LiveMcpGrant { scope: "document" | "workspace"; documentIds: string[]; writable: boolean }
+interface LiveMcpState { command?: string; args?: string[]; enabled: boolean; writable: boolean; documentIds: string[]; discoveryPath: string | null }
+interface LiveMcpRequest { method: "snapshot" | "proposal" | "status"; grant: LiveMcpGrant; session: { id: string; clientName: string; connectedAt: string }; payload: { requestId?: string; clientDigest?: string; expectedRevision?: string; workspaceId?: string; candidate?: unknown; dryRun?: boolean; operation?: string; reason?: string } }
 interface BikeDesktopBridge {
+  syncAttachments?: (assets: Array<{ assetId: string; metadata: import("../shared/bike-attachments.mjs").AttachmentMetadata }>) => Promise<{ ok: boolean; complete?: boolean; completed?: number; total?: number; errors?: Array<{ assetId: string; message: string }>; error?: string }>;
+  cancelAttachmentSync?: () => Promise<unknown>;
+  onAttachmentSyncProgress?: (callback: (progress: { assetId: string; phase: string; transferred: number; byteLength: number }) => void) => () => void;
+  getLiveMcpState?: () => Promise<LiveMcpState>;
+  startLiveMcp?: (grant: LiveMcpGrant) => Promise<LiveMcpState>;
+  stopLiveMcp?: () => Promise<LiveMcpState>;
+  onLiveMcpRequest?: (callback: (request: LiveMcpRequest) => Promise<unknown>) => () => void;
+  onLiveMcpRevoke?: (callback: () => void) => () => void;
   openAttachment?: (assetId: string, name: string) => Promise<{ ok: boolean; error?: string }>;
   scanAttachments?: (protectedAssets: string[]) => Promise<{ ok: boolean; error?: string; ticket?: string; candidates?: Array<{ assetId: string; byteLength: number }>; byteLength?: number; protectedCount?: number }>;
   cleanAttachments?: (protectedAssets: string[], ticket: string) => Promise<{ ok: boolean; error?: string; moved?: number; removed?: number }>;

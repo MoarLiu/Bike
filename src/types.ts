@@ -51,7 +51,7 @@ export interface TrashEntry {
 }
 
 export interface Workspace {
-  version: 1 | 2;
+  version: 1 | 2 | 3;
   activeDocumentId: string;
   documents: OutlineDocument[];
   trash?: TrashEntry[];

@@ -40,6 +40,6 @@ export function validateAttachmentMetadata(metadata: unknown): AttachmentMetadat
 export function collectAttachmentRefs(nodes: AttachmentNode[]): AttachmentRef[];
 export function validateDocumentAttachments(document: AttachmentDocument): void;
 export function workspaceAttachmentAssets(workspace: AttachmentWorkspace): Array<{ assetId: string; metadata: AttachmentMetadata }>;
-export function workspaceFormatVersion(workspace: AttachmentWorkspace): 1 | 2;
+export function workspaceFormatVersion(workspace: AttachmentWorkspace): 1 | 2 | 3;
 export function mergeAttachmentMetadata<T extends AttachmentDocument>(target: T, source: AttachmentDocument | undefined): T;
 export function isPreviewableImage(metadata: AttachmentMetadata | undefined): boolean;

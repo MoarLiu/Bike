@@ -1,8 +1,13 @@
 import type { Workspace } from "./types";
+import { canonicalJson } from "../shared/bike-operations.mjs";
+import type { OperationSource } from "../shared/bike-operations.mjs";
+import { createReplicaState, recordReplicaCommit } from "../shared/bike-replica.mjs";
+import type { ReplicaState, OperationReceipt } from "../shared/bike-replica.mjs";
 import { uuid } from "./id";
 import { migrateWorkspace } from "./migrations";
 import { assertWorkspaceBudget } from "../shared/bike-limits.mjs";
 import { sha256Hex } from "./knowledge";
+import { sameWorkspaceContent } from "./documentSignature";
 import { workspaceAttachmentAssets, workspaceFormatVersion } from "../shared/bike-attachments.mjs";
 
 const DB_NAME = "bike-db";
@@ -10,6 +15,28 @@ const LEGACY_DB_NAME = "local-outline-db";
 const STORE_NAME = "workspace-store";
 const WORKSPACE_KEY = "workspace";
 const WORKSPACE_META_KEY = "workspace-meta";
+const REPLICA_KEY = "replica-state-v2";
+const PRE_OPERATION_KEY = "pre-operation-workspace";
+export type WorkspaceCommitOptions = {
+  overwrite?: boolean;
+  requestId?: string;
+  source?: OperationSource;
+  reason?: string;
+  acceptedGroups?: string[];
+  resolves?: string[];
+  resolutionBaselines?: Record<string, string | null>;
+  clientDigest?: string;
+  candidateDigest?: string;
+  origin?: Record<string, string>;
+  requireIndexedDB?: boolean;
+  expectedWorkspace?: Workspace;
+  replicaUpdate?: ReplicaState;
+};
+const commitContexts = new WeakMap<Workspace, Pick<WorkspaceCommitOptions, "source" | "reason" | "acceptedGroups" | "requestId">>();
+export const markWorkspaceOperation = (workspace: Workspace, context: Pick<WorkspaceCommitOptions, "source" | "reason" | "acceptedGroups" | "requestId">) => {
+  commitContexts.set(workspace, context);
+  return workspace;
+};
 const PRE_ATTACHMENT_KEY = "workspace-before-attachments-v1";
 const PRE_ATTACHMENT_FALLBACK_KEY = "bike-workspace-before-attachments-v1";
 const FALLBACK_KEY = "bike-workspace";
@@ -25,7 +52,7 @@ export type WorkspaceLoadResult =
   | { status: "error"; error: Error; source?: "indexeddb" | "localstorage" };
 
 export type WorkspaceSaveResult =
-  | { ok: true; target: "indexeddb" | "localstorage" }
+  | { ok: true; target: "indexeddb" | "localstorage"; receipt?: OperationReceipt; replayed?: boolean }
   | { ok: false; error: Error; conflict?: boolean };
 
 export type WorkspaceRecoverySnapshot = {
@@ -67,7 +94,8 @@ type ReadResult =
   | { status: "error"; error: Error; source: "indexeddb" | "localstorage" };
 
 type WriteOutcome =
-  | { status: "saved"; revision: number }
+  | { status: "saved"; revision: number; receipt?: OperationReceipt }
+  | { status: "replayed"; revision: number; receipt: OperationReceipt }
   | { status: "unchanged"; revision: number }
   | { status: "conflict" }
   | { status: "superseded" };
@@ -130,6 +158,8 @@ const workspaceSignature = (workspace: Workspace) => {
   workspaceSignatures.set(workspace, signature);
   return signature;
 };
+
+const equalStoredTrash = (left: Workspace, right: Workspace) => canonicalJson(left.trash ?? []) === canonicalJson(right.trash ?? []);
 
 const sameWorkspace = (left: Workspace, right: Workspace) =>
   workspaceSignature(left) === workspaceSignature(right);
@@ -328,7 +358,8 @@ export const attachmentRecoveryRoots = async (): Promise<Workspace[]> => {
   const result = readFallbackSnapshots();
   if (result.error) throw result.error;
   const original = await loadPreAttachmentWorkspace();
-  return [...result.snapshots.map((snapshot) => snapshot.workspace), ...(original ? [original] : [])];
+  const preOperation = await loadPreOperationWorkspace();
+  return [...result.snapshots.map((snapshot) => snapshot.workspace), ...(original ? [original] : []), ...(preOperation ? [preOperation] : [])];
 };
 
 const removeFallbackSnapshot = (snapshot: FallbackSnapshot) => {
@@ -567,9 +598,11 @@ const writeWorkspace = async (
   epoch: number,
   sequence: number,
   saveId: string,
+  options: WorkspaceCommitOptions,
 ): Promise<WorkspaceSaveResult> => {
   let db: IDBDatabase | null = null;
   let outcome: WriteOutcome;
+  let requiresAtomic = workspace.version === 3 || options.requireIndexedDB === true || persistedWorkspace?.version === 3;
   try {
     const activeDb = await openDb();
     db = activeDb;
@@ -591,33 +624,56 @@ const writeWorkspace = async (
           return;
         }
         const stored = parseStoredMeta(metaRequest.result);
-        if (!overwrite && stored.revision !== (knownRevision ?? 0)) {
-          result = { status: "conflict" };
-          tx.abort();
-          return;
-        }
-        if (!overwrite && workspace === persistedWorkspace) {
-          result = { status: "unchanged", revision: stored.revision };
-          return;
-        }
-        const revision = stored.revision + 1;
-        const commit = (previous?: Workspace) => {
+        const previousRequest = store.get(WORKSPACE_KEY);
+        const replicaRequest = store.get(REPLICA_KEY);
+        replicaRequest.onsuccess = () => {
           try {
-            if (previous?.version === 1 && workspace.version === 2) {
-              store.put(previous, PRE_ATTACHMENT_KEY);
+            const previous = previousRequest.result as Workspace | undefined;
+            if (previous?.version === 3) requiresAtomic = true;
+            const inputDigest = sha256Hex(canonicalJson({ workspace, source: options.source, reason: options.reason, acceptedGroups: options.acceptedGroups, resolves: options.resolves, resolutionBaselines: options.resolutionBaselines, candidateDigest: options.candidateDigest }));
+            const existingReplica = replicaRequest.result as ReplicaState | undefined;
+            const priorReceipt = existingReplica && Object.prototype.hasOwnProperty.call(existingReplica.receipts, saveId) ? existingReplica.receipts[saveId] : undefined;
+            if (priorReceipt) {
+              if (priorReceipt.digest !== inputDigest) throw new Error("相同请求身份携带了不同内容");
+              result = { status: "replayed", revision: stored.revision, receipt: priorReceipt };
+              return;
             }
+            if (!overwrite && stored.revision !== (knownRevision ?? 0)) {
+              result = { status: "conflict" }; tx.abort(); return;
+            }
+            if (options.expectedWorkspace && (!previous || previous.version !== options.expectedWorkspace.version ||
+                !sameWorkspaceContent(previous, options.expectedWorkspace) || !equalStoredTrash(previous, options.expectedWorkspace)))
+              throw new Error("提交基线已变化，提案未应用，请重新比较");
+            if (!overwrite && workspace === persistedWorkspace && !options.replicaUpdate && (workspace.version !== 3 || existingReplica)) {
+              result = { status: "unchanged", revision: stored.revision }; return;
+            }
+            const revision = stored.revision + 1;
+            let receipt: OperationReceipt | undefined;
+            if (workspace.version === 3) {
+              const base = previous ? (existingReplica ? previous : migrateWorkspace(previous)) : { ...workspace, documents: [] };
+              if (previous && previous.version !== 3) store.put(previous, PRE_OPERATION_KEY);
+              const replica = existingReplica ?? createReplicaState(base, uuid());
+              if (options.replicaUpdate) {
+                if (options.replicaUpdate.actorId !== replica.actorId || options.replicaUpdate.protocol !== 2 || options.replicaUpdate.cursor < replica.cursor || (options.replicaUpdate.generation ?? 0) !== (replica.generation ?? 0))
+                  throw new Error("远端接收状态与本机副本不匹配");
+                store.put({ ...options.replicaUpdate, generation: (replica.generation ?? 0) + 1 }, REPLICA_KEY);
+              } else {
+                const committed = recordReplicaCommit(replica, base, workspace, {
+                  requestId: saveId, digest: inputDigest, source: options.source ?? { kind: "user", label: "编辑" },
+                  reason: options.reason, acceptedGroups: options.acceptedGroups, clientDigest: options.clientDigest, candidateDigest: options.candidateDigest, origin: options.origin, resolves: options.resolves, resolutionBaselines: options.resolutionBaselines, at: new Date().toISOString(),
+                });
+                receipt = committed.receipt;
+                store.put(committed.replica, REPLICA_KEY);
+              }
+            } else if (previous?.version === 3) {
+              throw new Error("2.0 工作区需要通过降级导出建立副本，不能覆盖原工作区");
+            }
+            if (previous?.version === 1 && workspace.version === 2) store.put(previous, PRE_ATTACHMENT_KEY);
             store.put(workspace, WORKSPACE_KEY);
             store.put({ savedAt: new Date().toISOString(), revision, writer: pageId, saveId }, WORKSPACE_META_KEY);
-            result = { status: "saved", revision };
-          } catch (error) {
-            failure = error;
-            tx.abort();
-          }
+            result = { status: "saved", revision, ...(receipt ? { receipt } : {}) };
+          } catch (error) { failure = error; tx.abort(); }
         };
-        if (workspace.version === 2) {
-          const previousRequest = store.get(WORKSPACE_KEY);
-          previousRequest.onsuccess = () => commit(previousRequest.result);
-        } else commit();
       };
       tx.oncomplete = () => {
         if (result) resolve(result);
@@ -635,6 +691,10 @@ const writeWorkspace = async (
     // A newer edit was snapshotted while this older save was waiting. Keep it.
     if (ownFallback && ownFallbackSequence > sequence) {
       return { ok: false, conflict: true, error: new Error(SUPERSEDED_MESSAGE) };
+    }
+    if (requiresAtomic) {
+      if (!options.expectedWorkspace && !options.replicaUpdate) writeFallback(workspace, sequence);
+      return { ok: false, error: new Error(`操作未提交，编辑副本已尝试保留：${toError(indexedDbError).message}`) };
     }
     const fallback = writeFallback(workspace, sequence);
     if (fallback.ok) return fallback;
@@ -659,6 +719,7 @@ const writeWorkspace = async (
     });
     return { ok: false, conflict: true, error: new Error(CONFLICT_MESSAGE) };
   }
+  if (outcome.status === "replayed") return { ok: true, target: "indexeddb", receipt: outcome.receipt, replayed: true };
   if (outcome.status === "saved") {
     knownRevision = outcome.revision;
     persistedWorkspace = workspace;
@@ -666,7 +727,7 @@ const writeWorkspace = async (
     broadcastSaved(outcome.revision);
   }
   savedRevisions.set(workspace, outcome.revision);
-  return { ok: true, target: "indexeddb" };
+  return { ok: true, target: "indexeddb", ...("receipt" in outcome && outcome.receipt ? { receipt: outcome.receipt } : {}) };
 };
 
 // Saves are serialized per page. A save only succeeds while IndexedDB still
@@ -675,7 +736,7 @@ const writeWorkspace = async (
 // for an explicit user decision.
 export const saveWorkspace = (
   workspace: Workspace,
-  options: { overwrite?: boolean } = {},
+  options: WorkspaceCommitOptions = {},
 ): Promise<WorkspaceSaveResult> => {
   try {
     assertWorkspaceBudget(workspace);
@@ -685,13 +746,14 @@ export const saveWorkspace = (
   catch (error) { return Promise.resolve({ ok: false, error: toError(error) }); }
   const epoch = adoptEpoch;
   const sequence = ++saveSequence;
-  const saveId = uuid();
+  options = { ...commitContexts.get(workspace), ...options };
+  const saveId = options.requestId ?? uuid();
   pendingSaveIds.add(saveId);
   const run = (): Promise<WorkspaceSaveResult> => {
     if (epoch !== adoptEpoch) {
       return Promise.resolve({ ok: false, conflict: true, error: new Error(SUPERSEDED_MESSAGE) });
     }
-    return writeWorkspace(workspace, options.overwrite === true, epoch, sequence, saveId);
+    return writeWorkspace(workspace, options.overwrite === true, epoch, sequence, saveId, options);
   };
   const result = writeQueue.then(run, run).finally(() => pendingSaveIds.delete(saveId));
   writeQueue = result;
@@ -752,4 +814,37 @@ export const loadPreAttachmentWorkspace = async (): Promise<Workspace | null> =>
   const workspace = migrateWorkspace(stored);
   if (workspace.version !== 1) throw new Error("升级前副本格式无效，原记录已保留");
   return workspace;
+};
+
+export const readReplicaState = async (): Promise<ReplicaState | null> => {
+  await settledWrites();
+  const db = await openDb();
+  try {
+    return await new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE_NAME, "readonly");
+      const request = tx.objectStore(STORE_NAME).get(REPLICA_KEY);
+      tx.oncomplete = () => {
+        const replica = request.result as ReplicaState | undefined;
+        if (replica && replica.protocol !== 2) reject(new Error("本机操作协议暂不支持"));
+        else resolve(replica ?? null);
+      };
+      tx.onabort = () => reject(tx.error ?? new Error("操作记录读取失败"));
+      tx.onerror = () => reject(tx.error ?? request.error);
+    });
+  } finally { db.close(); }
+};
+export const queryOperationReceipt = async (requestId: string) => {
+  const receipts = (await readReplicaState())?.receipts;
+  return receipts && Object.prototype.hasOwnProperty.call(receipts, requestId) ? receipts[requestId] : null;
+};
+export const loadPreOperationWorkspace = async (): Promise<Workspace | null> => {
+  const db = await openDb();
+  try {
+    return await new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE_NAME, "readonly");
+      const request = tx.objectStore(STORE_NAME).get(PRE_OPERATION_KEY);
+      tx.oncomplete = () => resolve(request.result ? migrateWorkspace(request.result) : null);
+      tx.onabort = () => reject(tx.error);
+    });
+  } finally { db.close(); }
 };

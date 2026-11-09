@@ -123,6 +123,10 @@ export const handleSyncError = (response, error, headers = {}) => {
     }, headers);
     return true;
   }
+  if (Number.isInteger(error?.statusCode) && error.statusCode >= 400 && error.statusCode <= 599) {
+    sendJson(response, error.statusCode, { error: error.code ?? "operation_error", message: error.message }, headers);
+    return true;
+  }
   return false;
 };
 
@@ -139,6 +143,29 @@ export const handleSyncApi = async (
     pathname = decodeURIComponent(url.pathname);
   } catch {
     sendJson(response, 400, { error: "invalid_request", message: "URL 编码无效" }, headers);
+    return;
+  }
+
+  if (pathname.startsWith("/api/v2/assets/")) {
+    const { handleAssetApi } = await import("./asset-api.mjs");
+    if (await handleAssetApi(request, response, syncStore.assets, { headers })) return;
+  }
+  if (pathname.startsWith("/api/v2/")) {
+    try {
+      const operations = syncStore.operations;
+      const query = Object.fromEntries(url.searchParams);
+      let result;
+      if (pathname === "/api/v2/status" && request.method === "GET") result = operations.status();
+      else if (pathname === "/api/v2/enable" && request.method === "POST") result = operations.enable(await readJsonRequestBody(request, config.sync.maxBodyBytes));
+      else if (pathname === "/api/v2/checkpoint" && request.method === "GET") result = operations.checkpoint(query);
+      else if (pathname === "/api/v2/events" && request.method === "GET") result = operations.events(query);
+      else if (pathname === "/api/v2/operations" && request.method === "POST") result = operations.submit(await readJsonRequestBody(request, 4 * 1024 * 1024));
+      else if (pathname.startsWith("/api/v2/receipts/") && request.method === "GET") {
+        result = operations.receipt(pathname.slice("/api/v2/receipts/".length));
+        if (!result) { sendJson(response, 404, { error: "receipt_not_found", message: "尚未提交此操作" }, headers); return; }
+      } else { sendJson(response, 404, { error: "not_found", message: "协议路由不存在" }, headers); return; }
+      sendJson(response, 200, result, headers);
+    } catch (error) { if (!handleSyncError(response, error, headers)) throw error; }
     return;
   }
 

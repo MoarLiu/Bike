@@ -19,7 +19,7 @@ export const SERVER_NAME = "bike";
 export const SERVER_DISPLAY_NAME = "Bike MCP";
 export const DEFAULT_DOCUMENT_TITLE = "未命名文档";
 export const DEFAULT_NODE_TEXT = "未命名主题";
-export const CURRENT_WORKSPACE_VERSION = 2;
+export const CURRENT_WORKSPACE_VERSION = 3;
 
 const VALID_COLORS = new Set(["plain", "blue", "green", "amber", "rose"]);
 const DEFAULT_LIMIT = 20;
@@ -196,7 +196,7 @@ export const migrateWorkspace = (rawWorkspace) => {
   if (!isRecord(rawWorkspace) || !Array.isArray(rawWorkspace.documents)) {
     throw new Error("导入文件不是有效工作区");
   }
-  if (rawWorkspace.version !== undefined && rawWorkspace.version !== 1 && rawWorkspace.version !== CURRENT_WORKSPACE_VERSION) throw new Error("工作区版本暂不支持，原文件已保留");
+  if (rawWorkspace.version !== undefined && rawWorkspace.version !== 1 && rawWorkspace.version !== 2 && rawWorkspace.version !== CURRENT_WORKSPACE_VERSION) throw new Error("工作区版本暂不支持，原文件已保留");
 
   const usedIds = new Set();
   const documents = rawWorkspace.documents.map((document, index) => {
@@ -217,7 +217,7 @@ export const migrateWorkspace = (rawWorkspace) => {
 
   const workspace = {
     ...rawWorkspace,
-    version: rawWorkspace.version === 2 ? 2 : 1,
+    version: rawWorkspace.version === 3 ? 3 : rawWorkspace.version === 2 ? 2 : 1,
     activeDocumentId,
     documents,
   };
@@ -682,6 +682,7 @@ export class WorkspaceStore {
     if (this.config.mode !== "write") {
       throw new Error("Bike MCP 当前为 readonly 模式，拒绝真实写入");
     }
+    if (current.workspace.version === 3) throw new Error("2.0 工作区仅支持 Live 确认写入，File 模式只读");
     const latestRaw = await this.assertCurrentRevision(current.revision);
 
     const backup = await this.writeBackupSnapshot({
@@ -1204,6 +1205,8 @@ export const createDocumentForMcp = async (store, args = {}) =>
   store.mutate({
     operation: "create_document",
     expectedRevision: args.expectedRevision,
+    requestId: args.requestId,
+    command: args,
     dryRun: args.dryRun,
     reason: args.reason,
     writeTimestamp: args.writeTimestamp,
@@ -1256,6 +1259,8 @@ export const updateDocumentTitleForMcp = async (store, args = {}) =>
   store.mutate({
     operation: "update_document_title",
     expectedRevision: args.expectedRevision,
+    requestId: args.requestId,
+    command: args,
     dryRun: args.dryRun,
     reason: args.reason,
     writeTimestamp: args.writeTimestamp,
@@ -1295,6 +1300,8 @@ export const createNodeForMcp = async (store, args = {}) =>
   store.mutate({
     operation: "create_node",
     expectedRevision: args.expectedRevision,
+    requestId: args.requestId,
+    command: args,
     dryRun: args.dryRun,
     reason: args.reason,
     writeTimestamp: args.writeTimestamp,
@@ -1351,6 +1358,8 @@ export const appendChildrenForMcp = async (store, args = {}) =>
   store.mutate({
     operation: "append_children",
     expectedRevision: args.expectedRevision,
+    requestId: args.requestId,
+    command: args,
     dryRun: args.dryRun,
     reason: args.reason,
     writeTimestamp: args.writeTimestamp,
@@ -1409,6 +1418,8 @@ export const updateNodeForMcp = async (store, args = {}) =>
   store.mutate({
     operation: "update_node",
     expectedRevision: args.expectedRevision,
+    requestId: args.requestId,
+    command: args,
     dryRun: args.dryRun,
     reason: args.reason,
     writeTimestamp: args.writeTimestamp,
@@ -1474,6 +1485,8 @@ export const setNodeCheckedForMcp = async (store, args = {}) =>
   store.mutate({
     operation: "set_node_checked",
     expectedRevision: args.expectedRevision,
+    requestId: args.requestId,
+    command: args,
     dryRun: args.dryRun,
     reason: args.reason,
     writeTimestamp: args.writeTimestamp,
@@ -1515,6 +1528,8 @@ export const moveNodeForMcp = async (store, args = {}) =>
   store.mutate({
     operation: "move_node",
     expectedRevision: args.expectedRevision,
+    requestId: args.requestId,
+    command: args,
     dryRun: args.dryRun,
     reason: args.reason,
     writeTimestamp: args.writeTimestamp,
@@ -1590,6 +1605,8 @@ export const deleteNodeForMcp = async (store, args = {}) =>
   store.mutate({
     operation: "delete_node",
     expectedRevision: args.expectedRevision,
+    requestId: args.requestId,
+    command: args,
     dryRun: args.dryRun,
     reason: args.reason,
     writeTimestamp: args.writeTimestamp,

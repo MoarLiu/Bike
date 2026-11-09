@@ -9,8 +9,9 @@ import { PDFDocument, PDFRawStream, PDFName } from "pdf-lib";
 import { createAttachmentService } from "../electron/attachment-service.cjs";
 
 const root = path.resolve(new URL("..", import.meta.url).pathname);
-const artifacts = path.join(root, "output", "playwright", "attachments-1.7.0");
-const temporary = await fs.mkdtemp(path.join(os.tmpdir(), "bike-1.7-runtime-"));
+const { version } = JSON.parse(await fs.readFile(path.join(root, "package.json"), "utf8"));
+const artifacts = path.join(root, "output", "playwright", `attachments-${version}`);
+const temporary = await fs.mkdtemp(path.join(os.tmpdir(), "bike-attachments-runtime-"));
 const errors = [];
 const checks = [];
 let app;
@@ -67,9 +68,9 @@ const nativeDialogs = async (openFile, saveFile) => app.evaluate(({ dialog }, va
   dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [values.openFile] });
   dialog.showSaveDialog = async () => ({ canceled: false, filePath: values.saveFile });
 }, { openFile, saveFile });
-const downloadFrom = async (page, button) => {
+const downloadFrom = async (page, button, role = "button") => {
   const at = await app.evaluate(() => globalThis.__attachmentDownloads.length);
-  await page.getByRole("button", { name: button, exact: true }).click();
+  await page.getByRole(role, { name: button, exact: true }).click();
   const deadline = Date.now() + 30_000;
   while (Date.now() < deadline) {
     const entry = await app.evaluate((_electron, index) => globalThis.__attachmentDownloads[index], at);
@@ -174,7 +175,8 @@ try {
   assert.deepEqual([...(await fs.readFile(pngFile)).subarray(0, 8)], [137, 80, 78, 71, 13, 10, 26, 10]);
   await fs.copyFile(svgFile, path.join(artifacts, "mindmap-export.svg"));
   await fs.copyFile(pngFile, path.join(artifacts, "mindmap-export.png"));
-  const pdfFile = await downloadFrom(page, "PDF");
+  await page.getByRole("button", { name: "导出", exact: true }).click();
+  const pdfFile = await downloadFrom(page, "PDF", "menuitem");
   const pdf = await PDFDocument.load(await fs.readFile(pdfFile));
   assert.ok(pdf.context.enumerateIndirectObjects().some(([, value]) => value instanceof PDFRawStream && value.dict.get(PDFName.of("Subtype"))?.toString() === "/Image"));
   await fs.copyFile(pdfFile, path.join(artifacts, "document.pdf"));
@@ -182,7 +184,8 @@ try {
   for (const [button, name, field] of [["带元数据", "document.md", "markdown"], ["HTML", "index.html", "html"]]) {
     const filename = path.join(temporary, `${field}.zip`);
     await nativeDialogs(image, filename);
-    await page.getByRole("button", { name: button, exact: true }).click();
+    await page.getByRole("button", { name: "导出", exact: true }).click();
+    await page.getByRole("menuitem", { name: button, exact: true }).click();
     await page.waitForFunction(() => document.body.textContent.includes("已导出携图 ZIP"));
     const exportDeadline = Date.now() + 15_000;
     while (!(await fs.access(filename).then(() => true, () => false)) && Date.now() < exportDeadline) await new Promise((resolve) => setTimeout(resolve, 50));
@@ -250,7 +253,7 @@ try {
   checks.push("the ZIP import entry restores identities and exact image bytes in a fresh application data directory");
   assert.deepEqual(errors, []);
   const application = await app.evaluate(({ app }) => ({ version: app.getVersion(), electron: process.versions.electron, node: process.versions.node, arch: process.arch, runningUnderARM64Translation: app.runningUnderARM64Translation, packaged: app.isPackaged }));
-  const evidence = { date: "2026-11-09", runtime: process.version, application, checks, errors, artifacts };
+  const evidence = { date: new Date().toISOString(), runtime: process.version, application, checks, errors, artifacts };
   await fs.writeFile(path.join(artifacts, application.packaged ? `results-packaged-${application.arch}.json` : "results.json"), `${JSON.stringify(evidence, null, 2)}\n`);
   console.log(JSON.stringify(evidence, null, 2));
 } catch (error) {

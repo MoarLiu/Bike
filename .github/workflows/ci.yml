@@ -37,6 +37,10 @@ jobs:
         if: runner.os == 'Linux'
       - run: npm run test:attachments-runtime
         if: runner.os == 'macOS'
+      - run: npm run test:2.0-runtime
+        if: runner.os == 'macOS'
+      - run: npm run test:ui-runtime
+        if: runner.os == 'macOS'
 
   node-compatibility:
     runs-on: ubuntu-latest

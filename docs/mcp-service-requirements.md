@@ -1,5 +1,32 @@
 # Bike MCP 服务需求说明
 
+## 2.0.0 候选的 Live 模式
+
+运行中的桌面应用提供 Live MCP。先在侧栏打开“Live MCP”授权，按当前文档或工作区选择读取范围。首次启用需要通过完整 ZIP 备份将正文升级至 version 3。服务默认关闭，连接默认只读。需要修改时勾选写入授权，提交后在应用中显示差异提案。
+
+已打包应用的 stdio 配置可使用以下形式，实际应用路径以安装位置为准。
+
+```json
+{
+  "mcpServers": {
+    "bike-live": {
+      "command": "/Applications/Bike.app/Contents/MacOS/Bike",
+      "args": ["--mcp-live"]
+    }
+  }
+}
+```
+
+候选包可将 `command` 指向本地候选应用的 `Contents/MacOS/Bike`。开发环境执行 `node mcp/bike-server.mjs --live`，并用 `BIKE_LIVE_DISCOVERY` 指向应用授权窗口显示的发现文件。预发布桌面应用的默认发现文件位于 `~/Library/Application Support/Bike-2-preview/live-mcp.json`。发现文件和 Unix socket 均为当前用户私有，连接令牌不进入普通导出或备份。
+
+读取工具在屏障前刷新可安全提交的标题、主题、备注和 Markdown 草稿，数据及 revision 来自同一次持久保存。输入法组合输入、恢复、同步或存储保护期间返回忙碌状态。关闭备份仍可使用 Live。
+
+写入工具沿用 `dryRun=true`、`expectedRevision`。预览返回 `requestId` 及 `confirmationArgs`，真实请求使用这些参数并设置 `dryRun=false`，返回待应用确认状态。用户在应用接受后通过 `get_proposal_status` 查询持久回执。相同请求身份只执行一次，内容变化会拒绝。待确认期间目标变化、撤权、重载或退出使提案失效。实际会话身份与客户端自报名称分别记录在本机。
+
+模板增加 `outline_to_meeting`，PRD、任务和会议纪要模板与应用共用版本化定义。原 File 模式、参数、锁和受支持格式的 CAS 继续保留。version 3 文件可以读取，实际写入会提示使用 Live。外部文件的显式载入形成新的本机操作。
+
+以下部分保留 1.2.0 和 1.3.0 的原始需求及 File 模式历史。
+
 状态：1.2.0 已实现只读 MVP；1.3.0 已实现 MCP 受控写入基础能力
 日期：2026-06-04
 适用产品：Bike 1.2.0 起；写入能力目标版本为 1.3.0

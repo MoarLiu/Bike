@@ -41,8 +41,18 @@ test("cancellation ends a non-cooperative provider and ignores its late answer",
 test("AI parsing is bounded and polish uses the same Unicode-safe cleaning as generation", async (t) => {
   assert.throws(() => ai.firstBalancedJsonSlice("{".repeat(100_000)), /嵌套/);
   assert.equal(ai.firstBalancedJsonSlice('prefix {"text":"escaped \\\" ] }"} suffix'), '{"text":"escaped \\\" ] }"}');
-  install(t, async () => new Response(JSON.stringify({ output_text: JSON.stringify({ text: "a".repeat(119) + "😀\u0001later" }) })));
+  install(t, async () => new Response(JSON.stringify({ output_text: JSON.stringify({ text: "a".repeat(119) + "😀\u0001" }) })));
   const result = await ai.runAiNodeAction(config, "polish", context);
   assert.equal(Array.from(result.text).length, 120);
   assert.ok(result.text.endsWith("😀"));
+});
+
+test('AI outputs over the text, sibling or depth budget are rejected instead of truncated', async (t) => {
+  let output = { text: 'a'.repeat(121) };
+  install(t, async () => new Response(JSON.stringify({ output_text: JSON.stringify(output) })));
+  await assert.rejects(ai.runAiNodeAction(config, 'polish', context), /120/);
+  output = { children: Array.from({ length: 9 }, (_, index) => ({ text: `item ${index}` })) };
+  await assert.rejects(ai.runAiNodeAction(config, 'generate', context), /8 项/);
+  output = { children: [{ text: 'one', children: [{ text: 'two', children: [{ text: 'three', children: [{ text: 'four' }] }] }] }] };
+  await assert.rejects(ai.runAiNodeAction(config, 'generate', context), /3 层/);
 });

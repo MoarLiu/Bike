@@ -38,7 +38,7 @@ const release = (pool: Pool, root: object) => {
     for (const child of retained.children) stack.push(child);
   }
 };
-const entryRoots = (entry: HistoryEntry) => entry.changes.flatMap((change) => [change.before, change.after]);
+const entryRoots = (entry: HistoryEntry) => [...entry.changes.flatMap((change) => [change.before, change.after]), ...(entry.creations ?? []).map((item) => item.document)];
 const poolFor = (history: EditHistory): Pool => {
   const cached = pools.get(history);
   if (cached?.owner === history) return cached;

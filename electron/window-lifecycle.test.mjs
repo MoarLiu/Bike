@@ -29,7 +29,7 @@ test('each reopened macOS window waits for its own backup flush', () => {
   const create = vm.runInNewContext(`(${declaration.initializer.getText(ast)})`, {
     BrowserWindow: Window, path: { join: (...parts) => parts.join('/') }, __dirname: '/electron', mainWindow: null, ipcMain,
     setTimeout: () => ({}), clearTimeout() {}, isDev: false,
-    isTrustedIpcSender, isAllowedAppUrl: () => true, aiRequests: new Map(),
+    isTrustedIpcSender, isAllowedAppUrl: () => true, aiRequests: new Map(), liveService: null,
   });
   for (let i = 0; i < 2; i++) {
     create();
@@ -66,7 +66,7 @@ test('close deadline records a durable timeout receipt before allowing the windo
   const create = vm.runInNewContext(`(${declaration.initializer.getText(ast)})`, {
     BrowserWindow: Window, path: { join: (...parts) => parts.join('/') }, __dirname: '/electron', mainWindow: null, ipcMain,
     setTimeout: (callback) => { deadline = callback; return {}; }, clearTimeout() {}, isDev: false,
-    isTrustedIpcSender, isAllowedAppUrl: () => true, aiRequests: new Map(), console,
+    isTrustedIpcSender, isAllowedAppUrl: () => true, aiRequests: new Map(), liveService: null, console,
     backupService: async () => ({ recordCloseTimeout: async () => { events.push('receipt-start'); await new Promise((resolve) => { releaseReceipt = resolve; }); events.push('receipt-saved'); } }),
   });
   create(); window.close(); deadline();
@@ -113,7 +113,7 @@ test('macOS quit resumes after backup flush while ordinary window close permits 
   const context = vm.createContext({
     app, ipcMain, BrowserWindow: Window, path: { join: (...parts) => parts.join('/') }, __dirname: '/electron',
     mainWindow: null, process: { platform: 'darwin' }, setTimeout: () => ({}), clearTimeout() {}, isDev: false,
-    isTrustedIpcSender, isAllowedAppUrl: () => true, aiRequests: new Map(),
+    isTrustedIpcSender, isAllowedAppUrl: () => true, aiRequests: new Map(), liveService: null,
   });
   vm.runInContext(`let quitting = false; const createWindow = ${declaration.initializer.getText(ast)};\n${lifecycle.map((item) => item.getText(ast)).join('\n')}\ncreateWindow();`, context);
   windows[0].close();

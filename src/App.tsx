@@ -72,6 +72,7 @@ import {
   loadAiConfig,
   normalizeAiConfig,
   runAiNodeAction,
+  requestAiJson,
   saveAiConfig,
   validateAiConfig,
   type AiApiConfig,
@@ -79,6 +80,18 @@ import {
   type AiNodeAction,
 } from "./ai";
 import { saveICloudBackup } from "./backup";
+import { KNOWLEDGE_ACTIONS, workflowContext, workflowInstructions, buildKnowledgeProposal } from "./knowledgeWorkflow";
+import { operationRecoveryProposal, conflictResolutionProposal } from "./operationRecovery";
+import type { ReplicaState } from "../shared/bike-replica.mjs";
+import type { KnowledgeAction } from "./knowledgeWorkflow";
+import { ExportMenu } from "./components/ExportMenu";
+import { ProposalDialog } from "./components/ProposalDialog";
+import { createWorkspaceProposal, acceptProposalGroups, proposalFreshness } from "../shared/bike-proposals.mjs";
+import type { WorkspaceProposal } from "../shared/bike-proposals.mjs";
+import { replicaProtectedAssetIds } from "../shared/bike-replica.mjs";
+import { canonicalJson } from "../shared/bike-operations.mjs";
+import { sha256Hex } from "./knowledge";
+import { syncOperationWorkspace, enableOperationSync } from "./operationSync";
 import { BackupSettingsDialog } from "./components/BackupSettingsDialog";
 import { KnowledgePanel } from "./components/KnowledgePanel";
 import { LinkAutocomplete } from "./components/LinkAutocomplete";
@@ -165,6 +178,9 @@ import {
   listWorkspaceRecoveryFiles,
   loadWorkspace,
   loadPreAttachmentWorkspace,
+  readReplicaState,
+  queryOperationReceipt,
+  markWorkspaceOperation,
   attachmentRecoveryRoots,
   reloadWorkspaceIf,
   saveWorkspace as saveWorkspaceToStorage,
@@ -194,7 +210,7 @@ import {
 import type { OutlineDocument, OutlineNode, ViewMode, Workspace } from "./types";
 import { uuid } from "./id";
 import { exportMindMap } from "./mindMapExport";
-import { assertTreeBudget } from "../shared/bike-limits.mjs";
+import { assertWorkspaceBudget, assertTreeBudget } from "../shared/bike-limits.mjs";
 import {
   addChild,
   cloneNodes,
@@ -593,7 +609,7 @@ const firstNodeIdInWorkspace = (workspace: Workspace) =>
 
 // Downloads a JSON copy of a workspace before it gets replaced or overwritten.
 const downloadWorkspaceBackup = async (workspace: Workspace, reason: string) => {
-  if (workspace.version === 2) {
+  if (workspace.version >= 2) {
     const bridge = (window.bike ?? window.localOutline)?.exportWorkspaceArchive;
     if (!bridge) throw new Error("此工作区包含附件，请使用桌面版保存完整副本后再替换");
     const result = await bridge(workspace);
@@ -809,6 +825,24 @@ function App() {
   const [recentTicker, setRecentTicker] = useState(0);
   const [aiConfig, setAiConfig] = useState<AiApiConfig>(() => loadAiConfig());
   const [showAiConfig, setShowAiConfig] = useState(false);
+  const [showKnowledgeWorkflow, setShowKnowledgeWorkflow] = useState(false);
+  const [knowledgeAction, setKnowledgeAction] = useState<KnowledgeAction>("summary");
+  const [knowledgeWholeDocument, setKnowledgeWholeDocument] = useState(false);
+  const [summaryDestination, setSummaryDestination] = useState<"child" | "note">("child");
+  const [templateAudience, setTemplateAudience] = useState("mixed");
+  const [showLiveMcp, setShowLiveMcp] = useState(false);
+  const [liveScope, setLiveScope] = useState<"document" | "workspace">("document");
+  const [liveWritable, setLiveWritable] = useState(false);
+  const [liveState, setLiveState] = useState<LiveMcpState>({ enabled: false, writable: false, documentIds: [], discoveryPath: null });
+  const proposalRegistryRef = useRef(new Map<string, { proposal: WorkspaceProposal; digest: string }>());
+  const [proposals, setProposals] = useState<WorkspaceProposal[]>([]);
+  const proposal = proposals[0] ?? null;
+  const [proposalBusy, setProposalBusy] = useState(false);
+  const [proposalError, setProposalError] = useState<string | null>(null);
+  const operationCommitRef = useRef(false);
+  const liveGrantEpochRef = useRef(0);
+  const liveRequestStatusesRef = useRef(new Map<string, { status: string; clientDigest?: string; candidateDigest?: string; operationId?: string | null; error?: string }>());
+  const compositionActiveRef = useRef(false);
   const [aiBusyKey, setAiBusyKey] = useState<string | null>(null);
   const aiRequestRef = useRef<{ controller: AbortController; key: string } | null>(null);
   const [isCheckingUpdates, setIsCheckingUpdates] = useState(false);
@@ -819,6 +853,7 @@ function App() {
   });
   const [showSyncConfig, setShowSyncConfig] = useState(false);
   const [syncBusy, setSyncBusy] = useState(false);
+  const [attachmentSyncProgress, setAttachmentSyncProgress] = useState<{ phase: string; transferred: number; byteLength: number } | null>(null);
   // Another tab or window saved over the copy this page was editing: autosave
   // is paused until the user picks which version to keep.
   const [storageConflict, setStorageConflict] = useState(false);
@@ -832,6 +867,7 @@ function App() {
   const lastAutoSnapshotRef = useRef(new Map<string, number>());
   const [showTrash, setShowTrash] = useState(false);
   const [showVersionHistory, setShowVersionHistory] = useState(false);
+  const [historyReplica, setHistoryReplica] = useState<ReplicaState | null>(null);
   const [historySnapshots, setHistorySnapshots] = useState<DocumentSnapshot[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
@@ -856,7 +892,7 @@ function App() {
   const autoSyncObservedWorkspaceRef = useRef<Workspace | null>(null);
   const modalOpenRef = useRef(false);
   modalOpenRef.current = showTrash || showVersionHistory || showAiConfig || showSyncConfig ||
-    showConfirmDelete || showRecoverySnapshots || showBackupSettings;
+    showConfirmDelete || showRecoverySnapshots || showBackupSettings || Boolean(proposal) || showLiveMcp || showKnowledgeWorkflow;
 
   const [theme, setTheme] = useState<"light" | "dark">(
     () => readPreference("theme", "light") as "light" | "dark"
@@ -1414,7 +1450,7 @@ function App() {
   ) => {
     const current = workspaceRef.current;
     if (!current) return null;
-    if (cleanupBusyRef.current || updateInstallRef.current) return current;
+    if (cleanupBusyRef.current || updateInstallRef.current || operationCommitRef.current) return current;
     let next = updater(current);
     if (next === current) return current;
     const version = workspaceFormatVersion(next);
@@ -1440,6 +1476,7 @@ function App() {
       if (historyMemoryUsage(history).overBudget) showNotice("本次操作超过撤销内存预算，已保留最近一次撤销；更早的记录已释放");
     }
     maybeCaptureAutoSnapshots(current, next);
+    markWorkspaceOperation(next, { source: { kind: "user", label: options.label ?? "编辑" } });
     return replaceWorkspace(next);
   });
 
@@ -1571,6 +1608,9 @@ function App() {
 
   const publishNodeLabel = useEventCallback((nodeId: string, previousLabel: string, nextLabel: string) => {
     if (previousLabel === nextLabel) return workspaceRef.current;
+    const current = workspaceRef.current;
+    const active = current?.documents.find((document) => document.id === current.activeDocumentId);
+    if (labelBaselineRef.current.get(nodeId) === nextLabel && active && findNode(active.nodes, nodeId)?.text === nextLabel) return current;
     let ambiguous = 0;
     const result = commitWorkspace((workspace) => {
       const renamed = renameTarget(workspace, {
@@ -1676,6 +1716,189 @@ function App() {
   });
 
   flushPendingEditsRef.current = flushPendingEdits;
+
+
+  useEffect(() => {
+    const start = () => { compositionActiveRef.current = true; };
+    const end = () => { compositionActiveRef.current = false; };
+    document.addEventListener("compositionstart", start, true);
+    document.addEventListener("compositionend", end, true);
+    return () => { document.removeEventListener("compositionstart", start, true); document.removeEventListener("compositionend", end, true); };
+  }, []);
+
+  const ensureOperationWorkspace = useEventCallback(async (): Promise<Workspace | null> => {
+    if (compositionActiveRef.current || operationCommitRef.current || storageConflictRef.current || recoveryBusyRef.current || historyBusyRef.current) throw new Error("工作区忙碌或受保护，请稍后重试");
+    if (document.activeElement instanceof HTMLInputElement && document.activeElement.matches(".title-input, .document-heading-input")) document.activeElement.blur();
+    const current = flushPendingEdits() ?? workspaceRef.current;
+    if (!current) return null;
+    const saved = await saveWorkspace(current);
+    if (!saved.ok || saved.target !== "indexeddb") throw new Error("请先恢复本机主存储，再使用 2.0 操作");
+    if (current.version === 3) return current;
+    const bridge = window.bike ?? window.localOutline;
+    if (!bridge?.exportWorkspaceArchive) throw new Error("请在桌面版完成完整 ZIP 备份并升级工作区");
+    if (!window.confirm("启用 2.0 操作前将保存一份完整工作区 ZIP。升级后的原工作区需要 Bike 2.0，回退时请使用此备份。继续？")) return null;
+    const backup = await bridge.exportWorkspaceArchive(current);
+    if (!backup.ok || backup.cancelled) throw new Error(backup.error || "升级前备份已取消");
+    if (workspaceRef.current !== current) throw new Error("备份期间工作区发生变化，请重新备份后升级");
+    operationCommitRef.current = true;
+    try {
+      const upgraded: Workspace = { ...current, version: 3 };
+      const result = await saveWorkspaceToStorage(upgraded, { expectedWorkspace: current, requireIndexedDB: true });
+      if (!result.ok) throw result.error;
+      replaceWorkspace(upgraded); showSaveResult(result, upgraded);
+      showNotice("已备份并升级 2.0 工作区");
+      return upgraded;
+    } finally { operationCommitRef.current = false; }
+  });
+
+  const enqueueProposal = useEventCallback((next: WorkspaceProposal) => {
+    if (proposalRegistryRef.current.size >= 16 && !proposalRegistryRef.current.has(next.id)) throw new Error("待确认提案已满，请先处理现有提案");
+    proposalRegistryRef.current.set(next.id, { proposal: next, digest: canonicalJson(next.groups) });
+    setProposalError(null);
+    setProposals((queue) => queue.some((item) => item.id === next.id) ? queue : [...queue, next].slice(0, 16));
+  });
+  const rejectProposal = useEventCallback(() => {
+    if (!proposal || operationCommitRef.current) return;
+    liveRequestStatusesRef.current.set(proposal.id, { status: "rejected", clientDigest: proposal.clientDigest, candidateDigest: proposal.candidateDigest });
+    proposalRegistryRef.current.delete(proposal.id);
+    setProposals((queue) => queue.filter((item) => item.id !== proposal.id));
+    setProposalError(null);
+    showNotice("已拒绝提案");
+  });
+  const acceptProposal = useEventCallback(async (selectedIds: string[]) => {
+    if (!proposal || operationCommitRef.current) return;
+    if (compositionActiveRef.current || storageConflictRef.current || recoveryBusyRef.current || syncBusyRef.current) { setProposalError("工作区忙碌或受保护，请稍后重试"); return; }
+    if (proposal.source.kind === "mcp" && !proposalRegistryRef.current.has(proposal.id)) { setProposalError("Live 授权已撤销，提案已失效"); return; }
+    const current = flushPendingEdits() ?? workspaceRef.current;
+    if (!current || current.version !== 3) { setProposalError("请先备份并升级工作区"); return; }
+    operationCommitRef.current = true; setProposalBusy(true); setProposalError(null);
+    try {
+      const next = acceptProposalGroups(current, proposal, selectedIds);
+      const result = await saveWorkspaceToStorage(next, { requestId: proposal.id, expectedWorkspace: current, requireIndexedDB: true,
+        source: proposal.source, reason: proposal.reason, acceptedGroups: selectedIds, clientDigest: proposal.clientDigest, candidateDigest: proposal.candidateDigest, origin: proposal.origin, resolves: proposal.resolves, resolutionBaselines: proposal.resolutionBaselines });
+      if (!result.ok) throw result.error;
+      historyRef.current = recordChange({ history: historyRef.current, before: current, after: next,
+        selection: { documentId: current.activeDocumentId, nodeId: activeNodeIdRef.current }, label: proposal.label });
+      bumpHistoryVersion((version) => version + 1);
+      replaceWorkspace(next); showSaveResult(result, next);
+      liveRequestStatusesRef.current.set(proposal.id, { status: "committed", operationId: result.receipt?.operationId, clientDigest: proposal.clientDigest, candidateDigest: proposal.candidateDigest });
+      proposalRegistryRef.current.delete(proposal.id);
+      setProposals((queue) => queue.filter((item) => item.id !== proposal.id));
+      showNotice("所选修改已持久保存，等待同步的内容会在联网后传输");
+    } catch (error) { setProposalError(error instanceof Error ? error.message : "提案提交失败"); }
+    finally { operationCommitRef.current = false; setProposalBusy(false); }
+  });
+
+
+  const liveReadBarrier = useEventCallback(async (grant: LiveMcpGrant) => {
+    if (!ready || compositionActiveRef.current || operationCommitRef.current || storageConflictRef.current || recoveryBusyRef.current || historyBusyRef.current || syncBusyRef.current || attachmentImportRef.current)
+      throw new Error("工作区忙碌或受保护，请稍后读取");
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (document.activeElement instanceof HTMLInputElement && document.activeElement.matches(".title-input, .document-heading-input")) document.activeElement.blur();
+      const current = flushPendingEdits() ?? workspaceRef.current;
+      if (!current || current.version !== 3) throw new Error("请在应用内备份并升级工作区");
+      if (current.documents.some((item) => readBikeMetadata(item.markdownSource ?? "").status === "unknown-version")) throw new Error("工作区包含受保护的 Markdown 格式");
+      const saved = await saveWorkspace(current);
+      if (!saved.ok || saved.target !== "indexeddb") throw new Error("读取屏障无法持久保存，请检查存储状态");
+      if (workspaceRef.current !== current) continue;
+      const documents = current.documents.filter((item) => grant.scope === "workspace" || grant.documentIds.includes(item.id));
+      if (!documents.length) throw new Error("授权目标已不存在，请重新授权");
+      const scoped: Workspace = { version: 3, documents, activeDocumentId: documents.some((item) => item.id === current.activeDocumentId) ? current.activeDocumentId : documents[0].id };
+      const replica = await readReplicaState();
+      if (!replica) throw new Error("缺少本机副本身份");
+      return { current, scoped, workspaceId: replica.actorId, revision: sha256Hex(canonicalJson(scoped.documents)),
+        savedAt: now(), writable: grant.writable };
+    }
+    throw new Error("编辑仍在变化，请稍后重试读取屏障");
+  });
+  const handleLiveMcpRequest = useEventCallback(async (request: LiveMcpRequest) => {
+    const grantEpoch = liveGrantEpochRef.current;
+    if (request.method === "status") {
+      const id = request.payload.requestId ?? "";
+      const receipt = await queryOperationReceipt(id);
+      if (grantEpoch !== liveGrantEpochRef.current) throw new Error("Live 授权已失效，请重新连接");
+      if (receipt && request.grant.scope !== "workspace" && receipt.targetDocumentIds?.some((target) => !request.grant.documentIds.includes(target))) return { status: "unknown", applied: false };
+      if (receipt) return { status: "committed", applied: true, operationId: receipt.operationId, pendingSync: receipt.pendingSync, remoteStatus: receipt.remoteStatus, clientDigest: receipt.clientDigest };
+      const pending = proposalRegistryRef.current.get(id);
+      if (pending && workspaceRef.current) {
+        const freshness = proposalFreshness(workspaceRef.current, pending.proposal);
+        if (freshness !== "current") return { status: freshness, applied: false, clientDigest: pending.proposal.clientDigest };
+      }
+      return liveRequestStatusesRef.current.get(id) ?? { status: "unknown", applied: false };
+    }
+    const barrier = await liveReadBarrier(request.grant);
+    if (grantEpoch !== liveGrantEpochRef.current) throw new Error("Live 授权已失效，请重新连接");
+    if (request.method === "snapshot") return { workspace: barrier.scoped, revision: barrier.revision, workspaceId: barrier.workspaceId, savedAt: barrier.savedAt, writable: barrier.writable };
+    if (request.payload.clientDigest !== undefined && (typeof request.payload.clientDigest !== "string" || !/^[a-f0-9]{64}$/.test(request.payload.clientDigest))) throw new Error("Live 请求摘要格式无效");
+    if (!request.payload.requestId || request.payload.workspaceId !== barrier.workspaceId || request.payload.expectedRevision !== barrier.revision) throw new Error("Live 提案读取基线已变化，请重新读取");
+    const id = request.payload.requestId;
+    const candidate = request.payload.candidate as Workspace;
+    assertWorkspaceBudget(candidate);
+    if (candidate?.version !== 3 || !Array.isArray(candidate.documents) || !candidate.documents.length) throw new Error("Live 候选工作区格式无效");
+    workspaceAttachmentAssets(candidate);
+    const permitted = new Set(barrier.scoped.documents.map((document) => document.id));
+    if (request.grant.scope !== "workspace" && candidate.documents.some((document) => !permitted.has(document.id))) throw new Error("提案超出授权文档范围");
+    const candidates = new Map(candidate.documents.map((document) => [document.id, document]));
+    let merged: Workspace = { ...barrier.current,
+      documents: barrier.current.documents.flatMap((document) => permitted.has(document.id) ? candidates.has(document.id) ? [candidates.get(document.id)!] : [] : [document]) };
+    for (const document of candidate.documents) if (!barrier.current.documents.some((item) => item.id === document.id)) merged = { ...merged, documents: [...merged.documents, document] };
+    if (request.grant.scope !== "workspace") {
+      for (const document of candidate.documents) {
+        const before = barrier.current.documents.find((item) => item.id === document.id);
+        if (!before) continue;
+        const renames = [{ nodeId: undefined, before: before.title, after: document.title },
+          ...flattenNodes(before.nodes).flatMap(({ node }) => { const next = findNode(document.nodes, node.id); return next ? [{ nodeId: node.id, before: node.text, after: next.text }] : []; })];
+        for (const rename of renames) if (rename.before !== rename.after) {
+          const impact = renameTarget(barrier.current, { documentId: document.id, nodeId: rename.nodeId, nextLabel: rename.after });
+          if (impact.updatedDocumentIds.some((target) => !permitted.has(target))) throw new Error("改名会影响未授权的入链，请授权完整影响范围后重试");
+        }
+      }
+    }
+    const digest = sha256Hex(canonicalJson(candidate));
+    const committed = await queryOperationReceipt(id);
+    if (grantEpoch !== liveGrantEpochRef.current) throw new Error("Live 授权已失效，请重新连接");
+    if (committed) {
+      if (committed.candidateDigest !== digest) throw new Error("相同请求身份携带了不同内容");
+      return { status: "committed", applied: true, operationId: committed.operationId };
+    }
+    const existing = proposalRegistryRef.current.get(id);
+    if (existing) {
+      if (existing.digest !== digest) throw new Error("相同请求身份携带了不同内容");
+      return { applied: false, status: "pending", proposalId: id };
+    }
+    const previous = liveRequestStatusesRef.current.get(id);
+    if (previous && ["rejected", "invalidated"].includes(previous.status)) {
+      if (previous.candidateDigest !== digest) throw new Error("相同请求身份携带了不同内容");
+      return { ...previous, applied: false };
+    }
+    const label = `MCP ${String(request.payload.operation ?? "修改").slice(0, 100)}`;
+    const next = createWorkspaceProposal(barrier.current, [{ id: "mcp", label, workspace: merged }], {
+      id, workspaceId: barrier.workspaceId, source: { kind: "mcp", label }, label,
+      reason: String(request.payload.reason ?? "").slice(0, 300), targetDocumentIds: [...permitted],
+    });
+    if (request.payload.dryRun !== false) return { applied: false, status: "preview", proposal: next };
+    if (!request.grant.writable) throw new Error("Live 连接只读，请在应用内授权写入");
+    next.clientDigest = request.payload.clientDigest;
+    next.candidateDigest = digest;
+    next.origin = { principalId: request.session.id, reportedClientName: request.session.clientName };
+    enqueueProposal(next);
+    proposalRegistryRef.current.set(id, { proposal: next, digest });
+    liveRequestStatusesRef.current.set(id, { status: "pending", clientDigest: request.payload.clientDigest, candidateDigest: digest });
+    return { applied: false, status: "pending", proposalId: id, principalId: request.session.id, reportedClientName: request.session.clientName };
+  });
+  useEffect(() => {
+    const bridge = window.bike ?? window.localOutline;
+    const off = bridge?.onLiveMcpRequest?.(handleLiveMcpRequest);
+    const revoked = bridge?.onLiveMcpRevoke?.(() => {
+      liveGrantEpochRef.current++;
+      for (const [id, entry] of proposalRegistryRef.current) if (entry.proposal.source.kind === "mcp") {
+        proposalRegistryRef.current.delete(id); liveRequestStatusesRef.current.set(id, { status: "invalidated", clientDigest: entry.proposal.clientDigest, candidateDigest: entry.proposal.candidateDigest });
+      }
+      setProposals((queue) => queue.filter((item) => item.source.kind !== "mcp"));
+      setLiveState({ enabled: false, writable: false, documentIds: [], discoveryPath: null });
+    });
+    return () => { off?.(); revoked?.(); };
+  }, []);
 
   const rememberNavigation = useEventCallback((documentId: string, nodeId: string | null) => {
     const history = navHistoryRef.current;
@@ -1890,8 +2113,7 @@ function App() {
       return;
     }
     if (result.status === "stale") {
-      clearEditHistory();
-      showNotice("当前内容已被更新，已清空撤销记录以避免覆盖");
+      showNotice("撤销涉及的内容已有后续修改，请在版本历史中比较或恢复为副本");
       return;
     }
 
@@ -1902,6 +2124,7 @@ function App() {
     const selectedDocument = result.workspace.documents.find((item) => item.id === selection.documentId)
       ?? result.workspace.documents[0];
     const nextWorkspace = { ...result.workspace, activeDocumentId: selectedDocument.id };
+    markWorkspaceOperation(nextWorkspace, { source: { kind: direction, label: result.entry.label } });
     replaceWorkspace(nextWorkspace);
     bumpHistoryVersion((version) => version + 1);
 
@@ -2167,7 +2390,8 @@ function App() {
     setHistoryLoading(true);
     setHistoryError(null);
     try {
-      const snapshots = await listDocumentSnapshots(document.id);
+      const [snapshots, replica] = await Promise.all([listDocumentSnapshots(document.id), readReplicaState()]);
+      setHistoryReplica(replica);
       if (requestId !== historyRequestRef.current || workspaceRef.current?.activeDocumentId !== document.id) return;
       setHistorySnapshots(snapshots);
     } catch (error) {
@@ -2309,16 +2533,41 @@ function App() {
   });
   useEffect(() => () => aiRequestRef.current?.controller.abort(), []);
 
+  const runKnowledgeWorkflow = useEventCallback(async () => {
+    if (aiRequestRef.current) { showNotice("AI 请求仍在进行，可先取消"); return; }
+    let initial: Workspace | null;
+    try { initial = await ensureOperationWorkspace(); }
+    catch (error) { showNotice(error instanceof Error ? error.message : "工作区未就绪"); return; }
+    if (!initial) return;
+    const document = initial.documents.find((item) => item.id === initial.activeDocumentId)!;
+    const nodeId = knowledgeWholeDocument ? null : activeNodeIdRef.current;
+    const config = ensureAiConfig(); if (!config) return;
+    const request = { controller: new AbortController(), key: `knowledge:${knowledgeAction}` };
+    aiRequestRef.current = request; setAiBusyKey(request.key); setShowKnowledgeWorkflow(false);
+    try {
+      const context = workflowContext(document, nodeId);
+      const output = await requestAiJson(config, `${workflowInstructions(knowledgeAction)}\n读者参数 ${templateAudience}`, context, { signal: request.controller.signal });
+      if (request.controller.signal.aborted || aiRequestRef.current !== request) return;
+      const latest = flushPendingEdits() ?? workspaceRef.current;
+      const target = latest?.documents.find((item) => item.id === document.id);
+      if (!latest || !target || !sameDocumentContent(document, target)) throw new Error("生成期间目标内容已变化，请重新比较");
+      const generatedProposal = buildKnowledgeProposal(latest, document.id, nodeId, knowledgeAction, output, summaryDestination);
+      generatedProposal.origin = { model: config.model, documentId: document.id, ...(nodeId ? { nodeId } : {}) };
+      enqueueProposal(generatedProposal);
+      showNotice("知识操作提案已生成，请预览并接受");
+    } catch (error) { showNotice(error instanceof Error ? error.message : "知识操作未完成"); }
+    finally { if (aiRequestRef.current === request) { aiRequestRef.current = null; setAiBusyKey(null); } }
+  });
+
   const handleStructuredAiAction = useEventCallback(async (
     action: AiNodeAction,
     targetId: StructuredAiTargetId,
   ) => {
     if (aiRequestRef.current) { showNotice("AI 请求仍在进行，可先取消"); return; }
-    const currentWorkspace = flushPendingEdits() ?? workspaceRef.current;
-    const document = currentWorkspace?.documents.find(
-      (item) => item.id === currentWorkspace.activeDocumentId,
-    ) as MarkdownDocument | undefined;
-    if (!document) return;
+    let currentWorkspace: Workspace | null;
+    try { currentWorkspace = await ensureOperationWorkspace(); } catch (error) { showNotice(error instanceof Error ? error.message : "工作区未就绪"); return; }
+    const document = currentWorkspace?.documents.find((item) => item.id === currentWorkspace.activeDocumentId) as MarkdownDocument | undefined;
+    if (!document || !currentWorkspace) return;
 
     const isDocumentRoot = targetId === MINDMAP_ROOT_ID;
     const node = isDocumentRoot ? null : findNode(document.nodes, targetId);
@@ -2345,37 +2594,29 @@ function App() {
       const latestDocument = latestWorkspace?.documents.find((item) => item.id === document.id);
       if (
         storageConflictRef.current ||
-        latestWorkspace?.activeDocumentId !== document.id ||
         !latestDocument || !sameDocumentContent(document, latestDocument)
       ) throw new Error("AI 请求期间文档发生变化，已保留当前内容，请重新生成");
 
+      let candidate: Workspace;
       if (action === "polish") {
         const text = result.text?.trim();
         if (!text) throw new Error("AI 没有返回润色文本");
-        if (isDocumentRoot) {
-          updateTitle(text, { label: "AI 润色标题", group: null });
-        } else {
-          handleNodeText(targetId, text, { label: "AI 润色主题", group: null });
-        }
-        showNotice("已润色当前主题");
-        return;
-      }
-
-      const generated = generatedNodesToOutlineNodes(result.children);
-      if (!generated.length) throw new Error("AI 没有生成可用子主题");
-      if (isDocumentRoot) {
-        patchActiveDocumentStable((active) => ({
-          ...active,
-          nodes: [...active.nodes, ...generated],
-        }), { label: "AI 生成子主题", nodeId: generated[0].id });
+        const renamed = renameTarget(latestWorkspace!, { documentId: document.id,
+          ...(isDocumentRoot ? {} : { nodeId: targetId }), nextLabel: text });
+        candidate = renamed.workspace as Workspace;
       } else {
-        updateActiveNodesStable((nodes) => updateNode(nodes, targetId, (target) => {
-          target.collapsed = false;
-          target.children = [...target.children, ...generated];
-        }), { label: "AI 生成子主题", nodeId: generated[0].id });
+        const generated = generatedNodesToOutlineNodes(result.children);
+        if (!generated.length) throw new Error("AI 没有生成可用子主题");
+        const nodes = isDocumentRoot ? [...latestDocument.nodes, ...generated] : updateNode(latestDocument.nodes, targetId, (target) => {
+          target.collapsed = false; target.children = [...target.children, ...generated];
+        });
+        candidate = { ...latestWorkspace!, documents: latestWorkspace!.documents.map((item) => item.id === document.id ? clearDocumentMarkdown({ ...item, nodes }) : item) };
       }
-      setActiveNodeId(generated[0].id);
-      showNotice(`已生成 ${generated.length} 个子主题`);
+      const label = action === "polish" ? "AI 润色" : "AI 生成子主题";
+      enqueueProposal(createWorkspaceProposal(latestWorkspace!, [{ id: "changes", label, workspace: candidate }], {
+        id: uuid(), source: { kind: "ai", label }, label, targetDocumentIds: [document.id],
+      }));
+      showNotice("AI 提案已生成，请预览并选择接受的修改");
     } catch (error) {
       showNotice(error instanceof Error ? error.message : "AI 操作失败");
     } finally {
@@ -2415,26 +2656,27 @@ function App() {
         latestWorkspace?.activeDocumentId !== sourceDocumentId || latestSource !== source
       ) throw new Error("AI 请求期间 Markdown 发生变化，已保留当前内容，请重新生成");
 
+      const ensured = await ensureOperationWorkspace();
+      if (!ensured) return null;
+      const bound = ensured.documents.find((item) => item.id === sourceDocumentId);
+      if (!bound || getDocumentMarkdown(bound) !== source) throw new Error("Markdown 目标内容已变化，请重新生成");
+      let next: string;
       if (action === "polish") {
         const text = result.text?.trim();
         if (!text) throw new Error("AI 没有返回润色文本");
-        const next = replaceMarkdownTargetLine(source, target, text);
-        const cursor =
-          target.kind === "heading"
-            ? target.lineStart + target.prefix.length + text.length
-            : target.kind === "list"
-              ? target.lineStart + target.indent.length + target.marker.length + text.length
-              : target.lineStart + text.length;
-        handleMarkdownDraftChange(next);
-        showNotice("已润色当前 Markdown 主题");
-        return { value: next, cursor };
+        next = replaceMarkdownTargetLine(source, target, text);
+      } else {
+        if (!result.children?.length) throw new Error("AI 没有生成可用子主题");
+        next = insertMarkdownChildren(source, target, result.children);
       }
-
-      if (!result.children?.length) throw new Error("AI 没有生成可用子主题");
-      const next = insertMarkdownChildren(source, target, result.children);
-      handleMarkdownDraftChange(next);
-      showNotice("已生成 Markdown 子主题");
-      return { value: next, cursor: target.subtreeEnd + Math.max(0, next.length - source.length) };
+      const parsed = parseMarkdownIntoDocument(bound, next);
+      const candidate = { ...ensured, documents: ensured.documents.map((item) => item.id === bound.id ? parsed : item) };
+      const label = action === "polish" ? "AI 润色 Markdown" : "AI 生成 Markdown 子主题";
+      enqueueProposal(createWorkspaceProposal(ensured, [{ id: "markdown", label, workspace: candidate }], {
+        id: uuid(), source: { kind: "ai", label }, label, targetDocumentIds: [bound.id],
+      }));
+      showNotice("Markdown 提案已生成，请预览后接受");
+      return null;
     } catch (error) {
       showNotice(error instanceof Error ? error.message : "AI 操作失败");
       return null;
@@ -2946,7 +3188,7 @@ function App() {
     if (!currentWorkspace) return;
     const result = exportWorkspace(currentWorkspace);
     downloadText(result.filename, result.content, result.mime);
-    showNotice(currentWorkspace.version === 2 ? "已导出 JSON 元数据，完整附件请使用工作区 ZIP" : `已导出 ${result.filename}`);
+    showNotice(currentWorkspace.version >= 2 ? "已导出 JSON 元数据，完整附件请使用工作区 ZIP" : `已导出 ${result.filename}`);
   });
   const exportMap = useEventCallback(async (format: "svg" | "png", transparent: boolean = false) => {
     const current = flushPendingEdits() ?? workspaceRef.current;
@@ -2975,10 +3217,11 @@ function App() {
         const documents = [...current.documents, ...(current.trash ?? []).map((item) => item.document)];
         for (const entry of [...historyRef.current.past, ...historyRef.current.future]) {
           for (const change of entry.changes) documents.push(change.before, change.after);
+          for (const creation of entry.creations ?? []) documents.push(creation.document);
         }
         if (nodeClipboard) documents.push({ ...current.documents[0], nodes: [nodeClipboard.node], attachments: nodeClipboard.attachments });
         for (const backup of backups) documents.push(...backup.documents, ...(backup.trash ?? []).map((item) => item.document));
-        return [...new Set([...historicalIds, ...workspaceAttachmentAssets({ documents }).map((item) => item.assetId)])];
+        return [...new Set([...historicalIds, ...replicaProtectedAssetIds(await readReplicaState()), ...workspaceAttachmentAssets({ documents }).map((item) => item.assetId)])];
       };
       const scan = await bridge.scanAttachments(await roots());
       if (!scan.ok || !scan.ticket) throw new Error(scan.error || "附件扫描失败");
@@ -3107,10 +3350,12 @@ function App() {
       if (!result.ok) throw new Error(result.error || "工作区归档导入失败");
       if (result.cancelled) return;
       if (assetsOnly) { setAttachmentGeneration((value) => value + 1); showNotice("附件库已补齐并完成校验"); return; }
-      const imported = migrateWorkspace(result.workspace);
+      let imported = migrateWorkspace(result.workspace);
+      if (current.version === 3) imported = { ...imported, version: 3 };
+      markWorkspaceOperation(imported, { source: { kind: "import", label: "从 ZIP 恢复工作区" } });
       if (!window.confirm(`归档包含 ${imported.documents.length} 个文档和 ${result.attachmentCount ?? 0} 个附件。替换前请保存当前工作区副本，继续？`)) return;
       if ((flushPendingEdits() ?? workspaceRef.current) !== current || storageConflictRef.current) throw new Error("导入期间有新编辑，已保留当前工作区");
-      if (current.version === 2) {
+      if (current.version >= 2) {
         const backup = await bridge.exportWorkspaceArchive?.(current);
         if (!backup?.ok || backup.cancelled) throw new Error("当前工作区完整备份尚未完成，已停止替换");
       } else await downloadWorkspaceBackup(current, "archive-import");
@@ -3196,6 +3441,8 @@ function App() {
     try { if (currentWorkspace) await downloadWorkspaceBackup(currentWorkspace, "load-backup"); }
     catch (error) { showNotice(error instanceof Error ? error.message : "备份失败"); return; }
     if ((flushPendingEdits() ?? workspaceRef.current) !== currentWorkspace) { showNotice("备份期间内容已变化，请重新载入"); return; }
+    if (currentWorkspace?.version === 3) next = { ...next, version: 3 };
+    markWorkspaceOperation(next, { source: { kind: "restore", label: "载入外部备份" } });
     pauseLocalBackup("restoring");
     pruneBackupPayloads(backupPayloadsRef.current, backupScheduleRef.current);
     replaceWorkspace(next);
@@ -3451,6 +3698,33 @@ function App() {
     try {
       const initialSave = await saveWorkspace(currentWorkspace);
       if (!initialSave.ok) throw initialSave.error;
+      if (currentWorkspace.version === 3) {
+        const replica = await readReplicaState();
+        if (!replica) throw new Error("缺少本机操作记录");
+        const result = await syncOperationWorkspace(currentWorkspace, activeSync.config, replica);
+        const latest = flushPendingEdits() ?? workspaceRef.current;
+        if (!latest || !sameWorkspaceContent(latest, currentWorkspace)) { retryAfterEdit = true; showNotice("同步期间有新编辑，已保留内容，下一轮会继续同步"); return; }
+        await captureSyncSnapshots(latest, result.workspace);
+        if (workspaceRef.current !== latest) { retryAfterEdit = true; return; }
+        operationCommitRef.current = true;
+        try {
+          const saved = await saveWorkspaceToStorage(result.workspace, { expectedWorkspace: latest, replicaUpdate: result.replica, requireIndexedDB: true });
+          if (!saved.ok) throw saved.error;
+          replaceWorkspace(result.workspace); syncAppliedWorkspaceRef.current = result.workspace;
+          showSaveResult(saved, result.workspace);
+        } finally { operationCommitRef.current = false; }
+        persistSyncState({ ...activeSync.state, lastSyncedAt: now() });
+        retryAfterEdit = result.hasMore; autoSyncDirtyRef.current = result.hasMore;
+        const bridge = window.bike ?? window.localOutline;
+        const assets = workspaceAttachmentAssets(result.workspace);
+        if (assets.length && bridge?.syncAttachments) {
+          const transferred = await bridge.syncAttachments(assets);
+          setAttachmentGeneration((value) => value + 1);
+          if (!transferred.ok || !transferred.complete) { showNotice(`正文已同步，附件待重试 ${transferred.error ?? transferred.errors?.map((item) => item.message).join("、") ?? "传输未完成"}`); return; }
+          showNotice(`${summarizeSyncResult(result.summary)}${result.hasMore ? " · 正文仍有待同步操作" : ""} · 附件同步完成 ${transferred.completed}/${transferred.total}`);
+        } else showNotice(`${summarizeSyncResult(result.summary)}${assets.length ? " · 附件需要桌面版补齐" : ""}`);
+        return;
+      }
       const result = await syncWorkspaceWithRemote(
         currentWorkspace,
         activeSync.config,
@@ -3493,6 +3767,8 @@ function App() {
       if (retryAfterEdit) scheduleAutoSync();
     }
   });
+
+  useEffect(() => (window.bike ?? window.localOutline)?.onAttachmentSyncProgress?.(setAttachmentSyncProgress), []);
 
   const canAutoSync = useEventCallback(() => (
     ready &&
@@ -3541,6 +3817,7 @@ function App() {
   ]);
 
   const pushLocalWorkspace = useEventCallback(async (overrideConfig?: SyncConfig) => {
+    if (workspaceRef.current?.version === 3) { await syncNow(overrideConfig); return; }
     if (syncBusyRef.current) return;
     const currentWorkspace = flushPendingEdits() ?? workspaceRef.current;
     if (!currentWorkspace) return;
@@ -3578,6 +3855,7 @@ function App() {
   });
 
   const pullRemoteWorkspace = useEventCallback(async (overrideConfig?: SyncConfig) => {
+    if (workspaceRef.current?.version === 3) { await syncNow(overrideConfig); return; }
     if (syncBusyRef.current || historyBusyRef.current || recoveryBusyRef.current || storageConflictRef.current) return;
     const currentWorkspace = flushPendingEdits() ?? workspaceRef.current;
     if (!currentWorkspace) return;
@@ -3672,7 +3950,7 @@ function App() {
     if (!file) return;
     try {
       const source = await file.text();
-      let imported;
+      let imported: OutlineDocument | Workspace;
       try {
         imported = importDocument(source, file.name);
       } catch (error) {
@@ -3695,11 +3973,14 @@ function App() {
         }
         if (currentWorkspace) await downloadWorkspaceBackup(currentWorkspace, "import");
         if ((flushPendingEdits() ?? workspaceRef.current) !== currentWorkspace) throw new Error("备份期间内容已变化，已停止替换");
+        if (currentWorkspace?.version === 3) imported = { ...imported, version: 3 as const };
+        markWorkspaceOperation(imported, { source: { kind: "import", label: "导入工作区副本" } });
+        const acceptedWorkspace = imported;
         replaceWorkspace(imported);
         clearEditHistory();
         setNavigation((state) => resetRecentOpens(pruneNavigation(state, {
-          liveIds: imported.documents.map((document) => document.id),
-          trashIds: (imported.trash ?? []).map((entry) => entry.document.id),
+          liveIds: acceptedWorkspace.documents.map((document) => document.id),
+          trashIds: (acceptedWorkspace.trash ?? []).map((entry) => entry.document.id),
         })));
         setActiveNodeId(firstNodeIdInWorkspace(imported));
         setFocusNodeId(null);
@@ -3837,6 +4118,11 @@ function App() {
             <button type="button" onClick={() => void overwriteAfterConflict()} disabled={recoveryBusy || syncBusy}>
               用本页内容覆盖
             </button>
+            {workspace?.version === 3 && <button type="button" onClick={() => {
+              const current = flushPendingEdits() ?? workspaceRef.current; if (!current) return;
+              const compatible = { ...current, version: workspaceFormatVersion({ ...current, version: 1 }) };
+              void (window.bike ?? window.localOutline)?.exportWorkspaceArchive?.(compatible).then((result) => { if (result.ok && !result.cancelled) showNotice("已导出 1.7 兼容 ZIP 副本，操作日志与本机副本身份保留在当前数据库"); });
+            }}>导出 1.7 兼容 ZIP 副本</button>}
             {recoverySnapshots.length > 0 && (
               <button type="button" onClick={() => setShowRecoverySnapshots(true)}>查看备用副本</button>
             )}
@@ -3888,6 +4174,7 @@ function App() {
           onCode={(value) => { setIncludeCode(value); setSidebarView("all"); }} onSave={saveCurrentFilter}
           onClear={() => { setSearch(""); setSelectedTags([]); setTaskFilter("all"); setFilterDocumentIds([]); setFavoriteOnly(false); setIncludeCode(false); }} />
 
+        <div className="sidebar-actions knowledge-entry"><button type="button" onClick={() => setShowKnowledgeWorkflow(true)}><Sparkles size={16} />AI 知识操作</button></div>
         <div className="sidebar-actions">
           <button onClick={createDocument}>
             <Plus size={16} />
@@ -4037,6 +4324,7 @@ function App() {
           </button>
         </div>
 
+        {syncBusy && attachmentSyncProgress && <div className="recovery-entry">附件 {attachmentSyncProgress.phase} · {Math.round(attachmentSyncProgress.transferred / Math.max(1, attachmentSyncProgress.byteLength) * 100)}% <button onClick={() => { void (window.bike ?? window.localOutline)?.cancelAttachmentSync?.(); }}>取消传输</button></div>}
         <div className="sync-panel">
           <button
             className={classNames("sync-status-button", syncBusy && "spinning")}
@@ -4064,14 +4352,30 @@ function App() {
             <Link2 size={15} />
           </button>
         </div>
-        {recoverySnapshots.length > 0 && (
-          <button className="recovery-entry" type="button" onClick={() => {
-            refreshRecoverySnapshots();
-            setShowRecoverySnapshots(true);
-          }}>
-            {recoverySnapshots.length} 份备用副本 · 查看与恢复
-          </button>
-        )}
+        <div className="sidebar-utility-actions">
+          {workspace?.version === 3 && <button type="button" onClick={() => {
+            const current = flushPendingEdits() ?? workspaceRef.current; if (!current) return;
+            const compatible = { ...current, version: workspaceFormatVersion({ ...current, version: 1 }) };
+            void (window.bike ?? window.localOutline)?.exportWorkspaceArchive?.(compatible).then((result) => { if (result.ok && !result.cancelled) showNotice("已导出 1.7 兼容 ZIP 副本，操作日志与本机副本身份保留在当前数据库"); });
+          }}><FileDown size={16} /><span>导出 1.7 兼容 ZIP 副本</span></button>}
+          <button type="button" onClick={() => { void (window.bike ?? window.localOutline)?.getLiveMcpState?.().then(setLiveState); setShowLiveMcp(true); }}><Link2 size={16} /><span>Live MCP · {liveState.enabled ? (liveState.writable ? "等待应用确认写入" : "只读") : "已关闭"}</span></button>
+          <button type="button" onClick={() => {
+            void ensureOperationWorkspace().then(async (current) => {
+              if (!current) return;
+              if (window.confirm("将当前同步空间升级到 2.0 后，旧客户端将受保护读取。请确认已升级 Sync Server，并保留升级前 ZIP。继续？")) {
+                await enableOperationSync(syncConfig); showNotice("已启用 2.0 同步协议");
+              }
+            }).catch((error) => showNotice(error instanceof Error ? error.message : "升级未完成"));
+          }}><RefreshCw size={16} /><span>{workspace?.version === 3 ? "2.0 节点同步 · 协议设置" : "备份并启用 2.0 工作区"}</span></button>
+          {recoverySnapshots.length > 0 && (
+            <button type="button" onClick={() => {
+              refreshRecoverySnapshots();
+              setShowRecoverySnapshots(true);
+            }}>
+              {recoverySnapshots.length} 份备用副本 · 查看与恢复
+            </button>
+          )}
+        </div>
       </aside>
 
       <section className="workspace">
@@ -4192,57 +4496,49 @@ function App() {
         </header>
 
         <div className="toolstrip">
-          {mode !== "markdown" && (
-            <>
-              <button onClick={() => activeNodeId ? insertAfter(activeNodeId) : insertChild(MINDMAP_ROOT_ID)}>
-                <Plus size={16} />
-                同级
-              </button>
-              <button onClick={() => insertChild(activeNodeId ?? MINDMAP_ROOT_ID)}>
-                <Indent size={16} />
-                子级
-              </button>
-              <button onClick={() => activeNodeId && setFocusNodeId(activeNodeId)}>
-                <Focus size={16} />
-                聚焦
-              </button>
-              <button onClick={() => activeNodeId && moveSelected(-1)}>
-                <ArrowUp size={16} />
-                上移
-              </button>
-              <button onClick={() => activeNodeId && moveSelected(1)}>
-                <ArrowDown size={16} />
-                下移
-              </button>
-              <span className="separator" />
-            </>
-          )}
-          <button onClick={() => exportActive("markdown")}>
-            <Download size={16} />
-            导出 MD
-          </button>
-          <button onClick={() => exportActive("markdown", true)}>带元数据</button>
-          <button onClick={() => exportActive("opml")}>OPML</button>
-          <button onClick={() => exportActive("freemind")}>FreeMind</button>
-          <button onClick={() => exportActive("html")}>HTML</button>
-          <button onClick={exportActivePdf}>PDF</button>
-          {mode === "mindmap" && <><button onClick={() => void exportMap("svg")}>SVG</button><button onClick={() => void exportMap("png")}>PNG</button><button onClick={() => void exportMap("png", true)}>透明 PNG</button></>}
-          <button onClick={exportAll}>
-            <FileJson size={16} />
-            工作区
-          </button>
-          <button disabled={attachmentBusy || recoveryBusy || !(window.bike ?? window.localOutline)?.importAttachments} onClick={() => void addAttachments()}>添加附件</button>
-          {attachmentBusy && <button onClick={cancelAttachmentImport}>取消附件导入</button>}
-          <button disabled={recoveryBusy} onClick={() => void exportArchive()}>工作区 ZIP</button>
-          <button disabled={recoveryBusy} onClick={() => void importArchive()}>载入 ZIP</button>
-          <button disabled={recoveryBusy} onClick={() => void importArchive(true)}>补齐附件</button>
-          <button disabled={recoveryBusy || attachmentBusy} onClick={() => void cleanAttachments()}>清理附件</button>
-          <span className="separator" />
-          <button onClick={backupToCloud}>
-            <Cloud size={16} />
-            iCloud 备份
-          </button>
-          <button onClick={loadCloudBackup}>载入备份</button>
+          <div className="toolstrip-tools">
+            {mode !== "markdown" && (
+              <>
+                <button onClick={() => activeNodeId ? insertAfter(activeNodeId) : insertChild(MINDMAP_ROOT_ID)}>
+                  <Plus size={16} />
+                  同级
+                </button>
+                <button onClick={() => insertChild(activeNodeId ?? MINDMAP_ROOT_ID)}>
+                  <Indent size={16} />
+                  子级
+                </button>
+                <button onClick={() => activeNodeId && setFocusNodeId(activeNodeId)}>
+                  <Focus size={16} />
+                  聚焦
+                </button>
+                <button onClick={() => activeNodeId && moveSelected(-1)}>
+                  <ArrowUp size={16} />
+                  上移
+                </button>
+                <button onClick={() => activeNodeId && moveSelected(1)}>
+                  <ArrowDown size={16} />
+                  下移
+                </button>
+                <span className="separator" />
+              </>
+            )}
+            {mode === "mindmap" && <><button onClick={() => void exportMap("svg")}>SVG</button><button onClick={() => void exportMap("png")}>PNG</button><button onClick={() => void exportMap("png", true)}>透明 PNG</button></>}
+            <button disabled={attachmentBusy || recoveryBusy || !(window.bike ?? window.localOutline)?.importAttachments} onClick={() => void addAttachments()}>添加附件</button>
+            {attachmentBusy && <button onClick={cancelAttachmentImport}>取消附件导入</button>}
+            <button disabled={recoveryBusy} onClick={() => void exportArchive()}>工作区 ZIP</button>
+            <button disabled={recoveryBusy} onClick={() => void importArchive()}>载入 ZIP</button>
+            <button disabled={recoveryBusy} onClick={() => void importArchive(true)}>补齐附件</button>
+            <button disabled={recoveryBusy || attachmentBusy} onClick={() => void cleanAttachments()}>清理附件</button>
+          </div>
+          <div className="toolstrip-actions">
+            <span className="separator" />
+            <ExportMenu onDocument={exportActive} onPdf={exportActivePdf} onWorkspace={exportAll} />
+            <button onClick={backupToCloud}>
+              <Cloud size={16} />
+              iCloud 备份
+            </button>
+            <button onClick={loadCloudBackup}>载入备份</button>
+          </div>
         </div>
 
         <div
@@ -4460,6 +4756,26 @@ function App() {
         </div>
       )}
 
+      {showKnowledgeWorkflow && <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="AI 知识操作" onClick={() => setShowKnowledgeWorkflow(false)}><section className="api-config-dialog" onClick={(event) => event.stopPropagation()}>
+        <header><div><h3>AI 知识操作</h3><p>发送选中资料，生成结构化候选后预览。</p></div><button type="button" className="dialog-close" aria-label="关闭" onClick={() => setShowKnowledgeWorkflow(false)}><X size={16} /></button></header>
+        <div className="config-body"><label className="config-field"><span>操作</span><select value={knowledgeAction} onChange={(event) => setKnowledgeAction(event.target.value as KnowledgeAction)}>{KNOWLEDGE_ACTIONS.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label>
+          <label className="checkbox-field"><input type="checkbox" checked={knowledgeWholeDocument} onChange={(event) => setKnowledgeWholeDocument(event.target.checked)} />使用当前整篇文档。默认使用选中子树。</label>
+          {knowledgeAction === "summary" && <label className="config-field"><span>写入位置</span><select value={summaryDestination} onChange={(event) => setSummaryDestination(event.target.value as "child" | "note")}><option value="child">新增摘要主题</option><option value="note">追加到选中主题备注</option></select></label>}
+          {knowledgeAction.endsWith("-template") && <><label className="config-field"><span>读者</span><select value={templateAudience} onChange={(event) => setTemplateAudience(event.target.value)}><option value="mixed">产品与研发</option><option value="engineering">研发</option><option value="product">产品</option></select></label><p>落点为新文档，可在接受后撤销创建。</p></>}
+          <p>范围上限为 2,000 个主题和 256 KiB 文本。缺少依据的信息需标为待确认。</p></div>
+        <footer><button type="button" className="primary" onClick={() => void runKnowledgeWorkflow()} disabled={Boolean(aiBusyKey)}>生成提案</button><button className="secondary" onClick={() => setShowKnowledgeWorkflow(false)}>取消</button></footer>
+      </section></div>}
+      {showLiveMcp && <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="Live MCP 授权" onClick={() => setShowLiveMcp(false)}><section className="api-config-dialog" onClick={(event) => event.stopPropagation()}>
+        <header><div><h3>Live MCP 授权</h3><p>本机 stdio 客户端通过受保护的本机通道读取已提交内容。</p></div><button type="button" className="dialog-close" onClick={() => setShowLiveMcp(false)} aria-label="关闭"><X size={16} /></button></header>
+        <div className="config-body"><label className="config-field"><span>读取范围</span><select value={liveScope} onChange={(event) => setLiveScope(event.target.value as "document" | "workspace")}><option value="document">当前文档</option><option value="workspace">整个工作区</option></select></label>
+          <label className="checkbox-field"><input type="checkbox" checked={liveWritable} onChange={(event) => setLiveWritable(event.target.checked)} />允许提交写入提案，接受后生效</label>
+          <p>实际会话身份由主进程生成，客户端名称由客户端自行报告。重载、退出和撤权会使未确认提案失效。</p>
+          {liveState.discoveryPath && <p>发现文件 <code>{liveState.discoveryPath}</code></p>}
+          <pre>{JSON.stringify({ command: liveState.command ?? "node", args: liveState.args ?? ["mcp/bike-server.mjs", "--live"], env: { BIKE_LIVE_DISCOVERY: liveState.discoveryPath ?? "启用后生成" } }, null, 2)}</pre></div>
+        <footer><button type="button" className="primary" onClick={() => { void ensureOperationWorkspace().then(async (current) => { if (!current) return; const bridge = window.bike ?? window.localOutline; if (!bridge?.startLiveMcp) throw new Error("Live MCP 需要桌面版"); await bridge.startLiveMcp({ scope: liveScope, documentIds: [current.activeDocumentId], writable: liveWritable }); setLiveState(await bridge.getLiveMcpState!()); setShowLiveMcp(false); showNotice("Live MCP 已按所选范围启用"); }).catch((error) => showNotice(error instanceof Error ? error.message : "Live 启动失败")); }}>启用所选授权</button>
+          <button className="secondary" onClick={() => { void (window.bike ?? window.localOutline)?.stopLiveMcp?.().then((state) => { setLiveState(state); showNotice("Live MCP 授权已撤销"); }); }}>撤销并关闭</button></footer>
+      </section></div>}
+      {proposal && <ProposalDialog key={proposal.id} workspace={workspace} proposal={proposal} busy={proposalBusy} error={proposalError} onAccept={acceptProposal} onReject={rejectProposal} />}
       {showAiConfig && (
         <AiConfigDialog
           initialConfig={aiConfig || defaultAiConfig}
@@ -4529,7 +4845,7 @@ function App() {
       )}
 
       {showConfirmDelete && (
-        <div className="confirm-overlay" onClick={() => setShowConfirmDelete(false)}>
+        <div className="confirm-overlay" role="dialog" aria-modal="true" aria-label="删除文档" onClick={() => setShowConfirmDelete(false)}>
           <div className="confirm-dialog" onClick={(e) => e.stopPropagation()}>
             <h3>确认删除</h3>
             <p>确定要将文档「{activeDocument.title}」移入回收站吗？回收站会保留 30 天，可随时恢复。</p>
@@ -4559,6 +4875,21 @@ function App() {
           loading={historyLoading}
           error={historyError}
           busy={historyBusy || syncBusy}
+          operations={historyReplica?.audit ?? []}
+          conflicts={historyReplica?.conflicts ?? []}
+          onRecoverOperation={(operation) => { const current = flushPendingEdits() ?? workspaceRef.current; if (!current || !historyReplica) return; try { enqueueProposal(operationRecoveryProposal(current, historyReplica, operation)); closeVersionHistory(); } catch (error) { setHistoryError(error instanceof Error ? error.message : "恢复提案未完成"); } }}
+          onResolveConflict={(conflict, choice) => { const current = flushPendingEdits() ?? workspaceRef.current; if (!current || !historyReplica) return; try { enqueueProposal(conflictResolutionProposal(current, historyReplica, conflict, choice)); closeVersionHistory(); } catch (error) { setHistoryError(error instanceof Error ? error.message : "请重新比较冲突"); } }}
+          onNavigate={(documentId, nodeId) => { closeVersionHistory(); openKnowledgeTarget(documentId, nodeId); }}
+          onRestoreCopy={(snapshot) => {
+            const current = flushPendingEdits() ?? workspaceRef.current; if (!current) return;
+            const id = uuid(), rekeyed = rekeyKnowledgeNodes(snapshot.document.nodes, uid);
+            const fragment = copiedKnowledgeFragment(anchorMarkdownReferences(snapshot.document), { sourceDocumentId: snapshot.documentId, nextDocumentId: id, idMap: rekeyed.idMap, wholeDocument: true });
+            if (fragment.locked) { setHistoryError("此版本包含未知知识格式，请升级后恢复"); return; }
+            const copy = clearDocumentMarkdown({ ...snapshot.document, id, title: `${snapshot.title} 恢复副本`, nodes: rekeyed.nodes as OutlineNode[], createdAt: now(), updatedAt: now(),
+              knowledge: { ...snapshot.document.knowledge, version: 1, references: fragment.references, relations: fragment.relations, sourceGroups: fragment.sourceGroups } });
+            commitWorkspace((workspace) => ({ ...workspace, documents: [...workspace.documents, copy] }), { label: "恢复历史为副本" });
+            closeVersionHistory(); showNotice("历史版本已恢复为新副本");
+          }}
           onRestore={(snapshot) => void restoreVersionSnapshot(snapshot)}
           onSaveNow={() => void saveCurrentVersion()}
           onClose={closeVersionHistory}
@@ -4677,7 +5008,7 @@ function AiConfigDialog({
   };
 
   return (
-    <div className="modal-overlay" onClick={onClose}>
+    <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="AI 配置" onClick={onClose}>
       <form
         className="api-config-dialog"
         onSubmit={(event) => {
@@ -4794,7 +5125,7 @@ function SyncConfigDialog({
   };
 
   return (
-    <div className="modal-overlay" onClick={onClose}>
+    <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="文档同步" onClick={onClose}>
       <form
         className="api-config-dialog sync-config-dialog"
         onSubmit={(event) => {

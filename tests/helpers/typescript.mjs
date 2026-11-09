@@ -58,5 +58,7 @@ export function loadAppCallback(name, bindings) {
   const initializer = declaration.initializer;
   const callback = ts.isCallExpression(initializer) ? initializer.arguments[0] : initializer;
   if (!("AbortController" in bindings)) bindings.AbortController = AbortController;
+  if (!("operationCommitRef" in bindings)) bindings.operationCommitRef = { current: false };
+  if (!("markWorkspaceOperation" in bindings)) bindings.markWorkspaceOperation = loadTypescript("src/storage.ts").markWorkspaceOperation;
   return vm.runInNewContext(compile(`(${callback.getText(ast)})`), bindings, { filename });
 }

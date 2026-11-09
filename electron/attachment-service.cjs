@@ -205,6 +205,28 @@ const createAttachmentService = ({ directory }) => {
       await fs.rm(temporary, { force: true });
     }
   };
+  const transferSource = async (assetId, expected, signal) => {
+    const { attachmentDigest } = await contracts();
+    const target = await objectPath(assetId, true);
+    pinned.add(assetId);
+    if (!await fs.lstat(target).catch((error) => { if (error.code === "ENOENT") return null; throw error; })) {
+      const isolated = await quarantinePath(assetId);
+      await fs.link(isolated, target).catch((error) => { if (error.code !== "EEXIST") throw error; });
+    }
+    const handle = await fs.open(target, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+    try {
+      const stat = await handle.stat();
+      if (!stat.isFile() || stat.size !== expected.byteLength) throw Object.assign(new Error("本机附件长度与清单不一致"), { code: "ATTACHMENT_INTEGRITY" });
+      const hash = crypto.createHash("sha256");
+      for await (const chunk of handle.createReadStream({ autoClose: false })) { signal?.throwIfAborted(); hash.update(chunk); }
+      if (hash.digest("hex") !== attachmentDigest(assetId)) throw Object.assign(new Error("本机附件哈希校验失败"), { code: "ATTACHMENT_INTEGRITY" });
+      const header = Buffer.alloc(Math.min(1024 * 1024, stat.size));
+      await handle.read(header, 0, header.length, 0);
+      const actual = { ...metadataFor(header), byteLength: stat.size };
+      if (["mediaType", "width", "height"].some((key) => actual[key] !== expected[key])) throw Object.assign(new Error("本机附件格式与清单不一致"), { code: "ATTACHMENT_INTEGRITY" });
+      return target;
+    } finally { await handle.close(); }
+  };
   const copyWorkspaceAssets = async (workspace, destination) => {
     const { workspaceAttachmentAssets } = await contracts();
     const assets = workspaceAttachmentAssets(workspace);
@@ -274,7 +296,7 @@ const createAttachmentService = ({ directory }) => {
       return { removed };
     });
   };
-  return { initialize, read, putBytes, importFile, copyWorkspaceAssets, scan, quarantine, purge };
+  return { initialize, read, putBytes, importFile, transferSource, copyWorkspaceAssets, scan, quarantine, purge };
 };
 
 module.exports = { createAttachmentService, metadataFor };

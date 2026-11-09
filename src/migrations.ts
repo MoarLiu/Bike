@@ -4,7 +4,7 @@ import { uuid } from "./id";
 import { assertDocumentBudget, assertWorkspaceBudget } from "../shared/bike-limits.mjs";
 import { validateDocumentAttachments, workspaceFormatVersion } from "../shared/bike-attachments.mjs";
 
-export const CURRENT_WORKSPACE_VERSION = 2;
+export const CURRENT_WORKSPACE_VERSION = 3;
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
@@ -159,7 +159,7 @@ export const migrateWorkspace = (rawWorkspace: unknown): Workspace => {
   if (!isRecord(rawWorkspace) || !Array.isArray(rawWorkspace.documents)) {
     throw new Error("导入文件不是有效工作区");
   }
-  if (rawWorkspace.version !== undefined && rawWorkspace.version !== 1 && rawWorkspace.version !== CURRENT_WORKSPACE_VERSION) {
+  if (rawWorkspace.version !== undefined && rawWorkspace.version !== 1 && rawWorkspace.version !== 2 && rawWorkspace.version !== CURRENT_WORKSPACE_VERSION) {
     throw new Error(`工作区版本 ${String(rawWorkspace.version)} 暂不支持，原数据已保留`);
   }
   assertWorkspaceBudget(rawWorkspace);
@@ -183,7 +183,7 @@ export const migrateWorkspace = (rawWorkspace: unknown): Workspace => {
 
   const workspace: Workspace = {
     ...rawWorkspace,
-    version: rawWorkspace.version === 2 ? 2 : 1,
+    version: rawWorkspace.version === 3 ? 3 : rawWorkspace.version === 2 ? 2 : 1,
     activeDocumentId,
     documents,
   };
