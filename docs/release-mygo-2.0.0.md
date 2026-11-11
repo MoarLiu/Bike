@@ -1,8 +1,8 @@
-# Bike MyGO 2.0.0 候选说明
+# Bike MyGO 2.0.0 发布说明
 
-更新于 2026-11-11，时区为 Asia/Shanghai。已归档制品为 macOS arm64 本地 preview build 13，制品与摘要见 [候选证据](validation-mygo-2.0.0.md)，验证范围见 [验收记录](acceptance-mygo-2.0.0.md)。当前源码修复尚需同源构建和验证，展开大纲性能、自动化回归、远端 CI 与严格包校验继续保持发布阻断。
+发布于 2026-11-11 17:50，时区为 Asia/Shanghai。正式制品为 macOS arm64 stable build 15，标签为 `mygo-v2.0.0`，源码提交为 `8d7cc9b69d425a454b8a8c18f2aeb013a3b4961b`。公开下载见 [GitHub Release](https://github.com/MoarLiu/Bike/releases/tag/mygo-v2.0.0)，制品摘要与下载核验见 [发布验证](publish-verification-mygo-2.0.0.md)。
 
-用户已在 2026-11-11 授权处理其余缺陷后执行发布流程，后续沿用该授权。持续发布路线为 ad-hoc 签名与手动 DMG 安装。人工真机测试由用户亲自完成，并作为非阻断待办保留实际状态。
+本次按用户授权完成其余修复并执行公开发布。持续采用 ad-hoc 签名与手动 DMG 安装，人工真机验收由用户亲自完成，按约定记录为非阻断待办。
 
 ## 产品与安装
 
@@ -26,7 +26,7 @@ Go MCP 由包内同一可执行文件提供。File 默认为只读，v1/v2 真�
 
 ## 更新方式
 
-MyGO 仅选择 `mygo-v` 发布链，候选清单记录 `installation=manual`、`automaticReplacement=false`。应用检查新版本后打开受信发布页，用户取得新 DMG 并手动安装。候选中的 `update-darwin-arm64.json` 用于本地完整性核对，`updaterConsumed=false`。
+MyGO 选择 `mygo-v` 发布链，安装方式为手动 DMG。发布资产中的 `update-darwin-arm64.json` 为发布完整性清单，标记 `published=true`、`updaterConsumed=false` 和 `automaticReplacement=false`。本地构建原始清单保留生成时状态，公开清单与 SHA256SUMS 在发布暂存目录生成并经下载复核。
 
 按用户确认，本次交付使用独立渠道查询、受信发布页与手动 DMG 安装。自动下载、进度、稍后自动安装、保存后自动替换、更新包签名链、断点下载及安装故障状态机不纳入本次交付。持续采用 ad-hoc 签名，Apple Developer ID 签名与公证不作为该路线的前置条件。Gatekeeper 和手动安装的人工体验由用户验收并保留非阻断待办。
 
@@ -34,6 +34,6 @@ MyGO 仅选择 `mygo-v` 发布链，候选清单记录 `installation=manual`、`
 
 独立主题编辑按用户要求固定为 50 次。样本包括 100 文档/20,000 主题、单文档 20,000 主题、折叠/展开大纲与脑图，以及单独的大提案和 128 MiB 附件峰值。旧失败、诊断与修复后复测分别保留，入口见 [性能证据](validation-mygo-2.0.0.md)。
 
-build 13 的展开大纲局部诊断完成 3 次保存与同事务回读，耗时为 10.80 / 10.26 / 3.70 秒，长尾仍在。该补丁尚未证明性能改善，MG11 保留阻断，正式 50 次对照尚未完成。携图 ZIP 的真实面板成功证据来自 build 11，build 13 的面板交互超时单独保留并交由用户非阻断复验，本地归档代码与文件检查继续执行。
+最终源码进一步复用输入高度测量、稳定附件 Context，并跳过隐藏工具区的子树绘制。20,000 行全部挂载，同源 MyGO 与 Electron 各 50 次编辑均完成修订与正文回读。MyGO 中位数 1,307 ms、p95 1,701 ms，同源重建 Electron 中位数 2,472 ms、p95 3,576 ms。MyGO p95 低 52.4%，通过 20% 退化复核门槛。50 次中仍有 5,976 ms 和 7,049 ms 两个极值，保留为极限数据规模下的性能边界。历史失败与正式 Electron 旧基线继续分别归档。
 
-macOS 12/13、第二台物理 Mac、真实中文输入法、Finder/系统剪贴板/物理拖放、iCloud、真实 AI provider、Gatekeeper 及其他人工交互由用户负责，按 [验收记录](acceptance-mygo-2.0.0.md) 保留非阻断待办。当前源码重新打包、自动化回归、远端 CI、包校验与其余缺陷处置继续按发布门禁完成。缺陷与处理见 [缺陷记录](defects-mygo-2.0.0.md)，已授权的发布流程和发布后检查见 [发布验证](publish-verification-mygo-2.0.0.md)。
+macOS 12/13、第二台物理 Mac、真实中文输入法、Finder/系统剪贴板/物理拖放、iCloud、真实 AI provider、外部 MCP 客户端、Gatekeeper 及原生保存面板由用户负责，按 [验收记录](acceptance-mygo-2.0.0.md) 保留非阻断待办。源码、同源 app/probe、DMG/tar、自动化回归、远端 CI、严格包校验和公开下载检查已完成。

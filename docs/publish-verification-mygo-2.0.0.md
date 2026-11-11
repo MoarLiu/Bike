@@ -1,51 +1,61 @@
 # Bike MyGO 2.0.0 发布验证
 
-更新于 2026-11-11，时区为 Asia/Shanghai。当前状态为本地候选，`published=false`。用户已在 2026-11-11 授权其余缺陷处理后执行发布流程，包含提交、推送、独立标签、公开 Release 与资产上传，后续沿用该授权。
+发布于 2026-11-11 17:50，时区为 Asia/Shanghai，`published=true`。用户授权的源码提交、推送、标签、公开 Release 与资产上传均已执行。
 
-持续发布路线为 ad-hoc 签名和手动 DMG 安装。用户亲自负责人工真机验收，相关证据保留待验并移出发布阻断。性能长尾、当前修复源码的同源制品、自动化回归、远端 CI 与严格包校验仍为阻断项。
+## 正式身份与制品
 
-## 本地制品
-
-构建与验证记录位于 [验收记录](acceptance-mygo-2.0.0.md) 和 [build 13 证据](validation-mygo-2.0.0.md)。本地 preview 已归档，展开大纲性能阻断继续保留。最终正式候选须核对以下字段。
-
-| 核对项 | 依据 |
+| 核对项 | 结果 |
 | --- | --- |
-| 版本、形态、build、bundle、平台、架构 | 包内 `--version`、Info.plist、build-manifest.json |
-| 源码与前端 | sourceFingerprint、sourceFingerprintScope、frontendSHA256 |
-| Mach-O 与签名 | arm64、minos、codesign 严格校验、真实签名类型 |
-| 包内容 | app、挂载 DMG、复制 app、解压 tar 的完整内容指纹 |
-| 摘要与清单 | SHA256SUMS、DMG/tar SHA-256、update-darwin-arm64.json |
-| Node-free 运行 | 系统 PATH 下 GUI/服务/MCP，包内运行时扫描与 dylib |
-| 开源许可 | Go、实际链接模块、前端依赖及字体的通知 |
+| Release | [Bike MyGO 2.0.0](https://github.com/MoarLiu/Bike/releases/tag/mygo-v2.0.0) |
+| 版本与标签 | 2.0.0 / mygo-v2.0.0 |
+| build / 通道 / 架构 | 15 / stable / darwin arm64 |
+| Bundle / profile | com.bike.mygo / Bike-MyGO |
+| 标签与包内源码提交 | `8d7cc9b69d425a454b8a8c18f2aeb013a3b4961b` |
+| 源码指纹 | `6796e5c22a6672b34bc0166af4cffd8453ef90ee158bfafc399d6153a0b9145c` |
+| 前端 SHA-256 | `6090fc39aa57e8b27d897831488980ebeaaec99b1f2ed4f33070088bd3bb5af7` |
+| 包内二进制 SHA-256 | `95569bc401c1c2744948e208b5bf133e5e813975e301e2be24a4a7c3ed52d7f6` |
+| 签名与安装 | ad-hoc，未公证，手动 DMG |
+| 系统声明 | Mach-O minos 与 Info.plist 均为 12.0 |
 
-当前候选的更新清单为本地完整性记录，安装方式为手动，更新包签名为 none。实际 ad-hoc codesign、架构、摘要和包内容检查继续执行。公开安装说明披露持续采用的 ad-hoc、未公证及手动 DMG 路线，Gatekeeper 人工体验由用户非阻断验收。自动下载与替换不纳入本次交付。
+本地原始构建清单保留 local-candidate 状态。发布暂存目录将独立完整性清单提升为 `purpose=release-integrity-inventory`、`published=true`，重新生成其 SHA256SUMS。app、DMG 与 tar 的字节保持已验证摘要。发布清单为手动安装资产的完整性记录，`updaterConsumed=false`。
 
-## 发布前阻断项
+## 公开资产与重新下载
 
-- [ ] 处理其余缺陷，将当前修复源码重新构建为同源 app、probe、DMG、tar 和清单，并完成 MG01–MG12 本次交付范围内的受影响自动化检查。
-- [ ] 独立 MyGO workflow 在远端运行通过。
-- [ ] 严格包校验、实际 ad-hoc 签名完整性、许可、架构、摘要与 Node-free 运行检查通过。
-- [ ] 性能超过 20% 的退化完成原因复核与处置。
-- [ ] 解决展开大纲长尾并完成受影响场景的 50 次对照。
-- [x] 用户在 2026-11-11 给出处理其余缺陷后执行发布的指令，后续沿用该授权。
-- [x] 用户确认持续 ad-hoc/手动 DMG 路线，自动下载及替换状态机移出本次交付。
+| 文件 | 字节 | SHA-256 |
+| --- | --- | --- |
+| bike-mygo-2.0.0-arm64.dmg | 10277308 | `97c581a173beb96760a83905577ccbdf7dfc787f5766a035b84e640e4ee99ebe` |
+| bike-mygo-2.0.0-arm64.dmg.sha256 | 92 | `ba22c975b99b7a677fd630d551c9fc347ddd113bedc2f8c9d55476964e8a8235` |
+| bike-mygo-2.0.0-darwin-arm64.tar.gz | 9211178 | `01d4d7ff31ac73f98c624c7eaa6caad54892b434b2a7f6072484cd4c95a66341` |
+| SHA256SUMS | 285 | `79a72fbeb36b1d6d559c7a1e45594a6ad985fd06189a898dd624042498bdd647` |
+| update-darwin-arm64.json | 1459 | `701fc2e6fde6b37a29eda7a3a934aa4419f1d5983a89e68d8d5aeea7dca033ea` |
+
+五项资产均已通过匿名公开地址重新下载，与本地发布暂存文件逐字节摘要一致。DMG 独立 .sha256 与 SHA256SUMS 一致，DMG/tar 与清单中的长度及摘要一致。
+
+## 已完成的发布门禁
+
+- [x] 最终源码与隔离构建工作区 clean，正式 app/probe 源码及前端一致。
+- [x] 最终 50 次展开大纲测量的前端摘要与正式包一致，双宿主均逐次完成持久化回读，p95 门槛通过。
+- [x] 原生运行、Node-free PATH、桥接、持久化与 Live MCP 检查通过。
+- [x] DMG 只读挂载、复制安装、tar 解压、包内容指纹、arm64/minos、ad-hoc 完整性和许可检查通过。
+- [x] 复制安装后的启动早退与常规退出自然结束，状态为 0，约 171 ms / 173 ms。
+- [x] [MyGO CI](https://github.com/MoarLiu/Bike/actions/runs/42997776945) 与 [既有 CI](https://github.com/MoarLiu/Bike/actions/runs/42997777069) 在最终源码提交上通过。
+- [x] 独立标签指向包内源码提交，Release 为公开、非草稿、非预发布。
+- [x] 显式 `Latest=false`，仓库 Latest 解析为 `v2.0.0`。
+- [x] 上传五项明确允许的资产，并完成公开重新下载及摘要检查。
+
+展开大纲极限样本仍有两次约 6–7 秒的极值。当前与历史性能口径、RSS 和物理占用差异见 [验证摘要](validation-mygo-2.0.0.md)。
+
+## 发布后渠道检查
+
+- 原 Electron 生产更新检查函数实际查询公开接口，得到 `v2.0.0`，当前 2.0.0 返回无新版本。该函数与原 v2.0.0 源码相同。
+- Go 生产 `CheckMyGoUpdate` 实际查询公开发布历史，得到独立 `mygo-v2.0.0` 发布页，当前 2.0.0 返回无新版本并标记 manual。
+- Web/Sync 安装器原始解析、下载和 SHA-256 校验函数实际选择 `v2.0.0`，部署归档下载与摘要核验通过。该检查覆盖安装器的发布选择和下载阶段。
 
 ## 用户人工验收的非阻断待办
 
-- [ ] 用户验收 macOS 12/13 与第二台物理 Mac。
-- [ ] 用户验收真实中文 IME、Finder、系统剪贴板、物理拖放、iCloud、真实 AI provider 及其他人工系统交互。
-- [ ] 用户记录 Gatekeeper 提示、手动安装与实际启动体验。
-- [ ] 用户复验当前构建携图 ZIP 的原生保存面板。build 13 交互超时保留，build 11 成功证据保留原归属，本地归档代码检查继续按影响范围执行。
+- [ ] macOS 12/13 与第二台物理 Mac。
+- [ ] 真实中文 IME、Finder、系统剪贴板、物理拖放、iCloud、真实 AI provider 和外部 MCP 客户端。
+- [ ] Gatekeeper 提示、手动安装、窗口移动/缩放与 Dock 重开。
+- [ ] 当前构建携图 ZIP 的原生保存面板。build 11 成功证据与 build 13 焦点竞争超时分别保留。
 
-## 已授权的发布执行检查
-
-- [ ] 对明确允许的文件进行最终 diff 和状态核对，记录实际 commit。
-- [ ] 建立独立 `mygo-v2.0.0` 标签和 Bike MyGO 2.0.0 Release。
-- [ ] 明确设置该 Release 的 Latest 行为，核对原 Electron/Web 的选择结果。
-- [ ] 上传匹配的 DMG、tar、清单与摘要。
-- [ ] 从公开地址重新下载资产，校验字节和 SHA-256。
-- [ ] 验证 Release 的非草稿可见性、版本、平台、形态和资产名。
-- [ ] 真实运行原 Electron 更新检查、Web/Sync latest 安装和 MyGO `mygo-v` 查询三条路径。
-- [ ] 在发布说明中列出用户负责的 Gatekeeper、手动安装和其他人工真机待办及当前证据状态。
-
-公开下载、远端可见性和三条正式更新路径在当前记录中保持待执行。
+持续 ad-hoc 签名与上述用户人工验收按 2026-11-11 指令列为非阻断条件，状态继续按实际证据记录。

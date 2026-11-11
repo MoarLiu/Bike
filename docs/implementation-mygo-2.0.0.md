@@ -1,10 +1,10 @@
 # Bike MyGO 2.0.0 实施记录
 
-进度更新于 2026-11-11，时区为 Asia/Shanghai。范围依据 [开发计划](development-mygo-2.0.0.md)。本地 preview build 13 的实现与证据已归档，展开大纲性能、MG10 范围差异及外部验收继续跟踪。
+进度更新于 2026-11-11。stable build 15 已公开发布，标签为 mygo-v2.0.0，源码为 `8d7cc9b69d425a454b8a8c18f2aeb013a3b4961b`。范围依据[开发计划](development-mygo-2.0.0.md)，实际发布与验证见[发布验证](publish-verification-mygo-2.0.0.md)。
 
 ## 开工基线与产品身份
 
-- 分支为 `codex/mygo-2.0.0`，基线为 `fd3f57ec6551e234d3aecbb1c9145c34684f9d2e`。当前成果保存在工作区。
+- 分支为 `codex/mygo-2.0.0`，开工基线为 `fd3f57ec6551e234d3aecbb1c9145c34684f9d2e`。正式产品源码已提交并由 `mygo-v2.0.0` 标签固定。
 - 开工时已有 `.github/workflows/macos-signed.yml`、`README.md`、`package.json` 修改，以及 `.workbuddy/`、探针、审查和签名资料。保留既有内容，新增独立 MyGO 入口。
 - 产品版本保持 2.0.0，独立 build 编号。stable 身份为 `com.bike.mygo`，preview 为 `com.bike.mygo.preview`。profile、备份目录、Live discovery、socket 和输出目录按通道隔离。
 - 包内入口为 `Contents/MacOS/bike-mygo`。同一 Go 可执行文件支持 GUI、File MCP、Live MCP 和构建身份查询。更新只选择 `mygo-v` 版本链，当前采用 ad-hoc 签名和手动安装流程。
@@ -51,7 +51,7 @@ Go 文件服务的 JS↔Go ZIP 与实际 Node Sync Server 验证，包含 v1/v2/
 当前产品可执行文件提供一次性源导出入口，实际产品路径验收复用 build 12 记录。用户先保存草稿并退出原 Electron Bike 2.0.0，然后明确选择已安装 app 和其真实 profile 路径。
 
 ```sh
-"/Applications/Bike MyGO Preview.app/Contents/MacOS/bike-mygo" \
+"/Applications/Bike MyGO.app/Contents/MacOS/bike-mygo" \
   --export-electron-profile \
   --electron-app "/Applications/Bike.app" \
   --source-profile "/absolute/path/to/closed-electron-profile" \
@@ -70,7 +70,7 @@ Go 文件服务的 JS↔Go ZIP 与实际 Node Sync Server 验证，包含 v1/v2/
 
 原生采样进一步定位到大纲父 Grid 的隐式轨道计算，父列表改为等价块流，每行原有内部 Grid 继续使用。build 11 冻结前端上的单属性 override 验证了 100 行完整矩形一致、20,000 行两次保存与重启读回。修复随后进入 build 12。任务勾选按钮移入既有文字 flex 容器，build 12 原生浅暗主题/双尺寸验证其为 22×28、与文字同排并可持久切换。
 
-build 13 将 `OutlineView` 包装为默认 `React.memo`，以核对行状态和回调身份的 WeakMap 复用 JSX。20,000 行分配断言中，根文字更新创建 1 个新行元素、复用 19,999 个。原生局部 3 次编辑已验证同事务回读及 revision 102→104，耗时为 10,800 / 10,260 / 3,700 ms。该结果尚未证明长尾改善，性能阻断保留。本次收尾结束于局部诊断，其他模块复用已归档结果。
+build 13 引入默认 React.memo 边界与按行状态复用的 WeakMap JSX 缓存。后续进一步稳定附件 Context、复用输入事件的同步高度测量，并让隐藏工具区保留占位且跳过子树绘制。悬浮、活动行、键盘焦点和已打开的 AI 菜单恢复正常显示。最终同源双宿主各 50 次编辑与回读通过，MyGO p95 1,701 ms，Electron 3,576 ms。MyGO 最大 7,049 ms，历史失败与极值保留。
 
 共享 PDF 导出补上代码语言和多行正文，保留缩进与空行。完成任务使用 `[x]`。当前字体无法表示的字符使用可读 Unicode 标记，例如 `🙂` 输出为 `[U+1F642]`。build 12 的实际 PDF 已经过文本提取、字体/图像对象检查及白底 2× 渲染验证。
 
@@ -91,7 +91,8 @@ File 提供 6 个读工具和 8 个写工具。Live 另提供 `get_proposal_stat
 
 ```sh
 export BIKE_MYGO_GO="$(command -v go)"
-export BIKE_MYGO_BUILD=13
+export BIKE_MYGO_BUILD=15
+export BIKE_MYGO_CHANNEL=stable
 npm run mygo:test:contracts
 npm run mygo:test
 npm run mygo:test:race
@@ -106,14 +107,14 @@ npm run mygo:verify:package
 以上为各类检查入口，按开发计划第 10.3 节选择受影响步骤。构建会核对产品版本、编译器、源码锁、Mach-O 最低版本、生产标志与构建输入指纹。Go、前端及字体许可放入签名包内。候选打包生成 DMG、tar、独立更新清单与 SHA-256 文件，严格验证会挂载 DMG、复制 app、解压 tar 并比对完整包内容。实际最终 build 和测试结果见 [验收记录](acceptance-mygo-2.0.0.md)。
 
 ```sh
-"Bike MyGO Preview.app/Contents/MacOS/bike-mygo" --version
-"Bike MyGO Preview.app/Contents/MacOS/bike-mygo" --mcp-file --workspace /absolute/path/to/workspace.json
-"Bike MyGO Preview.app/Contents/MacOS/bike-mygo" --mcp-file --workspace /absolute/path/to/workspace-v2.json --mode write
-"Bike MyGO Preview.app/Contents/MacOS/bike-mygo" --mcp-live
+"Bike MyGO.app/Contents/MacOS/bike-mygo" --version
+"Bike MyGO.app/Contents/MacOS/bike-mygo" --mcp-file --workspace /absolute/path/to/workspace.json
+"Bike MyGO.app/Contents/MacOS/bike-mygo" --mcp-file --workspace /absolute/path/to/workspace-v2.json --mode write
+"Bike MyGO.app/Contents/MacOS/bike-mygo" --mcp-live
 ```
 
-## 尚需验收的条件
+## 最终验收与用户待办
 
-build 13 的原生完整副本 UI、多格式导出、双宿主运行、安装包和自然退出已有证据。收尾仅增加展开大纲 3 次局部诊断及重启稳定后一次退出专项，后者约 177.521 ms 自然结束 0，旧启动早退超时根因未确认。本机 Electron/Web 回归、产品源导出、大提案/附件峰值及完整并存检查复用 build 12，并保留其构建归属。展开大纲长尾继续阻断性能验收，携图 ZIP 保存面板保留 build 11 的历史证据边界，build 13 的面板超时单独归档。
+最终 build 15 完成同源构建、生产原生运行、严格包校验、复制安装后的启动早退/普通退出和两组远端 CI。原生完整副本 UI、多格式导出、跨宿主、源导出和峰值结果按 build 11/12/13 的实际归属复用。携图 ZIP 保存面板保留 build 11 成功与 build 13 焦点竞争超时的历史记录，当前人工复验由用户负责。
 
-更新已实现 `mygo-v` 查询、受信发布页和手动安装。原计划中的下载/进度/稍后安装/保存后安装及自动替换状态机仍未实现，须在正式对等交付前明确处置范围差异。macOS 12/13、两台物理 Mac、真实中文 IME、Finder 选择/系统剪贴板/物理拖放、真实 iCloud/AI provider 以及远端 CI 需要分别取得实际证据。
+正式发布后的 Go 更新查询选中 mygo-v2.0.0，原 Electron 与 Web/Sync 安装下载路径选中 v2.0.0，公开下载和摘要检查通过。当前交付采用 ad-hoc 与手动 DMG。macOS 12/13、两台物理 Mac、真实中文 IME、Finder/系统剪贴板/物理拖放、iCloud、真实 AI provider、外部 MCP 客户端和 Gatekeeper 由用户亲自验收，按约定列为非阻断待办。
