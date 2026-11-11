@@ -305,13 +305,27 @@ export const downloadBlob = (filename: string, blob: Blob) => {
 const pdfText = (value: string) =>
   value.replace(/\r\n?/g, "\n").replace(/\t/g, "  ").trim();
 
+const pdfCharacterSets = new WeakMap<PDFFont, Set<number>>();
+
 const wrapPdfText = (
   value: string,
   font: PDFFont,
   fontSize: number,
   maxWidth: number,
 ) => {
-  const paragraphs = pdfText(value).split("\n");
+  let characters = pdfCharacterSets.get(font);
+  if (!characters) {
+    characters = new Set(font.getCharacterSet());
+    pdfCharacterSets.set(font, characters);
+  }
+  // Keep unsupported characters identifiable instead of emitting .notdef boxes.
+  const printable = Array.from(pdfText(value), (character) => {
+    const codePoint = character.codePointAt(0)!;
+    return character === "\n" || characters.has(codePoint)
+      ? character
+      : `[U+${codePoint.toString(16).toUpperCase().padStart(4, "0")}]`;
+  }).join("");
+  const paragraphs = printable.split("\n");
   const lines: string[] = [];
 
   paragraphs.forEach((paragraph) => {
@@ -428,7 +442,7 @@ export const exportDocumentAsPdf = async (outlineDocument: OutlineDocument) => {
   const drawNode = (node: OutlineNode, depth: number) => {
     const indent = Math.min(depth, 12) * 18;
     const x = margin.left + indent;
-    const bullet = node.checked ? "☑" : "•";
+    const bullet = node.checked ? "[x]" : "•";
     const icon = node.icon ? `${node.icon} ` : "";
     const text = `${bullet} ${icon}${nodeText(node)}`;
     const fontSize = nodePdfFontSize(node, depth);
@@ -455,6 +469,16 @@ export const exportDocumentAsPdf = async (outlineDocument: OutlineDocument) => {
         fontSize: 9.5,
         lineHeight: 14,
         color: rgb(0.42, 0.42, 0.46),
+      });
+    }
+
+    if (node.codeBlock) {
+      const label = node.codeLanguage ? `代码（${node.codeLanguage}）` : "代码";
+      drawLines(wrapPdfText(`${label}\n${node.codeBlock}`, font, 9.5, maxWidth - 16), {
+        x: x + 16,
+        fontSize: 9.5,
+        lineHeight: 14,
+        color: rgb(0.22, 0.22, 0.26),
       });
     }
 

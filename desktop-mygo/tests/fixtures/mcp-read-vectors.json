@@ -1,0 +1,1727 @@
+[
+  {
+    "raw": "{\"version\":3,\"activeDocumentId\":\"doc\",\"documents\":[{\"id\":\"doc\",\"title\":\"Fixture **bold** #tag\",\"createdAt\":\"2026-11-10T00:00:00.000Z\",\"updatedAt\":\"2026-11-10T01:00:00.000Z\",\"nodes\":[{\"id\":\"root\",\"text\":\"Link [[Other]] and `[[ignored]]`\",\"note\":\"link [[Other#Target|custom]]\\nsecond line\",\"headingLevel\":1,\"children\":[{\"id\":\"child\",\"text\":\"#tag **text**\",\"checked\":true,\"table\":[[\"A|B\",\"[[Other]]\"],[\"cell\",\"\"]],\"codeBlock\":\"```\\n[[Other]]\",\"codeLanguage\":\"go ~ignored\",\"children\":[],\"note\":\"\",\"collapsed\":false,\"color\":\"plain\",\"headingLevel\":0,\"bold\":false,\"italic\":false,\"underline\":false,\"strike\":false,\"highlight\":false,\"isTodo\":false}],\"checked\":false,\"collapsed\":false,\"color\":\"plain\",\"bold\":false,\"italic\":false,\"underline\":false,\"strike\":false,\"highlight\":false,\"isTodo\":false}]},{\"id\":\"other\",\"title\":\"Other\",\"createdAt\":\"2026-11-10T00:00:00.000Z\",\"updatedAt\":\"2026-11-10T00:00:00.000Z\",\"nodes\":[{\"id\":\"target\",\"text\":\"Target\",\"children\":[],\"note\":\"\",\"checked\":false,\"collapsed\":false,\"color\":\"plain\",\"headingLevel\":0,\"bold\":false,\"italic\":false,\"underline\":false,\"strike\":false,\"highlight\":false,\"isTodo\":false}]}]}",
+    "documents": [
+      {
+        "id": "doc",
+        "markdown": "# Fixture \\*\\*bold\\*\\* #tag\n\n## Link [[Other]] and \\`\\[\\[ignored\\]\\]\\`\n> link [[Other#Target|custom]]\n> second line\n- [x] #tag \\*\\*text\\*\\*\n  | A\\|B | [[Other]] |\n  | --- | --- |\n  | cell |  |\n  ````go\n  ```\n  [[Other]]\n  ````",
+        "metadataMarkdown": "# Fixture \\*\\*bold\\*\\* #tag\n\n## Link [[Other]] and \\`\\[\\[ignored\\]\\]\\`\n> link [[Other#Target|custom]]\n> second line\n- [x] #tag \\*\\*text\\*\\*\n  | A\\|B | [[Other]] |\n  | --- | --- |\n  | cell |  |\n  ````go\n  ```\n  [[Other]]\n  ````\n\n<!-- bike:metadata -->\n<!-- bike:document:v1 eyJ2IjoxLCJkb2N1bWVudElkIjoiZG9jIiwidGl0bGUiOiJGaXh0dXJlICoqYm9sZCoqICN0YWciLCJkb2N1bWVudEF0dHJpYnV0ZXMiOnsiY3JlYXRlZEF0IjoiMjAyNi0xMS0xMFQwMDowMDowMC4wMDBaIn0sInN0cnVjdHVyZSI6InRyZWUtdjEiLCJub2RlcyI6W3siaWQiOiJyb290IiwicGF0aCI6WzBdLCJ0ZXh0IjoiTGluayBbW090aGVyXV0gYW5kIGBbW2lnbm9yZWRdXWAiLCJleHBvcnRUZXh0IjoiTGluayBbW090aGVyXV0gYW5kIGBbW2lnbm9yZWRdXWAiLCJub3RlIjoibGluayBbW090aGVyI1RhcmdldHxjdXN0b21dXVxuc2Vjb25kIGxpbmUiLCJhdHRyaWJ1dGVzIjp7ImhlYWRpbmdMZXZlbCI6MSwiY2hlY2tlZCI6ZmFsc2UsImNvbGxhcHNlZCI6ZmFsc2UsImNvbG9yIjoicGxhaW4iLCJib2xkIjpmYWxzZSwiaXRhbGljIjpmYWxzZSwidW5kZXJsaW5lIjpmYWxzZSwic3RyaWtlIjpmYWxzZSwiaGlnaGxpZ2h0IjpmYWxzZSwiaXNUb2RvIjpmYWxzZX19LHsiaWQiOiJjaGlsZCIsInBhdGgiOlswLDBdLCJ0ZXh0IjoiI3RhZyAqKnRleHQqKiIsImV4cG9ydFRleHQiOiIjdGFnICoqdGV4dCoqIiwibm90ZSI6IiIsImF0dHJpYnV0ZXMiOnsiY2hlY2tlZCI6dHJ1ZSwidGFibGUiOltbIkF8QiIsIltbT3RoZXJdXSJdLFsiY2VsbCIsIiJdXSwiY29kZUJsb2NrIjoiYGBgXG5bW090aGVyXV0iLCJjb2RlTGFuZ3VhZ2UiOiJnbyB-aWdub3JlZCIsImNvbGxhcHNlZCI6ZmFsc2UsImNvbG9yIjoicGxhaW4iLCJoZWFkaW5nTGV2ZWwiOjAsImJvbGQiOmZhbHNlLCJpdGFsaWMiOmZhbHNlLCJ1bmRlcmxpbmUiOmZhbHNlLCJzdHJpa2UiOmZhbHNlLCJoaWdobGlnaHQiOmZhbHNlLCJpc1RvZG8iOmZhbHNlfX1dLCJkaWdlc3QiOiJlNDNlMDhjYmVkYWRiYTJmZjRkY2Y0YzNiNTgyYWRlZWJkOTU2ZGM1OWMxMGM4Y2RiYzkyNjliM2I3MzNjNTk4In0 -->\n<!-- /bike:metadata -->\n",
+        "knowledge": {
+          "references": {
+            "items": [
+              {
+                "status": "resolved",
+                "raw": "[[Other]]",
+                "target": null,
+                "field": "text"
+              },
+              {
+                "status": "resolved",
+                "raw": "[[Other#Target|custom]]",
+                "target": null,
+                "field": "note"
+              }
+            ],
+            "total": 2,
+            "truncated": false
+          },
+          "incoming": {
+            "items": [],
+            "total": 0,
+            "truncated": false
+          },
+          "relations": {
+            "items": [],
+            "total": 0,
+            "truncated": false
+          },
+          "truncated": false
+        }
+      },
+      {
+        "id": "other",
+        "markdown": "# Other\n\n- Target",
+        "metadataMarkdown": "# Other\n\n- Target\n\n<!-- bike:metadata -->\n<!-- bike:document:v1 eyJ2IjoxLCJkb2N1bWVudElkIjoib3RoZXIiLCJ0aXRsZSI6Ik90aGVyIiwiZG9jdW1lbnRBdHRyaWJ1dGVzIjp7ImNyZWF0ZWRBdCI6IjIwMjYtMTEtMTBUMDA6MDA6MDAuMDAwWiJ9LCJzdHJ1Y3R1cmUiOiJ0cmVlLXYxIiwibm9kZXMiOlt7ImlkIjoidGFyZ2V0IiwicGF0aCI6WzBdLCJ0ZXh0IjoiVGFyZ2V0IiwiZXhwb3J0VGV4dCI6IlRhcmdldCIsIm5vdGUiOiIiLCJhdHRyaWJ1dGVzIjp7ImNoZWNrZWQiOmZhbHNlLCJjb2xsYXBzZWQiOmZhbHNlLCJjb2xvciI6InBsYWluIiwiaGVhZGluZ0xldmVsIjowLCJib2xkIjpmYWxzZSwiaXRhbGljIjpmYWxzZSwidW5kZXJsaW5lIjpmYWxzZSwic3RyaWtlIjpmYWxzZSwiaGlnaGxpZ2h0IjpmYWxzZSwiaXNUb2RvIjpmYWxzZX19XSwiZGlnZXN0IjoiZWJkMzM4MzIyYTA4NDUxOTViY2I1MGJjMThiNjdlOTkyZjNmYWQyYmYyYzQwZDgyZjczMzY0Mzg4MDg4YTU3NCJ9 -->\n<!-- /bike:metadata -->\n",
+        "knowledge": {
+          "references": {
+            "items": [],
+            "total": 0,
+            "truncated": false
+          },
+          "incoming": {
+            "items": [
+              {
+                "documentId": "doc",
+                "documentTitle": "Fixture **bold** #tag",
+                "nodeId": "root",
+                "field": "text",
+                "raw": "[[Other]]",
+                "label": "Other",
+                "status": "resolved",
+                "count": 1
+              },
+              {
+                "documentId": "doc",
+                "documentTitle": "Fixture **bold** #tag",
+                "nodeId": "root",
+                "field": "note",
+                "raw": "[[Other#Target|custom]]",
+                "label": "custom",
+                "status": "resolved",
+                "count": 1
+              }
+            ],
+            "total": 2,
+            "truncated": false
+          },
+          "relations": {
+            "items": [],
+            "total": 0,
+            "truncated": false
+          },
+          "truncated": false
+        }
+      }
+    ],
+    "calls": [
+      {
+        "name": "list_documents",
+        "args": {},
+        "expected": {
+          "query": "",
+          "documents": [
+            {
+              "id": "doc",
+              "title": "Fixture **bold** #tag",
+              "createdAt": "2026-11-10T00:00:00.000Z",
+              "updatedAt": "2026-11-10T01:00:00.000Z",
+              "nodeCount": 2,
+              "topLevelNodeCount": 1
+            },
+            {
+              "id": "other",
+              "title": "Other",
+              "createdAt": "2026-11-10T00:00:00.000Z",
+              "updatedAt": "2026-11-10T00:00:00.000Z",
+              "nodeCount": 1,
+              "topLevelNodeCount": 1
+            }
+          ]
+        }
+      },
+      {
+        "name": "list_documents",
+        "args": {
+          "query": "fixture",
+          "limit": 1,
+          "includeStats": false
+        },
+        "expected": {
+          "query": "fixture",
+          "documents": [
+            {
+              "id": "doc",
+              "title": "Fixture **bold** #tag",
+              "createdAt": "2026-11-10T00:00:00.000Z",
+              "updatedAt": "2026-11-10T01:00:00.000Z"
+            }
+          ]
+        }
+      },
+      {
+        "name": "search_outline",
+        "args": {
+          "query": "Other"
+        },
+        "expected": {
+          "query": "Other",
+          "limit": 20,
+          "matches": [
+            {
+              "documentId": "doc",
+              "documentTitle": "Fixture **bold** #tag",
+              "nodeId": "root",
+              "field": "text",
+              "snippet": "Link [[Other]] and `[[ignored]]`",
+              "breadcrumb": [
+                "Fixture **bold** #tag",
+                "Link [[Other]] and `[[ignored]]`"
+              ],
+              "path": [
+                0
+              ]
+            },
+            {
+              "documentId": "doc",
+              "documentTitle": "Fixture **bold** #tag",
+              "nodeId": "root",
+              "field": "note",
+              "snippet": "link [[Other#Target|custom]] second line",
+              "breadcrumb": [
+                "Fixture **bold** #tag",
+                "Link [[Other]] and `[[ignored]]`"
+              ],
+              "path": [
+                0
+              ]
+            },
+            {
+              "documentId": "other",
+              "documentTitle": "Other",
+              "nodeId": null,
+              "field": "title",
+              "snippet": "Other",
+              "breadcrumb": [
+                "Other"
+              ],
+              "path": []
+            }
+          ],
+          "truncated": false
+        }
+      },
+      {
+        "name": "search_outline",
+        "args": {
+          "query": "Other",
+          "limit": 1
+        },
+        "expected": {
+          "query": "Other",
+          "limit": 1,
+          "matches": [
+            {
+              "documentId": "doc",
+              "documentTitle": "Fixture **bold** #tag",
+              "nodeId": "root",
+              "field": "text",
+              "snippet": "Link [[Other]] and `[[ignored]]`",
+              "breadcrumb": [
+                "Fixture **bold** #tag",
+                "Link [[Other]] and `[[ignored]]`"
+              ],
+              "path": [
+                0
+              ]
+            }
+          ],
+          "truncated": true
+        }
+      },
+      {
+        "name": "get_document",
+        "args": {
+          "documentId": "doc"
+        },
+        "expected": {
+          "documentId": "doc",
+          "title": "Fixture **bold** #tag",
+          "format": "compact",
+          "content": {
+            "id": "doc",
+            "title": "Fixture **bold** #tag",
+            "createdAt": "2026-11-10T00:00:00.000Z",
+            "updatedAt": "2026-11-10T01:00:00.000Z",
+            "nodeCount": 2,
+            "topLevelNodeCount": 1,
+            "maxDepth": 6,
+            "maxDocumentNodes": 2000,
+            "knowledge": {
+              "references": {
+                "items": [
+                  {
+                    "status": "resolved",
+                    "raw": "[[Other]]",
+                    "target": null,
+                    "field": "text"
+                  },
+                  {
+                    "status": "resolved",
+                    "raw": "[[Other#Target|custom]]",
+                    "target": null,
+                    "field": "note"
+                  }
+                ],
+                "total": 2,
+                "truncated": false
+              },
+              "incoming": {
+                "items": [],
+                "total": 0,
+                "truncated": false
+              },
+              "relations": {
+                "items": [],
+                "total": 0,
+                "truncated": false
+              },
+              "truncated": false
+            },
+            "truncated": false,
+            "nodes": [
+              {
+                "id": "root",
+                "text": "Link [[Other]] and `[[ignored]]`",
+                "note": "link [[Other#Target|custom]]\nsecond line",
+                "checked": false,
+                "collapsed": false,
+                "color": "plain",
+                "headingLevel": 1,
+                "bold": false,
+                "italic": false,
+                "underline": false,
+                "strike": false,
+                "highlight": false,
+                "isTodo": false,
+                "path": [
+                  0
+                ],
+                "breadcrumb": [
+                  "Fixture **bold** #tag",
+                  "Link [[Other]] and `[[ignored]]`"
+                ],
+                "parentId": null,
+                "depth": 0,
+                "childCount": 1,
+                "descendantCount": 1,
+                "children": [
+                  {
+                    "id": "child",
+                    "text": "#tag **text**",
+                    "note": "",
+                    "checked": true,
+                    "collapsed": false,
+                    "color": "plain",
+                    "headingLevel": 0,
+                    "bold": false,
+                    "italic": false,
+                    "underline": false,
+                    "strike": false,
+                    "highlight": false,
+                    "table": [
+                      [
+                        "A|B",
+                        "[[Other]]"
+                      ],
+                      [
+                        "cell",
+                        ""
+                      ]
+                    ],
+                    "codeBlock": "```\n[[Other]]",
+                    "codeLanguage": "go ~ignored",
+                    "isTodo": false,
+                    "path": [
+                      0,
+                      0
+                    ],
+                    "breadcrumb": [
+                      "Fixture **bold** #tag",
+                      "Link [[Other]] and `[[ignored]]`",
+                      "#tag **text**"
+                    ],
+                    "parentId": "root",
+                    "depth": 1,
+                    "childCount": 0,
+                    "descendantCount": 0,
+                    "children": []
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      },
+      {
+        "name": "get_document",
+        "args": {
+          "documentId": "doc",
+          "maxDepth": 0
+        },
+        "expected": {
+          "documentId": "doc",
+          "title": "Fixture **bold** #tag",
+          "format": "compact",
+          "content": {
+            "id": "doc",
+            "title": "Fixture **bold** #tag",
+            "createdAt": "2026-11-10T00:00:00.000Z",
+            "updatedAt": "2026-11-10T01:00:00.000Z",
+            "nodeCount": 2,
+            "topLevelNodeCount": 1,
+            "maxDepth": 0,
+            "maxDocumentNodes": 2000,
+            "knowledge": {
+              "references": {
+                "items": [
+                  {
+                    "status": "resolved",
+                    "raw": "[[Other]]",
+                    "target": null,
+                    "field": "text"
+                  },
+                  {
+                    "status": "resolved",
+                    "raw": "[[Other#Target|custom]]",
+                    "target": null,
+                    "field": "note"
+                  }
+                ],
+                "total": 2,
+                "truncated": false
+              },
+              "incoming": {
+                "items": [],
+                "total": 0,
+                "truncated": false
+              },
+              "relations": {
+                "items": [],
+                "total": 0,
+                "truncated": false
+              },
+              "truncated": false
+            },
+            "truncated": false,
+            "nodes": [
+              {
+                "id": "root",
+                "text": "Link [[Other]] and `[[ignored]]`",
+                "note": "link [[Other#Target|custom]]\nsecond line",
+                "checked": false,
+                "collapsed": false,
+                "color": "plain",
+                "headingLevel": 1,
+                "bold": false,
+                "italic": false,
+                "underline": false,
+                "strike": false,
+                "highlight": false,
+                "isTodo": false,
+                "path": [
+                  0
+                ],
+                "breadcrumb": [
+                  "Fixture **bold** #tag",
+                  "Link [[Other]] and `[[ignored]]`"
+                ],
+                "parentId": null,
+                "depth": 0,
+                "childCount": 1,
+                "descendantCount": 1,
+                "children": []
+              }
+            ]
+          }
+        }
+      },
+      {
+        "name": "get_document",
+        "args": {
+          "documentId": "doc",
+          "format": "json"
+        },
+        "expected": {
+          "documentId": "doc",
+          "title": "Fixture **bold** #tag",
+          "format": "json",
+          "content": {
+            "id": "doc",
+            "title": "Fixture **bold** #tag",
+            "createdAt": "2026-11-10T00:00:00.000Z",
+            "updatedAt": "2026-11-10T01:00:00.000Z",
+            "nodes": [
+              {
+                "id": "root",
+                "text": "Link [[Other]] and `[[ignored]]`",
+                "note": "link [[Other#Target|custom]]\nsecond line",
+                "headingLevel": 1,
+                "children": [
+                  {
+                    "id": "child",
+                    "text": "#tag **text**",
+                    "checked": true,
+                    "table": [
+                      [
+                        "A|B",
+                        "[[Other]]"
+                      ],
+                      [
+                        "cell",
+                        ""
+                      ]
+                    ],
+                    "codeBlock": "```\n[[Other]]",
+                    "codeLanguage": "go ~ignored",
+                    "children": [],
+                    "note": "",
+                    "collapsed": false,
+                    "color": "plain",
+                    "headingLevel": 0,
+                    "bold": false,
+                    "italic": false,
+                    "underline": false,
+                    "strike": false,
+                    "highlight": false,
+                    "isTodo": false
+                  }
+                ],
+                "checked": false,
+                "collapsed": false,
+                "color": "plain",
+                "bold": false,
+                "italic": false,
+                "underline": false,
+                "strike": false,
+                "highlight": false,
+                "isTodo": false
+              }
+            ]
+          }
+        }
+      },
+      {
+        "name": "get_document",
+        "args": {
+          "documentId": "doc",
+          "format": "markdown",
+          "metadata": true
+        },
+        "expected": {
+          "documentId": "doc",
+          "title": "Fixture **bold** #tag",
+          "format": "markdown",
+          "content": "# Fixture \\*\\*bold\\*\\* #tag\n\n## Link [[Other]] and \\`\\[\\[ignored\\]\\]\\`\n> link [[Other#Target|custom]]\n> second line\n- [x] #tag \\*\\*text\\*\\*\n  | A\\|B | [[Other]] |\n  | --- | --- |\n  | cell |  |\n  ````go\n  ```\n  [[Other]]\n  ````\n\n<!-- bike:metadata -->\n<!-- bike:document:v1 eyJ2IjoxLCJkb2N1bWVudElkIjoiZG9jIiwidGl0bGUiOiJGaXh0dXJlICoqYm9sZCoqICN0YWciLCJkb2N1bWVudEF0dHJpYnV0ZXMiOnsiY3JlYXRlZEF0IjoiMjAyNi0xMS0xMFQwMDowMDowMC4wMDBaIn0sInN0cnVjdHVyZSI6InRyZWUtdjEiLCJub2RlcyI6W3siaWQiOiJyb290IiwicGF0aCI6WzBdLCJ0ZXh0IjoiTGluayBbW090aGVyXV0gYW5kIGBbW2lnbm9yZWRdXWAiLCJleHBvcnRUZXh0IjoiTGluayBbW090aGVyXV0gYW5kIGBbW2lnbm9yZWRdXWAiLCJub3RlIjoibGluayBbW090aGVyI1RhcmdldHxjdXN0b21dXVxuc2Vjb25kIGxpbmUiLCJhdHRyaWJ1dGVzIjp7ImhlYWRpbmdMZXZlbCI6MSwiY2hlY2tlZCI6ZmFsc2UsImNvbGxhcHNlZCI6ZmFsc2UsImNvbG9yIjoicGxhaW4iLCJib2xkIjpmYWxzZSwiaXRhbGljIjpmYWxzZSwidW5kZXJsaW5lIjpmYWxzZSwic3RyaWtlIjpmYWxzZSwiaGlnaGxpZ2h0IjpmYWxzZSwiaXNUb2RvIjpmYWxzZX19LHsiaWQiOiJjaGlsZCIsInBhdGgiOlswLDBdLCJ0ZXh0IjoiI3RhZyAqKnRleHQqKiIsImV4cG9ydFRleHQiOiIjdGFnICoqdGV4dCoqIiwibm90ZSI6IiIsImF0dHJpYnV0ZXMiOnsiY2hlY2tlZCI6dHJ1ZSwidGFibGUiOltbIkF8QiIsIltbT3RoZXJdXSJdLFsiY2VsbCIsIiJdXSwiY29kZUJsb2NrIjoiYGBgXG5bW090aGVyXV0iLCJjb2RlTGFuZ3VhZ2UiOiJnbyB-aWdub3JlZCIsImNvbGxhcHNlZCI6ZmFsc2UsImNvbG9yIjoicGxhaW4iLCJoZWFkaW5nTGV2ZWwiOjAsImJvbGQiOmZhbHNlLCJpdGFsaWMiOmZhbHNlLCJ1bmRlcmxpbmUiOmZhbHNlLCJzdHJpa2UiOmZhbHNlLCJoaWdobGlnaHQiOmZhbHNlLCJpc1RvZG8iOmZhbHNlfX1dLCJkaWdlc3QiOiJlNDNlMDhjYmVkYWRiYTJmZjRkY2Y0YzNiNTgyYWRlZWJkOTU2ZGM1OWMxMGM4Y2RiYzkyNjliM2I3MzNjNTk4In0 -->\n<!-- /bike:metadata -->\n"
+        }
+      },
+      {
+        "name": "get_node",
+        "args": {
+          "documentId": "doc",
+          "nodeId": "root",
+          "includeSiblings": true
+        },
+        "expected": {
+          "documentId": "doc",
+          "documentTitle": "Fixture **bold** #tag",
+          "format": "compact",
+          "maxDocumentNodes": 2000,
+          "truncated": false,
+          "node": {
+            "id": "root",
+            "text": "Link [[Other]] and `[[ignored]]`",
+            "note": "link [[Other#Target|custom]]\nsecond line",
+            "checked": false,
+            "collapsed": false,
+            "color": "plain",
+            "headingLevel": 1,
+            "bold": false,
+            "italic": false,
+            "underline": false,
+            "strike": false,
+            "highlight": false,
+            "isTodo": false,
+            "path": [
+              0
+            ],
+            "breadcrumb": [
+              "Fixture **bold** #tag",
+              "Link [[Other]] and `[[ignored]]`"
+            ],
+            "parentId": null,
+            "depth": 0,
+            "childCount": 1,
+            "descendantCount": 1,
+            "children": [
+              {
+                "id": "child",
+                "text": "#tag **text**",
+                "note": "",
+                "checked": true,
+                "collapsed": false,
+                "color": "plain",
+                "headingLevel": 0,
+                "bold": false,
+                "italic": false,
+                "underline": false,
+                "strike": false,
+                "highlight": false,
+                "table": [
+                  [
+                    "A|B",
+                    "[[Other]]"
+                  ],
+                  [
+                    "cell",
+                    ""
+                  ]
+                ],
+                "codeBlock": "```\n[[Other]]",
+                "codeLanguage": "go ~ignored",
+                "isTodo": false,
+                "path": [
+                  0,
+                  0
+                ],
+                "breadcrumb": [
+                  "Fixture **bold** #tag",
+                  "Link [[Other]] and `[[ignored]]`",
+                  "#tag **text**"
+                ],
+                "parentId": "root",
+                "depth": 1,
+                "childCount": 0,
+                "descendantCount": 0,
+                "children": []
+              }
+            ]
+          },
+          "ancestors": [],
+          "siblings": []
+        }
+      },
+      {
+        "name": "export_document",
+        "args": {
+          "documentId": "doc",
+          "format": "json"
+        },
+        "expected": {
+          "filename": "Fixture __bold__ #tag.json",
+          "mime": "application/json",
+          "content": "{\n  \"id\": \"doc\",\n  \"title\": \"Fixture **bold** #tag\",\n  \"createdAt\": \"2026-11-10T00:00:00.000Z\",\n  \"updatedAt\": \"2026-11-10T01:00:00.000Z\",\n  \"nodes\": [\n    {\n      \"id\": \"root\",\n      \"text\": \"Link [[Other]] and `[[ignored]]`\",\n      \"note\": \"link [[Other#Target|custom]]\\nsecond line\",\n      \"headingLevel\": 1,\n      \"children\": [\n        {\n          \"id\": \"child\",\n          \"text\": \"#tag **text**\",\n          \"checked\": true,\n          \"table\": [\n            [\n              \"A|B\",\n              \"[[Other]]\"\n            ],\n            [\n              \"cell\",\n              \"\"\n            ]\n          ],\n          \"codeBlock\": \"```\\n[[Other]]\",\n          \"codeLanguage\": \"go ~ignored\",\n          \"children\": [],\n          \"note\": \"\",\n          \"collapsed\": false,\n          \"color\": \"plain\",\n          \"headingLevel\": 0,\n          \"bold\": false,\n          \"italic\": false,\n          \"underline\": false,\n          \"strike\": false,\n          \"highlight\": false,\n          \"isTodo\": false\n        }\n      ],\n      \"checked\": false,\n      \"collapsed\": false,\n      \"color\": \"plain\",\n      \"bold\": false,\n      \"italic\": false,\n      \"underline\": false,\n      \"strike\": false,\n      \"highlight\": false,\n      \"isTodo\": false\n    }\n  ]\n}"
+        }
+      },
+      {
+        "name": "export_document",
+        "args": {
+          "documentId": "doc",
+          "format": "markdown"
+        },
+        "expected": {
+          "filename": "Fixture __bold__ #tag.md",
+          "mime": "text/markdown",
+          "content": "# Fixture \\*\\*bold\\*\\* #tag\n\n## Link [[Other]] and \\`\\[\\[ignored\\]\\]\\`\n> link [[Other#Target|custom]]\n> second line\n- [x] #tag \\*\\*text\\*\\*\n  | A\\|B | [[Other]] |\n  | --- | --- |\n  | cell |  |\n  ````go\n  ```\n  [[Other]]\n  ````"
+        }
+      }
+    ]
+  },
+  {
+    "raw": "{\"version\":3,\"activeDocumentId\":\"doc\",\"documents\":[{\"id\":\"doc\",\"title\":\"Fixture **bold** #tag\",\"createdAt\":\"2026-11-10T00:00:00.000Z\",\"updatedAt\":\"2026-11-10T01:00:00.000Z\",\"nodes\":[{\"id\":\"root\",\"text\":\"Link [[Other]] and `[[ignored]]`\",\"note\":\"link [[Other#Target|custom]]\\nsecond line\",\"headingLevel\":1,\"children\":[{\"id\":\"child\",\"text\":\"#tag **text**\",\"checked\":true,\"table\":[[\"A|B\",\"[[Other]]\"],[\"cell\",\"\"]],\"codeBlock\":\"```\\n[[Other]]\",\"codeLanguage\":\"go ~ignored\",\"children\":[],\"note\":\"\",\"collapsed\":false,\"color\":\"plain\",\"headingLevel\":0,\"bold\":false,\"italic\":false,\"underline\":false,\"strike\":false,\"highlight\":false,\"isTodo\":false}],\"checked\":false,\"collapsed\":false,\"color\":\"plain\",\"bold\":false,\"italic\":false,\"underline\":false,\"strike\":false,\"highlight\":false,\"isTodo\":false}],\"knowledge\":{\"version\":1,\"references\":[{\"id\":\"reference\",\"source\":{\"kind\":\"node-field\",\"nodeId\":\"root\",\"field\":\"note\",\"start\":5,\"end\":28,\"raw\":\"[[Other#Target|custom]]\"},\"target\":{\"documentId\":\"other\",\"nodeId\":\"target\"},\"labelMode\":\"custom\"}],\"relations\":[{\"id\":\"relation\",\"fromNodeId\":\"root\",\"toNodeId\":\"child\",\"label\":\"contains\"}]}},{\"id\":\"other\",\"title\":\"Other\",\"createdAt\":\"2026-11-10T00:00:00.000Z\",\"updatedAt\":\"2026-11-10T00:00:00.000Z\",\"nodes\":[{\"id\":\"target\",\"text\":\"Target\",\"children\":[],\"note\":\"\",\"checked\":false,\"collapsed\":false,\"color\":\"plain\",\"headingLevel\":0,\"bold\":false,\"italic\":false,\"underline\":false,\"strike\":false,\"highlight\":false,\"isTodo\":false}]}]}",
+    "documents": [
+      {
+        "id": "doc",
+        "markdown": "# Fixture \\*\\*bold\\*\\* #tag\n\n## Link [[Other]] and \\`\\[\\[ignored\\]\\]\\`\n> link [[Other#Target|custom]]\n> second line\n- [x] #tag \\*\\*text\\*\\*\n  | A\\|B | [[Other]] |\n  | --- | --- |\n  | cell |  |\n  ````go\n  ```\n  [[Other]]\n  ````\n\n<!-- bike-export:lossy -->\n## 关系\n\n- Link [[Other]] and `[[ignored]]` → #tag **text**：contains\n\n> 此 Markdown 不包含稳定 id。链接文字仍可读，但重名和身份信息可能丢失。如需在 Bike 间无损往返，请导出带元数据的 Markdown。\n",
+        "metadataMarkdown": "# Fixture \\*\\*bold\\*\\* #tag\n\n## Link [[Other]] and \\`\\[\\[ignored\\]\\]\\`\n> link [[Other#Target|custom]]\n> second line\n- [x] #tag \\*\\*text\\*\\*\n  | A\\|B | [[Other]] |\n  | --- | --- |\n  | cell |  |\n  ````go\n  ```\n  [[Other]]\n  ````\n\n<!-- bike:metadata -->\n<!-- bike:document:v1 eyJ2IjoxLCJkb2N1bWVudElkIjoiZG9jIiwidGl0bGUiOiJGaXh0dXJlICoqYm9sZCoqICN0YWciLCJkb2N1bWVudEF0dHJpYnV0ZXMiOnsiY3JlYXRlZEF0IjoiMjAyNi0xMS0xMFQwMDowMDowMC4wMDBaIn0sInN0cnVjdHVyZSI6InRyZWUtdjEiLCJub2RlcyI6W3siaWQiOiJyb290IiwicGF0aCI6WzBdLCJ0ZXh0IjoiTGluayBbW090aGVyXV0gYW5kIGBbW2lnbm9yZWRdXWAiLCJleHBvcnRUZXh0IjoiTGluayBbW090aGVyXV0gYW5kIGBbW2lnbm9yZWRdXWAiLCJub3RlIjoibGluayBbW090aGVyI1RhcmdldHxjdXN0b21dXVxuc2Vjb25kIGxpbmUiLCJhdHRyaWJ1dGVzIjp7ImhlYWRpbmdMZXZlbCI6MSwiY2hlY2tlZCI6ZmFsc2UsImNvbGxhcHNlZCI6ZmFsc2UsImNvbG9yIjoicGxhaW4iLCJib2xkIjpmYWxzZSwiaXRhbGljIjpmYWxzZSwidW5kZXJsaW5lIjpmYWxzZSwic3RyaWtlIjpmYWxzZSwiaGlnaGxpZ2h0IjpmYWxzZSwiaXNUb2RvIjpmYWxzZX19LHsiaWQiOiJjaGlsZCIsInBhdGgiOlswLDBdLCJ0ZXh0IjoiI3RhZyAqKnRleHQqKiIsImV4cG9ydFRleHQiOiIjdGFnICoqdGV4dCoqIiwibm90ZSI6IiIsImF0dHJpYnV0ZXMiOnsiY2hlY2tlZCI6dHJ1ZSwidGFibGUiOltbIkF8QiIsIltbT3RoZXJdXSJdLFsiY2VsbCIsIiJdXSwiY29kZUJsb2NrIjoiYGBgXG5bW090aGVyXV0iLCJjb2RlTGFuZ3VhZ2UiOiJnbyB-aWdub3JlZCIsImNvbGxhcHNlZCI6ZmFsc2UsImNvbG9yIjoicGxhaW4iLCJoZWFkaW5nTGV2ZWwiOjAsImJvbGQiOmZhbHNlLCJpdGFsaWMiOmZhbHNlLCJ1bmRlcmxpbmUiOmZhbHNlLCJzdHJpa2UiOmZhbHNlLCJoaWdobGlnaHQiOmZhbHNlLCJpc1RvZG8iOmZhbHNlfX1dLCJrbm93bGVkZ2UiOnsidmVyc2lvbiI6MSwicmVmZXJlbmNlcyI6W3siaWQiOiJyZWZlcmVuY2UiLCJzb3VyY2UiOnsia2luZCI6Im5vZGUtZmllbGQiLCJub2RlSWQiOiJyb290IiwiZmllbGQiOiJub3RlIiwic3RhcnQiOjUsImVuZCI6MjgsInJhdyI6IltbT3RoZXIjVGFyZ2V0fGN1c3RvbV1dIn0sInRhcmdldCI6eyJkb2N1bWVudElkIjoib3RoZXIiLCJub2RlSWQiOiJ0YXJnZXQifSwibGFiZWxNb2RlIjoiY3VzdG9tIn1dLCJyZWxhdGlvbnMiOlt7ImlkIjoicmVsYXRpb24iLCJmcm9tTm9kZUlkIjoicm9vdCIsInRvTm9kZUlkIjoiY2hpbGQiLCJsYWJlbCI6ImNvbnRhaW5zIn1dfSwiZGlnZXN0IjoiZTQzZTA4Y2JlZGFkYmEyZmY0ZGNmNGMzYjU4MmFkZWViZDk1NmRjNTljMTBjOGNkYmM5MjY5YjNiNzMzYzU5OCJ9 -->\n<!-- /bike:metadata -->\n",
+        "knowledge": {
+          "references": {
+            "items": [
+              {
+                "status": "resolved",
+                "raw": "[[Other]]",
+                "target": null,
+                "field": "text"
+              },
+              {
+                "status": "resolved",
+                "raw": "[[Other#Target|custom]]",
+                "target": {
+                  "documentId": "other",
+                  "nodeId": "target"
+                },
+                "field": "note"
+              }
+            ],
+            "total": 2,
+            "truncated": false
+          },
+          "incoming": {
+            "items": [],
+            "total": 0,
+            "truncated": false
+          },
+          "relations": {
+            "items": [
+              {
+                "id": "relation",
+                "fromNodeId": "root",
+                "toNodeId": "child",
+                "label": "contains",
+                "broken": false
+              }
+            ],
+            "total": 1,
+            "truncated": false
+          },
+          "truncated": false
+        }
+      },
+      {
+        "id": "other",
+        "markdown": "# Other\n\n- Target",
+        "metadataMarkdown": "# Other\n\n- Target\n\n<!-- bike:metadata -->\n<!-- bike:document:v1 eyJ2IjoxLCJkb2N1bWVudElkIjoib3RoZXIiLCJ0aXRsZSI6Ik90aGVyIiwiZG9jdW1lbnRBdHRyaWJ1dGVzIjp7ImNyZWF0ZWRBdCI6IjIwMjYtMTEtMTBUMDA6MDA6MDAuMDAwWiJ9LCJzdHJ1Y3R1cmUiOiJ0cmVlLXYxIiwibm9kZXMiOlt7ImlkIjoidGFyZ2V0IiwicGF0aCI6WzBdLCJ0ZXh0IjoiVGFyZ2V0IiwiZXhwb3J0VGV4dCI6IlRhcmdldCIsIm5vdGUiOiIiLCJhdHRyaWJ1dGVzIjp7ImNoZWNrZWQiOmZhbHNlLCJjb2xsYXBzZWQiOmZhbHNlLCJjb2xvciI6InBsYWluIiwiaGVhZGluZ0xldmVsIjowLCJib2xkIjpmYWxzZSwiaXRhbGljIjpmYWxzZSwidW5kZXJsaW5lIjpmYWxzZSwic3RyaWtlIjpmYWxzZSwiaGlnaGxpZ2h0IjpmYWxzZSwiaXNUb2RvIjpmYWxzZX19XSwiZGlnZXN0IjoiZWJkMzM4MzIyYTA4NDUxOTViY2I1MGJjMThiNjdlOTkyZjNmYWQyYmYyYzQwZDgyZjczMzY0Mzg4MDg4YTU3NCJ9 -->\n<!-- /bike:metadata -->\n",
+        "knowledge": {
+          "references": {
+            "items": [],
+            "total": 0,
+            "truncated": false
+          },
+          "incoming": {
+            "items": [
+              {
+                "documentId": "doc",
+                "documentTitle": "Fixture **bold** #tag",
+                "nodeId": "root",
+                "field": "text",
+                "raw": "[[Other]]",
+                "label": "Other",
+                "status": "resolved",
+                "count": 1
+              },
+              {
+                "documentId": "doc",
+                "documentTitle": "Fixture **bold** #tag",
+                "nodeId": "root",
+                "field": "note",
+                "raw": "[[Other#Target|custom]]",
+                "label": "custom",
+                "status": "resolved",
+                "count": 1
+              }
+            ],
+            "total": 2,
+            "truncated": false
+          },
+          "relations": {
+            "items": [],
+            "total": 0,
+            "truncated": false
+          },
+          "truncated": false
+        }
+      }
+    ],
+    "calls": [
+      {
+        "name": "list_documents",
+        "args": {},
+        "expected": {
+          "query": "",
+          "documents": [
+            {
+              "id": "doc",
+              "title": "Fixture **bold** #tag",
+              "createdAt": "2026-11-10T00:00:00.000Z",
+              "updatedAt": "2026-11-10T01:00:00.000Z",
+              "nodeCount": 2,
+              "topLevelNodeCount": 1
+            },
+            {
+              "id": "other",
+              "title": "Other",
+              "createdAt": "2026-11-10T00:00:00.000Z",
+              "updatedAt": "2026-11-10T00:00:00.000Z",
+              "nodeCount": 1,
+              "topLevelNodeCount": 1
+            }
+          ]
+        }
+      },
+      {
+        "name": "list_documents",
+        "args": {
+          "query": "fixture",
+          "limit": 1,
+          "includeStats": false
+        },
+        "expected": {
+          "query": "fixture",
+          "documents": [
+            {
+              "id": "doc",
+              "title": "Fixture **bold** #tag",
+              "createdAt": "2026-11-10T00:00:00.000Z",
+              "updatedAt": "2026-11-10T01:00:00.000Z"
+            }
+          ]
+        }
+      },
+      {
+        "name": "search_outline",
+        "args": {
+          "query": "Other"
+        },
+        "expected": {
+          "query": "Other",
+          "limit": 20,
+          "matches": [
+            {
+              "documentId": "doc",
+              "documentTitle": "Fixture **bold** #tag",
+              "nodeId": "root",
+              "field": "text",
+              "snippet": "Link [[Other]] and `[[ignored]]`",
+              "breadcrumb": [
+                "Fixture **bold** #tag",
+                "Link [[Other]] and `[[ignored]]`"
+              ],
+              "path": [
+                0
+              ]
+            },
+            {
+              "documentId": "doc",
+              "documentTitle": "Fixture **bold** #tag",
+              "nodeId": "root",
+              "field": "note",
+              "snippet": "link [[Other#Target|custom]] second line",
+              "breadcrumb": [
+                "Fixture **bold** #tag",
+                "Link [[Other]] and `[[ignored]]`"
+              ],
+              "path": [
+                0
+              ]
+            },
+            {
+              "documentId": "other",
+              "documentTitle": "Other",
+              "nodeId": null,
+              "field": "title",
+              "snippet": "Other",
+              "breadcrumb": [
+                "Other"
+              ],
+              "path": []
+            }
+          ],
+          "truncated": false
+        }
+      },
+      {
+        "name": "search_outline",
+        "args": {
+          "query": "Other",
+          "limit": 1
+        },
+        "expected": {
+          "query": "Other",
+          "limit": 1,
+          "matches": [
+            {
+              "documentId": "doc",
+              "documentTitle": "Fixture **bold** #tag",
+              "nodeId": "root",
+              "field": "text",
+              "snippet": "Link [[Other]] and `[[ignored]]`",
+              "breadcrumb": [
+                "Fixture **bold** #tag",
+                "Link [[Other]] and `[[ignored]]`"
+              ],
+              "path": [
+                0
+              ]
+            }
+          ],
+          "truncated": true
+        }
+      },
+      {
+        "name": "get_document",
+        "args": {
+          "documentId": "doc"
+        },
+        "expected": {
+          "documentId": "doc",
+          "title": "Fixture **bold** #tag",
+          "format": "compact",
+          "content": {
+            "id": "doc",
+            "title": "Fixture **bold** #tag",
+            "createdAt": "2026-11-10T00:00:00.000Z",
+            "updatedAt": "2026-11-10T01:00:00.000Z",
+            "nodeCount": 2,
+            "topLevelNodeCount": 1,
+            "maxDepth": 6,
+            "maxDocumentNodes": 2000,
+            "knowledge": {
+              "references": {
+                "items": [
+                  {
+                    "status": "resolved",
+                    "raw": "[[Other]]",
+                    "target": null,
+                    "field": "text"
+                  },
+                  {
+                    "status": "resolved",
+                    "raw": "[[Other#Target|custom]]",
+                    "target": {
+                      "documentId": "other",
+                      "nodeId": "target"
+                    },
+                    "field": "note"
+                  }
+                ],
+                "total": 2,
+                "truncated": false
+              },
+              "incoming": {
+                "items": [],
+                "total": 0,
+                "truncated": false
+              },
+              "relations": {
+                "items": [
+                  {
+                    "id": "relation",
+                    "fromNodeId": "root",
+                    "toNodeId": "child",
+                    "label": "contains",
+                    "broken": false
+                  }
+                ],
+                "total": 1,
+                "truncated": false
+              },
+              "truncated": false
+            },
+            "truncated": false,
+            "nodes": [
+              {
+                "id": "root",
+                "text": "Link [[Other]] and `[[ignored]]`",
+                "note": "link [[Other#Target|custom]]\nsecond line",
+                "checked": false,
+                "collapsed": false,
+                "color": "plain",
+                "headingLevel": 1,
+                "bold": false,
+                "italic": false,
+                "underline": false,
+                "strike": false,
+                "highlight": false,
+                "isTodo": false,
+                "path": [
+                  0
+                ],
+                "breadcrumb": [
+                  "Fixture **bold** #tag",
+                  "Link [[Other]] and `[[ignored]]`"
+                ],
+                "parentId": null,
+                "depth": 0,
+                "childCount": 1,
+                "descendantCount": 1,
+                "children": [
+                  {
+                    "id": "child",
+                    "text": "#tag **text**",
+                    "note": "",
+                    "checked": true,
+                    "collapsed": false,
+                    "color": "plain",
+                    "headingLevel": 0,
+                    "bold": false,
+                    "italic": false,
+                    "underline": false,
+                    "strike": false,
+                    "highlight": false,
+                    "table": [
+                      [
+                        "A|B",
+                        "[[Other]]"
+                      ],
+                      [
+                        "cell",
+                        ""
+                      ]
+                    ],
+                    "codeBlock": "```\n[[Other]]",
+                    "codeLanguage": "go ~ignored",
+                    "isTodo": false,
+                    "path": [
+                      0,
+                      0
+                    ],
+                    "breadcrumb": [
+                      "Fixture **bold** #tag",
+                      "Link [[Other]] and `[[ignored]]`",
+                      "#tag **text**"
+                    ],
+                    "parentId": "root",
+                    "depth": 1,
+                    "childCount": 0,
+                    "descendantCount": 0,
+                    "children": []
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      },
+      {
+        "name": "get_document",
+        "args": {
+          "documentId": "doc",
+          "maxDepth": 0
+        },
+        "expected": {
+          "documentId": "doc",
+          "title": "Fixture **bold** #tag",
+          "format": "compact",
+          "content": {
+            "id": "doc",
+            "title": "Fixture **bold** #tag",
+            "createdAt": "2026-11-10T00:00:00.000Z",
+            "updatedAt": "2026-11-10T01:00:00.000Z",
+            "nodeCount": 2,
+            "topLevelNodeCount": 1,
+            "maxDepth": 0,
+            "maxDocumentNodes": 2000,
+            "knowledge": {
+              "references": {
+                "items": [
+                  {
+                    "status": "resolved",
+                    "raw": "[[Other]]",
+                    "target": null,
+                    "field": "text"
+                  },
+                  {
+                    "status": "resolved",
+                    "raw": "[[Other#Target|custom]]",
+                    "target": {
+                      "documentId": "other",
+                      "nodeId": "target"
+                    },
+                    "field": "note"
+                  }
+                ],
+                "total": 2,
+                "truncated": false
+              },
+              "incoming": {
+                "items": [],
+                "total": 0,
+                "truncated": false
+              },
+              "relations": {
+                "items": [
+                  {
+                    "id": "relation",
+                    "fromNodeId": "root",
+                    "toNodeId": "child",
+                    "label": "contains",
+                    "broken": false
+                  }
+                ],
+                "total": 1,
+                "truncated": false
+              },
+              "truncated": false
+            },
+            "truncated": false,
+            "nodes": [
+              {
+                "id": "root",
+                "text": "Link [[Other]] and `[[ignored]]`",
+                "note": "link [[Other#Target|custom]]\nsecond line",
+                "checked": false,
+                "collapsed": false,
+                "color": "plain",
+                "headingLevel": 1,
+                "bold": false,
+                "italic": false,
+                "underline": false,
+                "strike": false,
+                "highlight": false,
+                "isTodo": false,
+                "path": [
+                  0
+                ],
+                "breadcrumb": [
+                  "Fixture **bold** #tag",
+                  "Link [[Other]] and `[[ignored]]`"
+                ],
+                "parentId": null,
+                "depth": 0,
+                "childCount": 1,
+                "descendantCount": 1,
+                "children": []
+              }
+            ]
+          }
+        }
+      },
+      {
+        "name": "get_document",
+        "args": {
+          "documentId": "doc",
+          "format": "json"
+        },
+        "expected": {
+          "documentId": "doc",
+          "title": "Fixture **bold** #tag",
+          "format": "json",
+          "content": {
+            "id": "doc",
+            "title": "Fixture **bold** #tag",
+            "createdAt": "2026-11-10T00:00:00.000Z",
+            "updatedAt": "2026-11-10T01:00:00.000Z",
+            "nodes": [
+              {
+                "id": "root",
+                "text": "Link [[Other]] and `[[ignored]]`",
+                "note": "link [[Other#Target|custom]]\nsecond line",
+                "headingLevel": 1,
+                "children": [
+                  {
+                    "id": "child",
+                    "text": "#tag **text**",
+                    "checked": true,
+                    "table": [
+                      [
+                        "A|B",
+                        "[[Other]]"
+                      ],
+                      [
+                        "cell",
+                        ""
+                      ]
+                    ],
+                    "codeBlock": "```\n[[Other]]",
+                    "codeLanguage": "go ~ignored",
+                    "children": [],
+                    "note": "",
+                    "collapsed": false,
+                    "color": "plain",
+                    "headingLevel": 0,
+                    "bold": false,
+                    "italic": false,
+                    "underline": false,
+                    "strike": false,
+                    "highlight": false,
+                    "isTodo": false
+                  }
+                ],
+                "checked": false,
+                "collapsed": false,
+                "color": "plain",
+                "bold": false,
+                "italic": false,
+                "underline": false,
+                "strike": false,
+                "highlight": false,
+                "isTodo": false
+              }
+            ],
+            "knowledge": {
+              "version": 1,
+              "references": [
+                {
+                  "id": "reference",
+                  "source": {
+                    "kind": "node-field",
+                    "nodeId": "root",
+                    "field": "note",
+                    "start": 5,
+                    "end": 28,
+                    "raw": "[[Other#Target|custom]]"
+                  },
+                  "target": {
+                    "documentId": "other",
+                    "nodeId": "target"
+                  },
+                  "labelMode": "custom"
+                }
+              ],
+              "relations": [
+                {
+                  "id": "relation",
+                  "fromNodeId": "root",
+                  "toNodeId": "child",
+                  "label": "contains"
+                }
+              ]
+            }
+          }
+        }
+      },
+      {
+        "name": "get_document",
+        "args": {
+          "documentId": "doc",
+          "format": "markdown",
+          "metadata": true
+        },
+        "expected": {
+          "documentId": "doc",
+          "title": "Fixture **bold** #tag",
+          "format": "markdown",
+          "content": "# Fixture \\*\\*bold\\*\\* #tag\n\n## Link [[Other]] and \\`\\[\\[ignored\\]\\]\\`\n> link [[Other#Target|custom]]\n> second line\n- [x] #tag \\*\\*text\\*\\*\n  | A\\|B | [[Other]] |\n  | --- | --- |\n  | cell |  |\n  ````go\n  ```\n  [[Other]]\n  ````\n\n<!-- bike:metadata -->\n<!-- bike:document:v1 eyJ2IjoxLCJkb2N1bWVudElkIjoiZG9jIiwidGl0bGUiOiJGaXh0dXJlICoqYm9sZCoqICN0YWciLCJkb2N1bWVudEF0dHJpYnV0ZXMiOnsiY3JlYXRlZEF0IjoiMjAyNi0xMS0xMFQwMDowMDowMC4wMDBaIn0sInN0cnVjdHVyZSI6InRyZWUtdjEiLCJub2RlcyI6W3siaWQiOiJyb290IiwicGF0aCI6WzBdLCJ0ZXh0IjoiTGluayBbW090aGVyXV0gYW5kIGBbW2lnbm9yZWRdXWAiLCJleHBvcnRUZXh0IjoiTGluayBbW090aGVyXV0gYW5kIGBbW2lnbm9yZWRdXWAiLCJub3RlIjoibGluayBbW090aGVyI1RhcmdldHxjdXN0b21dXVxuc2Vjb25kIGxpbmUiLCJhdHRyaWJ1dGVzIjp7ImhlYWRpbmdMZXZlbCI6MSwiY2hlY2tlZCI6ZmFsc2UsImNvbGxhcHNlZCI6ZmFsc2UsImNvbG9yIjoicGxhaW4iLCJib2xkIjpmYWxzZSwiaXRhbGljIjpmYWxzZSwidW5kZXJsaW5lIjpmYWxzZSwic3RyaWtlIjpmYWxzZSwiaGlnaGxpZ2h0IjpmYWxzZSwiaXNUb2RvIjpmYWxzZX19LHsiaWQiOiJjaGlsZCIsInBhdGgiOlswLDBdLCJ0ZXh0IjoiI3RhZyAqKnRleHQqKiIsImV4cG9ydFRleHQiOiIjdGFnICoqdGV4dCoqIiwibm90ZSI6IiIsImF0dHJpYnV0ZXMiOnsiY2hlY2tlZCI6dHJ1ZSwidGFibGUiOltbIkF8QiIsIltbT3RoZXJdXSJdLFsiY2VsbCIsIiJdXSwiY29kZUJsb2NrIjoiYGBgXG5bW090aGVyXV0iLCJjb2RlTGFuZ3VhZ2UiOiJnbyB-aWdub3JlZCIsImNvbGxhcHNlZCI6ZmFsc2UsImNvbG9yIjoicGxhaW4iLCJoZWFkaW5nTGV2ZWwiOjAsImJvbGQiOmZhbHNlLCJpdGFsaWMiOmZhbHNlLCJ1bmRlcmxpbmUiOmZhbHNlLCJzdHJpa2UiOmZhbHNlLCJoaWdobGlnaHQiOmZhbHNlLCJpc1RvZG8iOmZhbHNlfX1dLCJrbm93bGVkZ2UiOnsidmVyc2lvbiI6MSwicmVmZXJlbmNlcyI6W3siaWQiOiJyZWZlcmVuY2UiLCJzb3VyY2UiOnsia2luZCI6Im5vZGUtZmllbGQiLCJub2RlSWQiOiJyb290IiwiZmllbGQiOiJub3RlIiwic3RhcnQiOjUsImVuZCI6MjgsInJhdyI6IltbT3RoZXIjVGFyZ2V0fGN1c3RvbV1dIn0sInRhcmdldCI6eyJkb2N1bWVudElkIjoib3RoZXIiLCJub2RlSWQiOiJ0YXJnZXQifSwibGFiZWxNb2RlIjoiY3VzdG9tIn1dLCJyZWxhdGlvbnMiOlt7ImlkIjoicmVsYXRpb24iLCJmcm9tTm9kZUlkIjoicm9vdCIsInRvTm9kZUlkIjoiY2hpbGQiLCJsYWJlbCI6ImNvbnRhaW5zIn1dfSwiZGlnZXN0IjoiZTQzZTA4Y2JlZGFkYmEyZmY0ZGNmNGMzYjU4MmFkZWViZDk1NmRjNTljMTBjOGNkYmM5MjY5YjNiNzMzYzU5OCJ9 -->\n<!-- /bike:metadata -->\n"
+        }
+      },
+      {
+        "name": "get_node",
+        "args": {
+          "documentId": "doc",
+          "nodeId": "root",
+          "includeSiblings": true
+        },
+        "expected": {
+          "documentId": "doc",
+          "documentTitle": "Fixture **bold** #tag",
+          "format": "compact",
+          "maxDocumentNodes": 2000,
+          "truncated": false,
+          "node": {
+            "id": "root",
+            "text": "Link [[Other]] and `[[ignored]]`",
+            "note": "link [[Other#Target|custom]]\nsecond line",
+            "checked": false,
+            "collapsed": false,
+            "color": "plain",
+            "headingLevel": 1,
+            "bold": false,
+            "italic": false,
+            "underline": false,
+            "strike": false,
+            "highlight": false,
+            "isTodo": false,
+            "path": [
+              0
+            ],
+            "breadcrumb": [
+              "Fixture **bold** #tag",
+              "Link [[Other]] and `[[ignored]]`"
+            ],
+            "parentId": null,
+            "depth": 0,
+            "childCount": 1,
+            "descendantCount": 1,
+            "children": [
+              {
+                "id": "child",
+                "text": "#tag **text**",
+                "note": "",
+                "checked": true,
+                "collapsed": false,
+                "color": "plain",
+                "headingLevel": 0,
+                "bold": false,
+                "italic": false,
+                "underline": false,
+                "strike": false,
+                "highlight": false,
+                "table": [
+                  [
+                    "A|B",
+                    "[[Other]]"
+                  ],
+                  [
+                    "cell",
+                    ""
+                  ]
+                ],
+                "codeBlock": "```\n[[Other]]",
+                "codeLanguage": "go ~ignored",
+                "isTodo": false,
+                "path": [
+                  0,
+                  0
+                ],
+                "breadcrumb": [
+                  "Fixture **bold** #tag",
+                  "Link [[Other]] and `[[ignored]]`",
+                  "#tag **text**"
+                ],
+                "parentId": "root",
+                "depth": 1,
+                "childCount": 0,
+                "descendantCount": 0,
+                "children": []
+              }
+            ]
+          },
+          "ancestors": [],
+          "siblings": []
+        }
+      },
+      {
+        "name": "export_document",
+        "args": {
+          "documentId": "doc",
+          "format": "json"
+        },
+        "expected": {
+          "filename": "Fixture __bold__ #tag.json",
+          "mime": "application/json",
+          "content": "{\n  \"id\": \"doc\",\n  \"title\": \"Fixture **bold** #tag\",\n  \"createdAt\": \"2026-11-10T00:00:00.000Z\",\n  \"updatedAt\": \"2026-11-10T01:00:00.000Z\",\n  \"nodes\": [\n    {\n      \"id\": \"root\",\n      \"text\": \"Link [[Other]] and `[[ignored]]`\",\n      \"note\": \"link [[Other#Target|custom]]\\nsecond line\",\n      \"headingLevel\": 1,\n      \"children\": [\n        {\n          \"id\": \"child\",\n          \"text\": \"#tag **text**\",\n          \"checked\": true,\n          \"table\": [\n            [\n              \"A|B\",\n              \"[[Other]]\"\n            ],\n            [\n              \"cell\",\n              \"\"\n            ]\n          ],\n          \"codeBlock\": \"```\\n[[Other]]\",\n          \"codeLanguage\": \"go ~ignored\",\n          \"children\": [],\n          \"note\": \"\",\n          \"collapsed\": false,\n          \"color\": \"plain\",\n          \"headingLevel\": 0,\n          \"bold\": false,\n          \"italic\": false,\n          \"underline\": false,\n          \"strike\": false,\n          \"highlight\": false,\n          \"isTodo\": false\n        }\n      ],\n      \"checked\": false,\n      \"collapsed\": false,\n      \"color\": \"plain\",\n      \"bold\": false,\n      \"italic\": false,\n      \"underline\": false,\n      \"strike\": false,\n      \"highlight\": false,\n      \"isTodo\": false\n    }\n  ],\n  \"knowledge\": {\n    \"version\": 1,\n    \"references\": [\n      {\n        \"id\": \"reference\",\n        \"source\": {\n          \"kind\": \"node-field\",\n          \"nodeId\": \"root\",\n          \"field\": \"note\",\n          \"start\": 5,\n          \"end\": 28,\n          \"raw\": \"[[Other#Target|custom]]\"\n        },\n        \"target\": {\n          \"documentId\": \"other\",\n          \"nodeId\": \"target\"\n        },\n        \"labelMode\": \"custom\"\n      }\n    ],\n    \"relations\": [\n      {\n        \"id\": \"relation\",\n        \"fromNodeId\": \"root\",\n        \"toNodeId\": \"child\",\n        \"label\": \"contains\"\n      }\n    ]\n  }\n}"
+        }
+      },
+      {
+        "name": "export_document",
+        "args": {
+          "documentId": "doc",
+          "format": "markdown"
+        },
+        "expected": {
+          "filename": "Fixture __bold__ #tag.md",
+          "mime": "text/markdown",
+          "content": "# Fixture \\*\\*bold\\*\\* #tag\n\n## Link [[Other]] and \\`\\[\\[ignored\\]\\]\\`\n> link [[Other#Target|custom]]\n> second line\n- [x] #tag \\*\\*text\\*\\*\n  | A\\|B | [[Other]] |\n  | --- | --- |\n  | cell |  |\n  ````go\n  ```\n  [[Other]]\n  ````\n\n<!-- bike-export:lossy -->\n## 关系\n\n- Link [[Other]] and `[[ignored]]` → #tag **text**：contains\n\n> 此 Markdown 不包含稳定 id。链接文字仍可读，但重名和身份信息可能丢失。如需在 Bike 间无损往返，请导出带元数据的 Markdown。\n"
+        }
+      }
+    ]
+  },
+  {
+    "raw": "{\"version\":3,\"activeDocumentId\":\"doc\",\"documents\":[{\"id\":\"doc\",\"title\":\"Source\",\"createdAt\":\"2026-11-10T00:00:00.000Z\",\"updatedAt\":\"2026-11-10T00:00:00.000Z\",\"markdownSource\":\"# Source\\n\\n- link [[Other]]\",\"nodes\":[{\"id\":\"source-node\",\"text\":\"link [[Other]]\",\"children\":[],\"note\":\"\",\"checked\":false,\"collapsed\":false,\"color\":\"plain\",\"headingLevel\":0,\"bold\":false,\"italic\":false,\"underline\":false,\"strike\":false,\"highlight\":false,\"isTodo\":false}],\"markdownUpdatedAt\":\"2026-11-10T00:00:00.000Z\"},{\"id\":\"other\",\"title\":\"Other\",\"createdAt\":\"2026-11-10T00:00:00.000Z\",\"updatedAt\":\"2026-11-10T00:00:00.000Z\",\"nodes\":[{\"id\":\"target\",\"text\":\"Target\",\"children\":[],\"note\":\"\",\"checked\":false,\"collapsed\":false,\"color\":\"plain\",\"headingLevel\":0,\"bold\":false,\"italic\":false,\"underline\":false,\"strike\":false,\"highlight\":false,\"isTodo\":false}]}]}",
+    "documents": [
+      {
+        "id": "doc",
+        "markdown": "# Source\n\n- link [[Other]]",
+        "metadataMarkdown": "# Source\n\n- link [[Other]]\n\n<!-- bike:metadata -->\n<!-- bike:document:v1 eyJ2IjoxLCJkb2N1bWVudElkIjoiZG9jIiwidGl0bGUiOiJTb3VyY2UiLCJkb2N1bWVudEF0dHJpYnV0ZXMiOnsiY3JlYXRlZEF0IjoiMjAyNi0xMS0xMFQwMDowMDowMC4wMDBaIn0sInN0cnVjdHVyZSI6InRyZWUtdjEiLCJub2RlcyI6W3siaWQiOiJzb3VyY2Utbm9kZSIsInBhdGgiOlswXSwidGV4dCI6ImxpbmsgW1tPdGhlcl1dIiwiZXhwb3J0VGV4dCI6ImxpbmsgW1tPdGhlcl1dIiwibm90ZSI6IiIsImF0dHJpYnV0ZXMiOnsiY2hlY2tlZCI6ZmFsc2UsImNvbGxhcHNlZCI6ZmFsc2UsImNvbG9yIjoicGxhaW4iLCJoZWFkaW5nTGV2ZWwiOjAsImJvbGQiOmZhbHNlLCJpdGFsaWMiOmZhbHNlLCJ1bmRlcmxpbmUiOmZhbHNlLCJzdHJpa2UiOmZhbHNlLCJoaWdobGlnaHQiOmZhbHNlLCJpc1RvZG8iOmZhbHNlfX1dLCJkaWdlc3QiOiIwNjBiMmM2ZTliZWRjZDdiYWZkZDc5YmQxYzg2YjZiMDUwMTJjODdjY2VjYzI1ZmY0ZTIyYzlkY2VlYTI3NDE3In0 -->\n<!-- /bike:metadata -->\n",
+        "knowledge": {
+          "references": {
+            "items": [
+              {
+                "status": "resolved",
+                "raw": "[[Other]]",
+                "target": null,
+                "field": "text"
+              }
+            ],
+            "total": 1,
+            "truncated": false
+          },
+          "incoming": {
+            "items": [],
+            "total": 0,
+            "truncated": false
+          },
+          "relations": {
+            "items": [],
+            "total": 0,
+            "truncated": false
+          },
+          "truncated": false
+        }
+      },
+      {
+        "id": "other",
+        "markdown": "# Other\n\n- Target",
+        "metadataMarkdown": "# Other\n\n- Target\n\n<!-- bike:metadata -->\n<!-- bike:document:v1 eyJ2IjoxLCJkb2N1bWVudElkIjoib3RoZXIiLCJ0aXRsZSI6Ik90aGVyIiwiZG9jdW1lbnRBdHRyaWJ1dGVzIjp7ImNyZWF0ZWRBdCI6IjIwMjYtMTEtMTBUMDA6MDA6MDAuMDAwWiJ9LCJzdHJ1Y3R1cmUiOiJ0cmVlLXYxIiwibm9kZXMiOlt7ImlkIjoidGFyZ2V0IiwicGF0aCI6WzBdLCJ0ZXh0IjoiVGFyZ2V0IiwiZXhwb3J0VGV4dCI6IlRhcmdldCIsIm5vdGUiOiIiLCJhdHRyaWJ1dGVzIjp7ImNoZWNrZWQiOmZhbHNlLCJjb2xsYXBzZWQiOmZhbHNlLCJjb2xvciI6InBsYWluIiwiaGVhZGluZ0xldmVsIjowLCJib2xkIjpmYWxzZSwiaXRhbGljIjpmYWxzZSwidW5kZXJsaW5lIjpmYWxzZSwic3RyaWtlIjpmYWxzZSwiaGlnaGxpZ2h0IjpmYWxzZSwiaXNUb2RvIjpmYWxzZX19XSwiZGlnZXN0IjoiZWJkMzM4MzIyYTA4NDUxOTViY2I1MGJjMThiNjdlOTkyZjNmYWQyYmYyYzQwZDgyZjczMzY0Mzg4MDg4YTU3NCJ9 -->\n<!-- /bike:metadata -->\n",
+        "knowledge": {
+          "references": {
+            "items": [],
+            "total": 0,
+            "truncated": false
+          },
+          "incoming": {
+            "items": [
+              {
+                "documentId": "doc",
+                "documentTitle": "Source",
+                "nodeId": "source-node",
+                "field": "text",
+                "raw": "[[Other]]",
+                "label": "Other",
+                "status": "resolved",
+                "count": 1
+              }
+            ],
+            "total": 1,
+            "truncated": false
+          },
+          "relations": {
+            "items": [],
+            "total": 0,
+            "truncated": false
+          },
+          "truncated": false
+        }
+      }
+    ],
+    "calls": [
+      {
+        "name": "list_documents",
+        "args": {},
+        "expected": {
+          "query": "",
+          "documents": [
+            {
+              "id": "doc",
+              "title": "Source",
+              "createdAt": "2026-11-10T00:00:00.000Z",
+              "updatedAt": "2026-11-10T00:00:00.000Z",
+              "nodeCount": 1,
+              "topLevelNodeCount": 1
+            },
+            {
+              "id": "other",
+              "title": "Other",
+              "createdAt": "2026-11-10T00:00:00.000Z",
+              "updatedAt": "2026-11-10T00:00:00.000Z",
+              "nodeCount": 1,
+              "topLevelNodeCount": 1
+            }
+          ]
+        }
+      },
+      {
+        "name": "list_documents",
+        "args": {
+          "query": "fixture",
+          "limit": 1,
+          "includeStats": false
+        },
+        "expected": {
+          "query": "fixture",
+          "documents": []
+        }
+      },
+      {
+        "name": "search_outline",
+        "args": {
+          "query": "Other"
+        },
+        "expected": {
+          "query": "Other",
+          "limit": 20,
+          "matches": [
+            {
+              "documentId": "doc",
+              "documentTitle": "Source",
+              "nodeId": "source-node",
+              "field": "text",
+              "snippet": "link [[Other]]",
+              "breadcrumb": [
+                "Source",
+                "link [[Other]]"
+              ],
+              "path": [
+                0
+              ]
+            },
+            {
+              "documentId": "other",
+              "documentTitle": "Other",
+              "nodeId": null,
+              "field": "title",
+              "snippet": "Other",
+              "breadcrumb": [
+                "Other"
+              ],
+              "path": []
+            }
+          ],
+          "truncated": false
+        }
+      },
+      {
+        "name": "search_outline",
+        "args": {
+          "query": "Other",
+          "limit": 1
+        },
+        "expected": {
+          "query": "Other",
+          "limit": 1,
+          "matches": [
+            {
+              "documentId": "doc",
+              "documentTitle": "Source",
+              "nodeId": "source-node",
+              "field": "text",
+              "snippet": "link [[Other]]",
+              "breadcrumb": [
+                "Source",
+                "link [[Other]]"
+              ],
+              "path": [
+                0
+              ]
+            }
+          ],
+          "truncated": true
+        }
+      },
+      {
+        "name": "get_document",
+        "args": {
+          "documentId": "doc"
+        },
+        "expected": {
+          "documentId": "doc",
+          "title": "Source",
+          "format": "compact",
+          "content": {
+            "id": "doc",
+            "title": "Source",
+            "createdAt": "2026-11-10T00:00:00.000Z",
+            "updatedAt": "2026-11-10T00:00:00.000Z",
+            "markdownUpdatedAt": "2026-11-10T00:00:00.000Z",
+            "nodeCount": 1,
+            "topLevelNodeCount": 1,
+            "maxDepth": 6,
+            "maxDocumentNodes": 2000,
+            "knowledge": {
+              "references": {
+                "items": [
+                  {
+                    "status": "resolved",
+                    "raw": "[[Other]]",
+                    "target": null,
+                    "field": "text"
+                  }
+                ],
+                "total": 1,
+                "truncated": false
+              },
+              "incoming": {
+                "items": [],
+                "total": 0,
+                "truncated": false
+              },
+              "relations": {
+                "items": [],
+                "total": 0,
+                "truncated": false
+              },
+              "truncated": false
+            },
+            "truncated": false,
+            "nodes": [
+              {
+                "id": "source-node",
+                "text": "link [[Other]]",
+                "note": "",
+                "checked": false,
+                "collapsed": false,
+                "color": "plain",
+                "headingLevel": 0,
+                "bold": false,
+                "italic": false,
+                "underline": false,
+                "strike": false,
+                "highlight": false,
+                "isTodo": false,
+                "path": [
+                  0
+                ],
+                "breadcrumb": [
+                  "Source",
+                  "link [[Other]]"
+                ],
+                "parentId": null,
+                "depth": 0,
+                "childCount": 0,
+                "descendantCount": 0,
+                "children": []
+              }
+            ]
+          }
+        }
+      },
+      {
+        "name": "get_document",
+        "args": {
+          "documentId": "doc",
+          "maxDepth": 0
+        },
+        "expected": {
+          "documentId": "doc",
+          "title": "Source",
+          "format": "compact",
+          "content": {
+            "id": "doc",
+            "title": "Source",
+            "createdAt": "2026-11-10T00:00:00.000Z",
+            "updatedAt": "2026-11-10T00:00:00.000Z",
+            "markdownUpdatedAt": "2026-11-10T00:00:00.000Z",
+            "nodeCount": 1,
+            "topLevelNodeCount": 1,
+            "maxDepth": 0,
+            "maxDocumentNodes": 2000,
+            "knowledge": {
+              "references": {
+                "items": [
+                  {
+                    "status": "resolved",
+                    "raw": "[[Other]]",
+                    "target": null,
+                    "field": "text"
+                  }
+                ],
+                "total": 1,
+                "truncated": false
+              },
+              "incoming": {
+                "items": [],
+                "total": 0,
+                "truncated": false
+              },
+              "relations": {
+                "items": [],
+                "total": 0,
+                "truncated": false
+              },
+              "truncated": false
+            },
+            "truncated": false,
+            "nodes": [
+              {
+                "id": "source-node",
+                "text": "link [[Other]]",
+                "note": "",
+                "checked": false,
+                "collapsed": false,
+                "color": "plain",
+                "headingLevel": 0,
+                "bold": false,
+                "italic": false,
+                "underline": false,
+                "strike": false,
+                "highlight": false,
+                "isTodo": false,
+                "path": [
+                  0
+                ],
+                "breadcrumb": [
+                  "Source",
+                  "link [[Other]]"
+                ],
+                "parentId": null,
+                "depth": 0,
+                "childCount": 0,
+                "descendantCount": 0,
+                "children": []
+              }
+            ]
+          }
+        }
+      },
+      {
+        "name": "get_document",
+        "args": {
+          "documentId": "doc",
+          "format": "json"
+        },
+        "expected": {
+          "documentId": "doc",
+          "title": "Source",
+          "format": "json",
+          "content": {
+            "id": "doc",
+            "title": "Source",
+            "createdAt": "2026-11-10T00:00:00.000Z",
+            "updatedAt": "2026-11-10T00:00:00.000Z",
+            "markdownSource": "# Source\n\n- link [[Other]]",
+            "nodes": [
+              {
+                "id": "source-node",
+                "text": "link [[Other]]",
+                "children": [],
+                "note": "",
+                "checked": false,
+                "collapsed": false,
+                "color": "plain",
+                "headingLevel": 0,
+                "bold": false,
+                "italic": false,
+                "underline": false,
+                "strike": false,
+                "highlight": false,
+                "isTodo": false
+              }
+            ],
+            "markdownUpdatedAt": "2026-11-10T00:00:00.000Z"
+          }
+        }
+      },
+      {
+        "name": "get_document",
+        "args": {
+          "documentId": "doc",
+          "format": "markdown",
+          "metadata": true
+        },
+        "expected": {
+          "documentId": "doc",
+          "title": "Source",
+          "format": "markdown",
+          "content": "# Source\n\n- link [[Other]]\n\n<!-- bike:metadata -->\n<!-- bike:document:v1 eyJ2IjoxLCJkb2N1bWVudElkIjoiZG9jIiwidGl0bGUiOiJTb3VyY2UiLCJkb2N1bWVudEF0dHJpYnV0ZXMiOnsiY3JlYXRlZEF0IjoiMjAyNi0xMS0xMFQwMDowMDowMC4wMDBaIn0sInN0cnVjdHVyZSI6InRyZWUtdjEiLCJub2RlcyI6W3siaWQiOiJzb3VyY2Utbm9kZSIsInBhdGgiOlswXSwidGV4dCI6ImxpbmsgW1tPdGhlcl1dIiwiZXhwb3J0VGV4dCI6ImxpbmsgW1tPdGhlcl1dIiwibm90ZSI6IiIsImF0dHJpYnV0ZXMiOnsiY2hlY2tlZCI6ZmFsc2UsImNvbGxhcHNlZCI6ZmFsc2UsImNvbG9yIjoicGxhaW4iLCJoZWFkaW5nTGV2ZWwiOjAsImJvbGQiOmZhbHNlLCJpdGFsaWMiOmZhbHNlLCJ1bmRlcmxpbmUiOmZhbHNlLCJzdHJpa2UiOmZhbHNlLCJoaWdobGlnaHQiOmZhbHNlLCJpc1RvZG8iOmZhbHNlfX1dLCJkaWdlc3QiOiIwNjBiMmM2ZTliZWRjZDdiYWZkZDc5YmQxYzg2YjZiMDUwMTJjODdjY2VjYzI1ZmY0ZTIyYzlkY2VlYTI3NDE3In0 -->\n<!-- /bike:metadata -->\n"
+        }
+      },
+      {
+        "name": "get_node",
+        "args": {
+          "documentId": "doc",
+          "nodeId": "source-node",
+          "includeSiblings": true
+        },
+        "expected": {
+          "documentId": "doc",
+          "documentTitle": "Source",
+          "format": "compact",
+          "maxDocumentNodes": 2000,
+          "truncated": false,
+          "node": {
+            "id": "source-node",
+            "text": "link [[Other]]",
+            "note": "",
+            "checked": false,
+            "collapsed": false,
+            "color": "plain",
+            "headingLevel": 0,
+            "bold": false,
+            "italic": false,
+            "underline": false,
+            "strike": false,
+            "highlight": false,
+            "isTodo": false,
+            "path": [
+              0
+            ],
+            "breadcrumb": [
+              "Source",
+              "link [[Other]]"
+            ],
+            "parentId": null,
+            "depth": 0,
+            "childCount": 0,
+            "descendantCount": 0,
+            "children": []
+          },
+          "ancestors": [],
+          "siblings": []
+        }
+      },
+      {
+        "name": "export_document",
+        "args": {
+          "documentId": "doc",
+          "format": "json"
+        },
+        "expected": {
+          "filename": "Source.json",
+          "mime": "application/json",
+          "content": "{\n  \"id\": \"doc\",\n  \"title\": \"Source\",\n  \"createdAt\": \"2026-11-10T00:00:00.000Z\",\n  \"updatedAt\": \"2026-11-10T00:00:00.000Z\",\n  \"markdownSource\": \"# Source\\n\\n- link [[Other]]\",\n  \"nodes\": [\n    {\n      \"id\": \"source-node\",\n      \"text\": \"link [[Other]]\",\n      \"children\": [],\n      \"note\": \"\",\n      \"checked\": false,\n      \"collapsed\": false,\n      \"color\": \"plain\",\n      \"headingLevel\": 0,\n      \"bold\": false,\n      \"italic\": false,\n      \"underline\": false,\n      \"strike\": false,\n      \"highlight\": false,\n      \"isTodo\": false\n    }\n  ],\n  \"markdownUpdatedAt\": \"2026-11-10T00:00:00.000Z\"\n}"
+        }
+      },
+      {
+        "name": "export_document",
+        "args": {
+          "documentId": "doc",
+          "format": "markdown"
+        },
+        "expected": {
+          "filename": "Source.md",
+          "mime": "text/markdown",
+          "content": "# Source\n\n- link [[Other]]"
+        }
+      }
+    ]
+  }
+]

@@ -9,6 +9,8 @@ import { assertWorkspaceBudget } from "../shared/bike-limits.mjs";
 import { sha256Hex } from "./knowledge";
 import { sameWorkspaceContent } from "./documentSignature";
 import { workspaceAttachmentAssets, workspaceFormatVersion } from "../shared/bike-attachments.mjs";
+import { localMigrationDigest, withoutLocalMigration } from "../shared/bike-local-migration.mjs";
+import type { LocalMigrationCopy } from "../shared/bike-local-migration.mjs";
 
 const DB_NAME = "bike-db";
 const LEGACY_DB_NAME = "local-outline-db";
@@ -45,6 +47,25 @@ const LEGACY_FALLBACK_KEY = "local-outline-workspace";
 const LEGACY_FALLBACK_META_KEY = "local-outline-workspace-meta";
 const FALLBACK_SNAPSHOT_PREFIX = "bike-workspace-snapshot:";
 const CHANNEL_NAME = "bike-workspace";
+const LOCAL_IMPORT_JOURNAL = "local-migration-journal-v1";
+const LOCAL_IMPORT_ARCHIVES = "local-migration-archives-v1";
+const LOCAL_IMPORT_RECEIPTS = "local-migration-receipts-v1";
+let localMigrationArchives: LocalMigrationCopy[] = [];
+class LocalMigrationPendingError extends Error {
+  constructor() { super("完整本机副本导入尚未完成，请重试加载以恢复导入前状态"); }
+}
+export interface LocalMigrationJournal {
+  id: string; archiveId: string; sourceDigest: string; expectedRevision: number;
+  startedAt: number;
+  phase?: "installed";
+  recoveryOwner?: string;
+  settingsBefore: Record<string, string | null>;
+}
+export interface LocalMigrationStorage {
+  workspace: Workspace; revision: number; replica: ReplicaState | null;
+  preAttachment: Workspace | null; preOperation: Workspace | null; archives: LocalMigrationCopy[];
+  fingerprint: string;
+}
 
 export type WorkspaceLoadResult =
   | { status: "loaded"; workspace: Workspace; source: "indexeddb" | "localstorage" }
@@ -215,7 +236,13 @@ const readDatabase = async (dbName: string): Promise<DatabaseRead> => {
       const store = tx.objectStore(STORE_NAME);
       const request = store.get(WORKSPACE_KEY);
       const metaRequest = store.get(WORKSPACE_META_KEY);
-      tx.oncomplete = () => resolve({ value: request.result, meta: metaRequest.result });
+      const journal = dbName === DB_NAME ? store.get(LOCAL_IMPORT_JOURNAL) : null;
+      const archives = dbName === DB_NAME ? store.get(LOCAL_IMPORT_ARCHIVES) : null;
+      tx.oncomplete = () => {
+        if (journal?.result) { reject(new LocalMigrationPendingError()); return; }
+        if (archives) localMigrationArchives = archives.result ?? [];
+        resolve({ value: request.result, meta: metaRequest.result });
+      };
       tx.onerror = () => reject(tx.error ?? request.error ?? metaRequest.error);
       tx.onabort = () => reject(tx.error ?? new Error("IndexedDB 读取被中止"));
     });
@@ -346,11 +373,19 @@ export const listWorkspaceRecoveryFiles = (): WorkspaceRecoveryFile[] => {
       files.push({ id, content });
     }
   } catch { /* Existing download entries remain usable. */ }
+  for (const archive of allLocalMigrationArchives()) {
+    for (const file of archive.recoveryFiles) files.push({ id: `import:${archive.id}:${file.id}`, content: file.content });
+  }
   return files;
 };
 
 export const listWorkspaceRecoverySnapshots = (current?: Workspace | null): WorkspaceRecoverySnapshot[] =>
-  readFallbackSnapshots().snapshots
+  [...readFallbackSnapshots().snapshots, ...allLocalMigrationArchives().flatMap((archive) => [
+    ...archive.recovery.map((snapshot) => ({ ...snapshot, id: `import:${archive.id}:${snapshot.id}`, baseRevision: null })),
+    ...[archive.preAttachment, archive.preOperation].flatMap((workspace, index) => workspace ? [{
+      id: `import:${archive.id}:pre-${index}`, workspace, savedAt: Date.parse(archive.createdAt), baseRevision: null,
+    }] : []),
+  ])]
     .filter((snapshot) => !current || !sameWorkspace(snapshot.workspace, current))
     .map(({ id, workspace, savedAt, baseRevision }) => ({ id, workspace, savedAt, baseRevision }));
 
@@ -614,7 +649,9 @@ const writeWorkspace = async (
       // Read the stored revision inside the write transaction, so the check and
       // the write are atomic even across tabs.
       const metaRequest = store.get(WORKSPACE_META_KEY);
-      metaRequest.onsuccess = () => {
+      const migrationRequest = store.get(LOCAL_IMPORT_JOURNAL);
+      migrationRequest.onsuccess = () => {
+        if (migrationRequest.result) { failure = new LocalMigrationPendingError(); tx.abort(); return; }
         // The page may have adopted another stored copy while this save waited
         // for the database; knownRevision then belongs to that copy, not to
         // the one this save was requested for.
@@ -685,6 +722,7 @@ const writeWorkspace = async (
       };
     });
   } catch (indexedDbError) {
+    if (indexedDbError instanceof LocalMigrationPendingError) return { ok: false, error: indexedDbError };
     if (epoch !== adoptEpoch) {
       return { ok: false, conflict: true, error: new Error(SUPERSEDED_MESSAGE) };
     }
@@ -739,6 +777,7 @@ export const saveWorkspace = (
   options: WorkspaceCommitOptions = {},
 ): Promise<WorkspaceSaveResult> => {
   try {
+    if ("localMigration" in workspace) throw new Error("完整本机副本需要从专用导入入口安装，原工作区已保留");
     assertWorkspaceBudget(workspace);
     workspaceAttachmentAssets(workspace);
     if (workspaceFormatVersion(workspace) !== workspace.version) throw new Error("附件工作区需要先升级到 version 2");
@@ -823,7 +862,9 @@ export const readReplicaState = async (): Promise<ReplicaState | null> => {
     return await new Promise((resolve, reject) => {
       const tx = db.transaction(STORE_NAME, "readonly");
       const request = tx.objectStore(STORE_NAME).get(REPLICA_KEY);
+      const journal = tx.objectStore(STORE_NAME).get(LOCAL_IMPORT_JOURNAL);
       tx.oncomplete = () => {
+        if (journal.result) { reject(new LocalMigrationPendingError()); return; }
         const replica = request.result as ReplicaState | undefined;
         if (replica && replica.protocol !== 2) reject(new Error("本机操作协议暂不支持"));
         else resolve(replica ?? null);
@@ -847,4 +888,167 @@ export const loadPreOperationWorkspace = async (): Promise<Workspace | null> => 
       tx.onabort = () => reject(tx.error);
     });
   } finally { db.close(); }
+};
+
+const allLocalMigrationArchives = (): LocalMigrationCopy[] => {
+  const result: LocalMigrationCopy[] = [];
+  const stack = [...localMigrationArchives];
+  while (stack.length) {
+    const archive = stack.pop()!;
+    result.push(archive);
+    stack.push(...archive.archives);
+  }
+  return result;
+};
+
+// Private source records are never attached to the live workspace or replica.
+export const listLocalMigrationArchives = async (): Promise<LocalMigrationCopy[]> => {
+  const values = await migrationTransaction("readonly", [LOCAL_IMPORT_ARCHIVES]);
+  localMigrationArchives = values[0] as LocalMigrationCopy[] ?? [];
+  return localMigrationArchives;
+};
+export const listLocalMigrationProtectedAssetIds = async (): Promise<string[]> =>
+  [...new Set((await listLocalMigrationArchives()).flatMap((archive) => archive.assets.map((asset) => asset.assetId)))];
+
+// A single store transaction supplies both the CAS token and the source data.
+const migrationTransaction = async (
+  mode: IDBTransactionMode, keys: string[],
+  update?: (values: unknown[], store: IDBObjectStore) => void,
+): Promise<unknown[]> => {
+  const db = await openDb();
+  try {
+    return await new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE_NAME, mode);
+      const store = tx.objectStore(STORE_NAME);
+      const requests = keys.map((key) => store.get(key));
+      let failure: unknown;
+      requests[requests.length - 1].onsuccess = () => {
+        try { update?.(requests.map((request) => request.result), store); }
+        catch (error) { failure = error; tx.abort(); }
+      };
+      tx.oncomplete = () => resolve(requests.map((request) => request.result));
+      tx.onerror = () => reject(failure ?? tx.error);
+      tx.onabort = () => reject(failure ?? tx.error ?? new Error("本机副本事务已中止"));
+    });
+  } finally { db.close(); }
+};
+const sourceKeys = [WORKSPACE_KEY, WORKSPACE_META_KEY, REPLICA_KEY, PRE_ATTACHMENT_KEY, PRE_OPERATION_KEY, LOCAL_IMPORT_ARCHIVES, LOCAL_IMPORT_JOURNAL];
+const sourceFingerprint = (values: unknown[]) => localMigrationDigest(values.slice(0, 6).map((value) => value ?? null));
+export const readLocalMigrationStorage = async (expectedWorkspace: Workspace): Promise<LocalMigrationStorage> => {
+  await settledWrites();
+  const values = await migrationTransaction("readonly", sourceKeys);
+  if (values[6]) throw new LocalMigrationPendingError();
+  const workspace = values[0] ? migrateWorkspace(values[0]) : undefined;
+  const revision = parseStoredMeta(values[1]).revision;
+  if (!workspace || knownRevision !== revision || !sameWorkspace(workspace, migrateWorkspace(expectedWorkspace))) throw new Error("源工作区版本已变化，请保存后重试");
+  const replica = values[2] as ReplicaState | undefined;
+  if (replica && replica.protocol !== 2) throw new Error("源操作协议暂不支持，原记录已保留");
+  const preAttachmentFallback = localStorage.getItem(PRE_ATTACHMENT_FALLBACK_KEY);
+  return { workspace, revision, replica: replica ?? null,
+    preAttachment: values[3] ? migrateWorkspace(values[3]) : preAttachmentFallback ? migrateWorkspace(JSON.parse(preAttachmentFallback)) : null,
+    preOperation: values[4] ? migrateWorkspace(values[4]) : null,
+    archives: values[5] as LocalMigrationCopy[] ?? [], fingerprint: sourceFingerprint(values) };
+};
+export const readLocalMigrationRecovery = () => {
+  const result = readFallbackSnapshots();
+  if (result.error) throw result.error;
+  const recovery = result.snapshots.map(({ id, workspace, savedAt, baseRevision }) => ({ id, workspace, savedAt, baseRevision }));
+  const recoveryFiles = listWorkspaceRecoveryFiles().filter((file) => !file.id.startsWith("import:"));
+  return { recovery, recoveryFiles, fingerprint: localMigrationDigest({ recovery, recoveryFiles, preAttachment: localStorage.getItem(PRE_ATTACHMENT_FALLBACK_KEY) }) };
+};
+export const readLocalMigrationJournal = async (): Promise<LocalMigrationJournal | null> =>
+  (await migrationTransaction("readonly", [LOCAL_IMPORT_JOURNAL]))[0] as LocalMigrationJournal ?? null;
+export const localMigrationWasInstalled = async (archiveId: string, sessionId?: string): Promise<boolean> => {
+  const receipts = (await migrationTransaction("readonly", [LOCAL_IMPORT_RECEIPTS]))[0] as Record<string, { sessionId: string }> | undefined;
+  const receipt = receipts && Object.prototype.hasOwnProperty.call(receipts, archiveId) ? receipts[archiveId] : undefined;
+  return Boolean(receipt && (!sessionId || receipt.sessionId === sessionId));
+};
+export const beginLocalMigration = async (journal: LocalMigrationJournal) => {
+  await settledWrites();
+  await migrationTransaction("readwrite", [...sourceKeys, LOCAL_IMPORT_RECEIPTS], (values, store) => {
+    if (values[6]) throw new LocalMigrationPendingError();
+    if (Object.prototype.hasOwnProperty.call(values[7] ?? {}, journal.archiveId)) throw new Error("此本机副本已经导入，当前编辑已保留");
+    if (parseStoredMeta(values[1]).revision !== journal.expectedRevision || sourceFingerprint(values) !== journal.sourceDigest)
+      throw new Error("导入基线已变化，请重新选择本机副本");
+    store.put(journal, LOCAL_IMPORT_JOURNAL);
+  });
+};
+export const renewLocalMigrationLease = async (id: string) => {
+  await migrationTransaction("readwrite", [LOCAL_IMPORT_JOURNAL], ([value], store) => {
+    const journal = value as LocalMigrationJournal | null;
+    if (!journal || journal.id !== id || journal.recoveryOwner) throw new Error("导入会话已由恢复流程接管");
+    store.put({ ...journal, startedAt: Date.now() }, LOCAL_IMPORT_JOURNAL);
+  });
+};
+export const claimLocalMigrationRecovery = async (id: string, expectedStartedAt: number): Promise<string> => {
+  const owner = uuid();
+  await migrationTransaction("readwrite", [LOCAL_IMPORT_JOURNAL], ([value], store) => {
+    const journal = value as LocalMigrationJournal | null;
+    if (!journal || journal.id !== id || journal.startedAt !== expectedStartedAt || Date.now() - journal.startedAt < 60_000)
+      throw new Error("另一窗口的导入或恢复仍在进行，请稍后重试");
+    store.put({ ...journal, recoveryOwner: owner, startedAt: Date.now() }, LOCAL_IMPORT_JOURNAL);
+  });
+  return owner;
+};
+export const abortLocalMigration = async (id: string, recoveryOwner?: string) => {
+  await migrationTransaction("readwrite", [LOCAL_IMPORT_JOURNAL], ([value], store) => {
+    const journal = value as LocalMigrationJournal | null;
+    if (journal && (journal.id !== id || journal.recoveryOwner !== recoveryOwner)) throw new Error("另一导入会话正在恢复");
+    store.put(null, LOCAL_IMPORT_JOURNAL);
+  });
+};
+export const commitLocalMigration = async (id: string, input: Workspace, archive: LocalMigrationCopy): Promise<Workspace> => {
+  const workspace = withoutLocalMigration(input);
+  assertWorkspaceBudget(workspace);
+  workspaceAttachmentAssets(workspace);
+  let revision = 0;
+  await migrationTransaction("readwrite", [...sourceKeys, LOCAL_IMPORT_RECEIPTS], (values, store) => {
+    const journal = values[6] as LocalMigrationJournal | null;
+    if (!journal || journal.id !== id || journal.recoveryOwner || journal.archiveId !== archive.id ||
+        sourceFingerprint(values) !== journal.sourceDigest || parseStoredMeta(values[1]).revision !== journal.expectedRevision)
+      throw new Error("导入会话或正文基线已变化，已停止安装");
+    revision = journal.expectedRevision + 1;
+    const previous = values[5] as LocalMigrationCopy[] ?? [];
+    const privateSource = (copy: LocalMigrationCopy): LocalMigrationCopy => {
+      const { credentials: _credentials, preferences: _preferences, ...source } = copy;
+      return { ...source, archives: source.archives.map(privateSource) };
+    };
+    const privateArchive = privateSource(archive);
+    const archives = [...previous, privateArchive];
+    const receipts = { ...(values[7] as Record<string, unknown> ?? {}), [archive.id]: { sessionId: id, importedAt: new Date().toISOString(), digest: archive.contentSha256 } };
+    store.put(workspace, WORKSPACE_KEY);
+    store.put({ revision, savedAt: new Date().toISOString(), writer: pageId, saveId: id }, WORKSPACE_META_KEY);
+    // No operation is replayed during import. Later edits/restores use the
+    // normal commit path with this new actor and an empty remote baseline.
+    store.put(createReplicaState(workspace, uuid()), REPLICA_KEY);
+    store.put(archives, LOCAL_IMPORT_ARCHIVES);
+    store.put(receipts, LOCAL_IMPORT_RECEIPTS);
+    store.put({ ...journal, phase: "installed", startedAt: Date.now() }, LOCAL_IMPORT_JOURNAL);
+  });
+  return workspace;
+};
+export const finalizeLocalMigration = async (id: string, recoveryOwner?: string): Promise<Workspace> => {
+  let workspace: Workspace | null = null;
+  let revision = 0;
+  let archives: LocalMigrationCopy[] = [];
+  await migrationTransaction("readwrite", [...sourceKeys, LOCAL_IMPORT_RECEIPTS], (values, store) => {
+    const journal = values[6] as LocalMigrationJournal | null;
+    const receipts = values[7] as Record<string, { sessionId: string }> | undefined;
+    if (!journal || journal.id !== id || journal.recoveryOwner !== recoveryOwner || journal.phase !== "installed" || !receipts ||
+        !Object.prototype.hasOwnProperty.call(receipts, journal.archiveId) || receipts[journal.archiveId].sessionId !== id)
+      throw new Error("本机副本尚未形成完整安装回执");
+    workspace = values[0] as Workspace;
+    revision = parseStoredMeta(values[1]).revision;
+    archives = values[5] as LocalMigrationCopy[] ?? [];
+    store.put(null, LOCAL_IMPORT_JOURNAL);
+  });
+  if (!workspace) throw new Error("本机副本安装缺少工作区");
+  localMigrationArchives = archives;
+  adoptEpoch += 1;
+  knownRevision = revision;
+  persistedWorkspace = workspace;
+  adoptedFallback = null;
+  savedRevisions.set(workspace, revision);
+  broadcastSaved(revision);
+  return workspace;
 };

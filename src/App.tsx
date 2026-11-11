@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { observeTextareaLayout, requestTextareaResize } from "./textareaLayout";
 import {
   ArrowDown,
   ArrowUp,
@@ -100,6 +101,10 @@ import { SearchResults } from "./components/SearchResults";
 import { SearchControls } from "./components/SearchControls";
 import { TrashDialog } from "./components/TrashDialog";
 import { VersionHistoryDialog } from "./components/VersionHistoryDialog";
+import { LocalMigrationDialog, LocalMigrationArchivesDialog } from "./components/LocalMigrationDialog";
+import { createLocalMigrationExport, installLocalMigrationExport, recoverInterruptedLocalMigration, validateLocalMigrationImport, type LocalMigrationOptions } from "./localMigration";
+import { readLocalMigration } from "../shared/bike-local-migration.mjs";
+import type { LocalMigrationCopy } from "../shared/bike-local-migration.mjs";
 import { AttachmentActionsContext, AttachmentItems, AttachmentItem, AttachmentPanel, useAttachmentActions } from "./components/Attachments";
 import { mergeAttachmentMetadata, workspaceFormatVersion, workspaceAttachmentAssets, MAX_IMPORT_BYTES, MAX_IMPORT_FILES, MAX_ATTACHMENT_BYTES } from "../shared/bike-attachments.mjs";
 import type { AttachmentMetadata } from "../shared/bike-attachments.mjs";
@@ -182,6 +187,10 @@ import {
   queryOperationReceipt,
   markWorkspaceOperation,
   attachmentRecoveryRoots,
+  listLocalMigrationArchives,
+  listLocalMigrationProtectedAssetIds,
+  localMigrationWasInstalled,
+  readLocalMigrationJournal,
   reloadWorkspaceIf,
   saveWorkspace as saveWorkspaceToStorage,
   saveWorkspaceFallback,
@@ -196,6 +205,7 @@ import { safeMarkdownUrl } from "./safeUrl";
 import {
   loadSyncConfig,
   loadSyncState,
+  emptySyncState,
   normalizeAutoSyncInterval,
   normalizeSyncServerUrl,
   pullWorkspaceFromRemote,
@@ -862,6 +872,8 @@ function App() {
   const [showRecoverySnapshots, setShowRecoverySnapshots] = useState(false);
   const [recoveryBusy, setRecoveryBusy] = useState(false);
   const recoveryBusyRef = useRef(false);
+  const [localCopyDialog, setLocalCopyDialog] = useState<{ kind: "export" } | { kind: "import"; workspace: Workspace; baseline: Workspace; copy: LocalMigrationCopy } | null>(null);
+  const [sourceArchives, setSourceArchives] = useState<LocalMigrationCopy[] | null>(null);
   const historyRef = useRef<EditHistory>(emptyEditHistory());
   const [, bumpHistoryVersion] = useState(0);
   const lastAutoSnapshotRef = useRef(new Map<string, number>());
@@ -892,7 +904,7 @@ function App() {
   const autoSyncObservedWorkspaceRef = useRef<Workspace | null>(null);
   const modalOpenRef = useRef(false);
   modalOpenRef.current = showTrash || showVersionHistory || showAiConfig || showSyncConfig ||
-    showConfirmDelete || showRecoverySnapshots || showBackupSettings || Boolean(proposal) || showLiveMcp || showKnowledgeWorkflow;
+    showConfirmDelete || showRecoverySnapshots || showBackupSettings || Boolean(proposal) || showLiveMcp || showKnowledgeWorkflow || Boolean(localCopyDialog) || Boolean(sourceArchives);
 
   const [theme, setTheme] = useState<"light" | "dark">(
     () => readPreference("theme", "light") as "light" | "dark"
@@ -948,14 +960,18 @@ function App() {
 
   const runBackupJob = useEventCallback(async (job: { ticket: number; hash: string } | null): Promise<void> => {
     if (!job) return;
-    if (backupLocalPauseRef.current || storageConflictRef.current || recoveryBusyRef.current) {
-      pauseLocalBackup(backupLocalPauseRef.current || "storage-conflict");
+    const payload = backupPayloadsRef.current.get(job.ticket);
+    // Preparation freezes edits while draining already authoritative backups.
+    const preparingUpdate = updateInstallRef.current && workspaceRef.current === updateInstallRef.current &&
+      payload && getWorkspaceSaveRevision(payload) != null;
+    const paused = backupLocalPauseRef.current ?? backupScheduleRef.current.paused;
+    if (paused || storageConflictRef.current || (recoveryBusyRef.current && !preparingUpdate)) {
+      pauseLocalBackup(paused || "storage-conflict");
       backupScheduleRef.current = reduceBackupSchedule(backupScheduleRef.current, { type: "write-finished", ticket: job.ticket, ok: false }, Date.now()).state;
       pruneBackupPayloads(backupPayloadsRef.current, backupScheduleRef.current);
       return;
     }
     const bridge = window.bike ?? window.localOutline;
-    const payload = backupPayloadsRef.current.get(job.ticket);
     if (!bridge?.enqueueBackup || !payload) return;
     // The source revision orders content; the main process owns request tickets
     // even when a re-opened renderer has not seen an interrupted issued ticket.
@@ -1045,12 +1061,13 @@ function App() {
     }
     const bridge = window.bike ?? window.localOutline;
     const payload = saved ?? workspaceRef.current;
+    const preparingUpdate = payload && updateInstallRef.current === payload && workspaceRef.current === payload;
     if (["save-failed", "fallback"].includes(backupLocalPauseRef.current ?? "") && !storageConflictRef.current && !recoveryBusyRef.current) {
       backupLocalPauseRef.current = null;
       backupScheduleRef.current = reduceBackupSchedule(backupScheduleRef.current, { type: "resume" }, Date.now()).state;
       backupScheduleRef.current.lastHash = null;
     }
-    if (backupLocalPauseRef.current || storageConflictRef.current || recoveryBusyRef.current) return;
+    if (backupLocalPauseRef.current || storageConflictRef.current || (recoveryBusyRef.current && !preparingUpdate)) return;
     if (!bridge?.enqueueBackup || !backupScheduleRef.current.enabled || !payload) return;
     if (getWorkspaceSaveRevision(payload) == null) return;
     backupTicketRef.current += 1;
@@ -1100,7 +1117,8 @@ function App() {
     if (shell) shell.inert = false;
   });
   const prepareUpdateInstall = useEventCallback(async () => {
-    if (!ready || storageConflictRef.current || recoveryBusyRef.current || syncBusyRef.current ||
+    if (!ready && !loadError) return { ok: false, loading: true };
+    if (!ready || compositionActiveRef.current || operationCommitRef.current || storageConflictRef.current || recoveryBusyRef.current || syncBusyRef.current ||
         historyBusyRef.current || attachmentImportRef.current) return { ok: false };
     const current = flushPendingEditsRef.current() ?? workspaceRef.current;
     if (!current) return { ok: false };
@@ -1111,10 +1129,13 @@ function App() {
     const shell = document.querySelector<HTMLElement>(".shell");
     if (shell) shell.inert = true;
     try {
+      const requiredBackupHash = backupScheduleRef.current.enabled && !backupLocalPauseRef.current && !backupScheduleRef.current.paused
+        ? backupContentHash(current) : null;
       const result = await saveWorkspace(current);
       await flushScheduledBackup();
       if (!result.ok || result.target !== "indexeddb" || storageConflictRef.current ||
-          updateInstallRef.current !== current || workspaceRef.current !== current) {
+          updateInstallRef.current !== current || workspaceRef.current !== current ||
+          (requiredBackupHash !== null && backupScheduleRef.current.lastHash !== requiredBackupHash)) {
         releaseUpdateLock();
         return { ok: false };
       }
@@ -1187,6 +1208,7 @@ function App() {
       autoSyncIntervalSeconds: normalizeAutoSyncInterval(next.autoSyncIntervalSeconds),
     };
     saveSyncConfig(normalized);
+    localStorage.removeItem("bike-local-copy-offline");
     setSyncConfig(normalized);
     const nextState = loadSyncState(normalized.serverUrl);
     setSyncState(nextState);
@@ -1204,6 +1226,22 @@ function App() {
       autoSyncTimerRef.current = null;
     }
   });
+  const disableLocalCopyAutomaticBackup = useEventCallback(async () => {
+    const bridge = window.bike ?? window.localOutline;
+    if (!bridge?.setBackupAuto) throw new Error("当前桌面版无法确认自动备份已关闭，请升级后导入");
+    const status = await bridge.setBackupAuto(false);
+    if (status.auto !== false) throw new Error("自动备份尚未确认关闭，已停止导入");
+    applyBackupStatus(status as typeof backupStatus);
+  });
+  const reloadLocalCopyPreferences = useEventCallback((next: Workspace) => {
+    setAiConfig(loadAiConfig());
+    setTheme(readPreference("theme", "light") === "dark" ? "dark" : "light");
+    setShowRelations(readPreference("bike.mindmap.relations", "1") !== "0");
+    let importedNavigation: unknown = null;
+    try { importedNavigation = JSON.parse(readPreference("bike.navigation.v1", "null")); } catch { /* Follow the same fallback as ordinary preference loading. */ }
+    setNavigation(pruneNavigation(normalizeNavigation(importedNavigation), { liveIds: next.documents.map((item) => item.id), trashIds: (next.trash ?? []).map((entry) => entry.document.id) }));
+  });
+  const localCopyPreferencesPendingRef = useRef(false);
 
   const initializeWorkspace = useEventCallback((
     isMounted: () => boolean = () => true,
@@ -1212,7 +1250,16 @@ function App() {
     pauseLocalBackup("loading");
     setLoadError(null);
     setReady(false);
-    return loadWorkspace(options).then((result) => {
+    return recoverInterruptedLocalMigration(disableLocalCopyAutomaticBackup).then((recovered) => {
+      if (recovered) {
+        localCopyPreferencesPendingRef.current = true;
+        setSyncConfig(loadSyncConfig());
+        const offlineState = emptySyncState(loadSyncConfig().serverUrl);
+        saveSyncState(offlineState);
+        setSyncState(offlineState);
+      }
+      return loadWorkspace(options);
+    }).then((result) => {
       if (!isMounted()) return false;
       if (result.status === "error") {
         pauseLocalBackup("load-error");
@@ -1222,6 +1269,10 @@ function App() {
         return false;
       }
       const next = result.status === "loaded" ? result.workspace : createStarterWorkspace();
+      if (localCopyPreferencesPendingRef.current) {
+        reloadLocalCopyPreferences(next);
+        localCopyPreferencesPendingRef.current = false;
+      }
       replaceWorkspace(next);
       backupLocalPauseRef.current = null;
       backupScheduleRef.current = reduceBackupSchedule(backupScheduleRef.current, { type: "resume" }, Date.now()).state;
@@ -3221,7 +3272,7 @@ function App() {
         }
         if (nodeClipboard) documents.push({ ...current.documents[0], nodes: [nodeClipboard.node], attachments: nodeClipboard.attachments });
         for (const backup of backups) documents.push(...backup.documents, ...(backup.trash ?? []).map((item) => item.document));
-        return [...new Set([...historicalIds, ...replicaProtectedAssetIds(await readReplicaState()), ...workspaceAttachmentAssets({ documents }).map((item) => item.assetId)])];
+        return [...new Set([...historicalIds, ...await listLocalMigrationProtectedAssetIds(), ...replicaProtectedAssetIds(await readReplicaState()), ...workspaceAttachmentAssets({ documents }).map((item) => item.assetId)])];
       };
       const scan = await bridge.scanAttachments(await roots());
       if (!scan.ok || !scan.ticket) throw new Error(scan.error || "附件扫描失败");
@@ -3335,14 +3386,89 @@ function App() {
       if (!result.cancelled) showNotice(`已导出完整 ZIP，包含 ${result.attachmentCount ?? 0} 个附件`);
     } catch (error) { showNotice(error instanceof Error ? error.message : "工作区归档失败"); }
   });
-  const importArchive = useEventCallback(async (assetsOnly = false) => {
+  const closeLocalCopyDialog = useEventCallback(() => {
+    if (localCopyDialog?.kind === "import") { recoveryBusyRef.current = false; setRecoveryBusy(false); }
+    setLocalCopyDialog(null);
+  });
+  const executeLocalCopyDialog = useEventCallback(async (options: LocalMigrationOptions) => {
+    const dialog = localCopyDialog;
+    const bridge = window.bike ?? window.localOutline;
+    if (!dialog || !bridge?.exportWorkspaceArchive) return;
+    if (compositionActiveRef.current || operationCommitRef.current || storageConflictRef.current || syncBusyRef.current || historyBusyRef.current || attachmentImportRef.current || updateInstallRef.current) {
+      showNotice("请先结束输入或等待当前操作完成，再处理本机副本"); return;
+    }
+    const current = flushPendingEdits() ?? workspaceRef.current;
+    if (!current) return;
+    if (dialog.kind === "import" && current !== dialog.baseline) { showNotice("预览期间工作区已变化，请重新选择本机副本"); closeLocalCopyDialog(); return; }
+    setLocalCopyDialog(null);
+    recoveryBusyRef.current = true;
+    cleanupBusyRef.current = true;
+    setRecoveryBusy(true);
+    clearAutoSyncTimer();
+    pauseLocalBackup("local-copy");
+    aiRequestRef.current?.controller.abort();
+    const shell = document.querySelector<HTMLElement>(".shell");
+    if (shell) shell.inert = true;
+    let attemptedImport = false;
+    let needsReload = false;
+    try {
+      const saved = await saveWorkspaceToStorage(current, { requireIndexedDB: true });
+      if (!saved.ok || saved.target !== "indexeddb") throw new Error(saved.ok ? "完整本机副本需要主存储保存成功" : saved.error.message);
+      if (workspaceRef.current !== current || storageConflictRef.current) throw new Error("快照期间工作区已变化，请重试");
+      const backup = await createLocalMigrationExport(current, dialog.kind === "export" ? options : { preferences: false, credentials: false }, async (assetId) => {
+        const result = await bridge.readAttachment?.(assetId);
+        if (!result?.ok || !result.metadata) throw new Error(result?.error || "源审计附件无法读取，已停止完整副本导出");
+        return result.metadata;
+      });
+      const exported = await bridge.exportWorkspaceArchive(backup);
+      if (exported.cancelled) return;
+      if (!exported.ok) throw new Error(exported.error || "完整本机副本备份失败");
+      if (exported.attachmentCount !== backup.localMigration.assets.length) throw new Error("当前桌面归档服务未包含全部历史附件，请升级后重新导出");
+      if (dialog.kind === "export") { showNotice(`已导出完整本机副本，包含 ${backup.localMigration.assets.length} 个附件，源修订 ${backup.localMigration.source.revision}`); return; }
+      if (workspaceRef.current !== current || storageConflictRef.current) throw new Error("备份期间有新编辑，已停止导入");
+      liveGrantEpochRef.current += 1;
+      if (bridge.stopLiveMcp) setLiveState(await bridge.stopLiveMcp());
+      if (backupFlightRef.current) await backupFlightRef.current;
+      attemptedImport = true;
+      const installed = await installLocalMigrationExport(dialog.workspace, current, options, disableLocalCopyAutomaticBackup);
+      const config = loadSyncConfig();
+      const offlineState = emptySyncState(config.serverUrl);
+      saveSyncState(offlineState);
+      setSyncConfig(config); setSyncState(offlineState);
+      autoSyncDirtyRef.current = false;
+      replaceWorkspace(installed);
+      clearEditHistory(); lastAutoSnapshotRef.current.clear();
+      proposalRegistryRef.current.clear(); liveRequestStatusesRef.current.clear(); setProposals([]);
+      setActiveNodeId(firstNodeIdInWorkspace(installed)); setFocusNodeId(null);
+      setNodeClipboard(null);
+      reloadLocalCopyPreferences(installed);
+      refreshRecoverySnapshots();
+      setAttachmentGeneration((value) => value + 1);
+      showNotice("完整本机副本已导入。已生成新副本身份，同步和自动备份已关闭，源操作保存在只读来源档案中");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "完整本机副本处理失败";
+      showNotice(message);
+      if (attemptedImport) {
+        needsReload = true;
+        try { needsReload = Boolean(await readLocalMigrationJournal()) || !isWorkspacePersisted(current); } catch { /* Keep loading protected until the journal can be checked. */ }
+        if (needsReload) { setReady(false); setLoadError(`完整本机副本尚未确认完成。${message}。请重试加载以恢复或完成导入`); }
+      }
+    } finally {
+      if (shell) shell.inert = false;
+      cleanupBusyRef.current = false; recoveryBusyRef.current = false; setRecoveryBusy(false);
+      backupLocalPauseRef.current = needsReload ? "load-error" : null;
+      void bridge.getBackupStatus?.().then((status) => applyBackupStatus(status as typeof backupStatus));
+    }
+  });
+  const importArchive = useEventCallback(async (assetsOnly = false, completeCopyOnly = false) => {
     const bridge = window.bike ?? window.localOutline;
     if (!bridge?.importWorkspaceArchive) { showNotice("请在 macOS 桌面版载入工作区 ZIP"); return; }
-    if (recoveryBusyRef.current || syncBusyRef.current || storageConflictRef.current || attachmentImportRef.current) return;
+    if (compositionActiveRef.current || operationCommitRef.current || recoveryBusyRef.current || syncBusyRef.current || historyBusyRef.current || storageConflictRef.current || attachmentImportRef.current || updateInstallRef.current) return;
     const current = flushPendingEdits() ?? workspaceRef.current;
     if (!current) return;
     recoveryBusyRef.current = true;
     setRecoveryBusy(true);
+    let previewOpen = false;
     try {
       const saved = await saveWorkspace(current);
       if (!saved.ok || saved.target !== "indexeddb") throw new Error("请先完成本机主存储保存");
@@ -3350,6 +3476,16 @@ function App() {
       if (!result.ok) throw new Error(result.error || "工作区归档导入失败");
       if (result.cancelled) return;
       if (assetsOnly) { setAttachmentGeneration((value) => value + 1); showNotice("附件库已补齐并完成校验"); return; }
+      const copy = readLocalMigration(result.workspace);
+      if (copy) {
+        if (result.attachmentCount !== copy.assets.length) throw new Error("本机副本的历史附件尚未完整校验，已停止导入");
+        const validated = validateLocalMigrationImport(result.workspace);
+        if (await localMigrationWasInstalled(validated.copy.id)) throw new Error("此本机副本已经导入，当前编辑已保留");
+        setLocalCopyDialog({ kind: "import", workspace: result.workspace as Workspace, baseline: current, copy: validated.copy });
+        previewOpen = true;
+        return;
+      }
+      if (completeCopyOnly) throw new Error("所选文件是普通工作区 ZIP，请使用载入 ZIP 入口");
       let imported = migrateWorkspace(result.workspace);
       if (current.version === 3) imported = { ...imported, version: 3 };
       markWorkspaceOperation(imported, { source: { kind: "import", label: "从 ZIP 恢复工作区" } });
@@ -3371,7 +3507,7 @@ function App() {
       setAttachmentGeneration((value) => value + 1);
       showNotice("工作区和附件已恢复");
     } catch (error) { showNotice(error instanceof Error ? error.message : "工作区归档导入失败"); }
-    finally { recoveryBusyRef.current = false; setRecoveryBusy(false); }
+    finally { if (!previewOpen) { recoveryBusyRef.current = false; setRecoveryBusy(false); } }
   });
 
   const backupToCloud = useEventCallback(async () => {
@@ -3423,6 +3559,7 @@ function App() {
     }
     let next: Workspace;
     try {
+      if ("localMigration" in result.payload) throw new Error("完整本机副本需要从导入本机副本入口选择原始 ZIP");
       next = migrateWorkspace(result.payload);
     } catch (error) {
       showNotice(`载入备份失败：${error instanceof Error ? error.message : String(error)}`);
@@ -3632,15 +3769,19 @@ function App() {
       const latest = await loadWorkspace({ includeFallback: false });
       if (latest.status === "error") throw latest.error;
       if (latest.status === "loaded") await downloadWorkspaceBackup(latest.workspace, "recovery-saved");
-      const saved = await saveWorkspace(snapshot.workspace);
+      const importedSource = snapshot.id.startsWith("import:");
+      const restored = importedSource && (current?.version === 3 || (latest.status === "loaded" && latest.workspace.version === 3))
+        ? { ...snapshot.workspace, version: 3 as const } : snapshot.workspace;
+      if (importedSource) markWorkspaceOperation(restored, { source: { kind: "restore", label: "恢复导入的源备用副本" } });
+      const saved = await saveWorkspace(restored);
       if (!saved.ok) throw saved.error;
-      replaceWorkspace(snapshot.workspace);
+      replaceWorkspace(restored);
       clearEditHistory();
-      setActiveNodeId(firstNodeIdInWorkspace(snapshot.workspace));
+      setActiveNodeId(firstNodeIdInWorkspace(restored));
       setFocusNodeId(null);
       // Keep the selected copy until it is durable in IndexedDB. A temporary
       // fallback save must not be mistaken for a completed recovery.
-      if (saved.target === "indexeddb") discardWorkspaceRecoverySnapshot(snapshot);
+      if (saved.target === "indexeddb" && !importedSource) discardWorkspaceRecoverySnapshot(snapshot);
       storageConflictRef.current = false;
       setStorageConflict(false);
       setShowRecoverySnapshots(false);
@@ -3678,6 +3819,7 @@ function App() {
     overrideConfig?: SyncConfig,
     options: { silent?: boolean } = {},
   ) => {
+    if (options.silent && readPreference("bike-local-copy-offline", "") === "1") return;
     if (syncBusyRef.current || storageConflictRef.current || recoveryBusyRef.current || historyBusyRef.current) return;
     const currentWorkspace = flushPendingEdits() ?? workspaceRef.current;
     if (!currentWorkspace) return;
@@ -3963,6 +4105,7 @@ function App() {
         imported = importDocument(source, file.name, { dropMetadata: true });
       }
       if ("documents" in imported) {
+        if ("localMigration" in imported) throw new Error("完整本机副本需要从导入本机副本入口选择原始 ZIP，以校验历史与附件");
         const currentWorkspace = flushPendingEdits() ?? workspaceRef.current;
         const shouldReplace = window.confirm(
           `导入工作区「${file.name}」会替换当前所有文档。继续前会先下载一份当前工作区备份。`,
@@ -4060,6 +4203,13 @@ function App() {
     publishNodeLabel(id, document ? findNode(document.nodes, id)?.text ?? value : value, value);
   });
   const isStructuredAiBusy = useCallback((id: StructuredAiTargetId) => Boolean(aiBusyKey?.startsWith(`structured:${id}:`)), [aiBusyKey]);
+  const attachmentsAvailable = Boolean((window.bike ?? window.localOutline)?.importAttachments);
+  const attachmentActions = useMemo(() => ({
+    add: (id: string) => void addAttachments(id),
+    available: attachmentsAvailable,
+    busy: attachmentBusy,
+    generation: attachmentGeneration,
+  }), [addAttachments, attachmentsAvailable, attachmentBusy, attachmentGeneration]);
 
   if (loadError) {
     return (
@@ -4091,7 +4241,7 @@ function App() {
               <div className="loading-error-actions">
                 <button type="button" onClick={() => void downloadWorkspaceBackup(snapshot.workspace, "recovery").catch((error) => showNotice(error.message))} disabled={recoveryBusy}>下载副本</button>
                 <button type="button" onClick={() => void restoreRecoverySnapshot(snapshot)} disabled={recoveryBusy || syncBusy}>恢复这个副本</button>
-                <button type="button" onClick={() => discardRecoverySnapshot(snapshot)} disabled={recoveryBusy}>下载并删除</button>
+                {!snapshot.id.startsWith("import:") && <button type="button" onClick={() => discardRecoverySnapshot(snapshot)} disabled={recoveryBusy}>下载并删除</button>}
               </div>
             </article>
           ))}
@@ -4146,7 +4296,7 @@ function App() {
   const canRedo = historyRef.current.future.length > 0;
 
   return (
-    <AttachmentActionsContext.Provider value={{ add: (id) => void addAttachments(id), available: Boolean((window.bike ?? window.localOutline)?.importAttachments), busy: attachmentBusy, generation: attachmentGeneration }}>
+    <AttachmentActionsContext.Provider value={attachmentActions}>
     <main className="shell">
       <aside className="sidebar">
         <div className="brand">
@@ -4527,6 +4677,9 @@ function App() {
             {attachmentBusy && <button onClick={cancelAttachmentImport}>取消附件导入</button>}
             <button disabled={recoveryBusy} onClick={() => void exportArchive()}>工作区 ZIP</button>
             <button disabled={recoveryBusy} onClick={() => void importArchive()}>载入 ZIP</button>
+            <button disabled={recoveryBusy || !(window.bike ?? window.localOutline)?.exportWorkspaceArchive} onClick={() => setLocalCopyDialog({ kind: "export" })}>完整本机副本</button>
+            <button disabled={recoveryBusy || !(window.bike ?? window.localOutline)?.importWorkspaceArchive} onClick={() => void importArchive(false, true)}>导入本机副本</button>
+            <button disabled={recoveryBusy} onClick={() => { void listLocalMigrationArchives().then(setSourceArchives).catch((error) => showNotice(error instanceof Error ? error.message : "无法读取来源档案")); }}>来源档案</button>
             <button disabled={recoveryBusy} onClick={() => void importArchive(true)}>补齐附件</button>
             <button disabled={recoveryBusy || attachmentBusy} onClick={() => void cleanAttachments()}>清理附件</button>
           </div>
@@ -4776,6 +4929,8 @@ function App() {
           <button className="secondary" onClick={() => { void (window.bike ?? window.localOutline)?.stopLiveMcp?.().then((state) => { setLiveState(state); showNotice("Live MCP 授权已撤销"); }); }}>撤销并关闭</button></footer>
       </section></div>}
       {proposal && <ProposalDialog key={proposal.id} workspace={workspace} proposal={proposal} busy={proposalBusy} error={proposalError} onAccept={acceptProposal} onReject={rejectProposal} />}
+      {localCopyDialog && <LocalMigrationDialog copy={localCopyDialog.kind === "import" ? localCopyDialog.copy : undefined} documentCount={localCopyDialog.kind === "import" ? localCopyDialog.workspace.documents.length : workspace.documents.length} onClose={closeLocalCopyDialog} onConfirm={(options) => void executeLocalCopyDialog(options)} />}
+      {sourceArchives && <LocalMigrationArchivesDialog archives={sourceArchives} onClose={() => setSourceArchives(null)} onDownload={(copy) => downloadText(`bike-source-${copy.id}.json`, JSON.stringify(copy, null, 2), "application/json")} />}
       {showAiConfig && (
         <AiConfigDialog
           initialConfig={aiConfig || defaultAiConfig}
@@ -5996,25 +6151,17 @@ const OutlineNodeRow = React.memo(function OutlineNodeRow({
   const baselineRef = useRef(node.text);
   const [linkChoices, setLinkChoices] = useState<{ items: Suggestion[]; requiresExplicit: boolean; highlight: number; query: { start: number; end: number } } | null>(null);
   const [linkPopupStyle, setLinkPopupStyle] = useState<React.CSSProperties>({});
-  const [textCellWidth, setTextCellWidth] = useState(0);
   const isFocusedRef = useRef(false);
   const debounceTimerRef = useRef<number | null>(null);
-  const resizeFrameRef = useRef<number | null>(null);
-  const resizeTimerRef = useRef<number | null>(null);
-  const textCellRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const synchronouslyResizedTextRef = useRef<string | null>(null);
 
-  const autoResize = useCallback((el: HTMLTextAreaElement | null) => {
-    if (!el) return;
-    el.style.height = "auto";
-    el.style.height = `${el.scrollHeight}px`;
-  }, []);
-
-  const updateTextCellWidth = useCallback(() => {
-    const nextWidth = textCellRef.current?.clientWidth ?? 0;
-    setTextCellWidth((currentWidth) => (
-      Math.abs(currentWidth - nextWidth) < 1 ? currentWidth : nextWidth
-    ));
+  // Link suggestions read the active input's geometry in the same input event.
+  const autoResize = useCallback((element: HTMLTextAreaElement | null) => {
+    if (!element) return;
+    element.style.height = "auto";
+    element.style.height = `${element.scrollHeight}px`;
+    synchronouslyResizedTextRef.current = element.value;
   }, []);
 
   useLayoutEffect(() => {
@@ -6025,42 +6172,25 @@ const OutlineNodeRow = React.memo(function OutlineNodeRow({
   }, [node.text]);
 
   useLayoutEffect(() => {
-    autoResize(textareaRef.current);
-    if (resizeFrameRef.current) window.cancelAnimationFrame(resizeFrameRef.current);
-    if (resizeTimerRef.current) window.clearTimeout(resizeTimerRef.current);
-    resizeFrameRef.current = window.requestAnimationFrame(() => {
-      autoResize(textareaRef.current);
-      resizeFrameRef.current = window.requestAnimationFrame(() => {
-        resizeFrameRef.current = null;
-        autoResize(textareaRef.current);
-      });
-    });
-    resizeTimerRef.current = window.setTimeout(() => {
-      resizeTimerRef.current = null;
-      autoResize(textareaRef.current);
-    }, 140);
-  }, [autoResize, localText, textCellWidth]);
+    const element = textareaRef.current;
+    return element ? observeTextareaLayout(element) : undefined;
+  }, []);
 
-  useEffect(() => {
-    const textCell = textCellRef.current;
-    const observer = textCell && "ResizeObserver" in window
-      ? new ResizeObserver(updateTextCellWidth)
-      : null;
-    if (observer && textCell) observer.observe(textCell);
-    window.addEventListener("resize", updateTextCellWidth);
-    updateTextCellWidth();
+  useLayoutEffect(() => {
+    if (synchronouslyResizedTextRef.current === localText) {
+      synchronouslyResizedTextRef.current = null;
+      return;
+    }
+    requestTextareaResize(textareaRef.current);
+  }, [localText]);
 
-    return () => {
-      observer?.disconnect();
-      window.removeEventListener("resize", updateTextCellWidth);
-    };
-  }, [updateTextCellWidth]);
+  useLayoutEffect(() => {
+    requestTextareaResize(textareaRef.current);
+  }, [node.headingLevel, node.bold, node.italic]);
 
   useEffect(() => {
     return () => {
       if (debounceTimerRef.current) window.clearTimeout(debounceTimerRef.current);
-      if (resizeFrameRef.current) window.cancelAnimationFrame(resizeFrameRef.current);
-      if (resizeTimerRef.current) window.clearTimeout(resizeTimerRef.current);
     };
   }, []);
 
@@ -6220,17 +6350,16 @@ const OutlineNodeRow = React.memo(function OutlineNodeRow({
         <span className="bullet-dot" />
       </button>
 
-      {node.isTodo && (
-        <button
-          className="task-checkbox"
-          onClick={handleCheckboxToggle}
-          title={node.checked ? "设为未完成" : "设为已完成"}
-        >
-          {node.checked ? <CheckCircle2 size={16} className="checked" /> : <Circle size={16} />}
-        </button>
-      )}
-
-      <div className="outline-text-cell" ref={textCellRef}>
+      <div className="outline-text-cell">
+        {node.isTodo && (
+          <button
+            className="check-button task-checkbox"
+            onClick={handleCheckboxToggle}
+            title={node.checked ? "设为未完成" : "设为已完成"}
+          >
+            {node.checked ? <CheckCircle2 size={16} className="checked" /> : <Circle size={16} />}
+          </button>
+        )}
         {node.icon && <span className="node-icon">{node.icon}</span>}
         <textarea
           ref={(element) => {
@@ -6317,7 +6446,7 @@ const OutlineNodeRow = React.memo(function OutlineNodeRow({
   );
 });
 
-function OutlineView(props: OutlineViewProps) {
+const OutlineView = React.memo(function OutlineView(props: OutlineViewProps) {
   const rows = useMemo(
     () => flattenNodes(props.nodes, { respectCollapsed: true }),
     [props.nodes],
@@ -6440,40 +6569,71 @@ function OutlineView(props: OutlineViewProps) {
     setDropState(null);
   });
 
+  const rowCallbacks = useMemo(() => ({
+    onSelect: props.onSelect,
+    onText: props.onText,
+    onKeyDown: props.onKeyDown,
+    onPatch: props.onPatch,
+    onInsertAfter: props.onInsertAfter,
+    onInsertChild: props.onInsertChild,
+    onRemove: props.onRemove,
+    setNodeRef: props.setNodeRef,
+    onOpenMenu: handleOpenMenu,
+    onDragStart: handleDragStart,
+    onDragOver: handleDragOver,
+    onDragLeave: handleDragLeave,
+    onDragEnd: handleDragEnd,
+    onDrop: handleDrop,
+    onAiAction: props.onAiAction,
+    onSuggestLinks: props.onSuggestLinks,
+    onBindLink: props.onBindLink,
+    onCreateLink: props.onCreateLink,
+    onPublishLabel: props.onPublishLabel,
+    onLabelFocus: props.onLabelFocus,
+    onFollowLink: props.onFollowLink,
+  }), [
+    props.onSelect, props.onText, props.onKeyDown, props.onPatch,
+    props.onInsertAfter, props.onInsertChild, props.onRemove, props.setNodeRef,
+    handleOpenMenu, handleDragStart, handleDragOver, handleDragLeave, handleDragEnd, handleDrop,
+    props.onAiAction, props.onSuggestLinks, props.onBindLink, props.onCreateLink,
+    props.onPublishLabel, props.onLabelFocus, props.onFollowLink,
+  ]);
+  const rowCache = useMemo(() => new WeakMap<OutlineNode, {
+    depth: number;
+    isActive: boolean;
+    dropZone: OutlineDropZone | null;
+    isAiBusy: boolean;
+    located: boolean;
+    element: React.ReactElement;
+  }>(), [rowCallbacks]);
+
   return (
     <div className="outline-list">
-      {rows.map(({ node, depth }) => (
-        <OutlineNodeRow
-          key={node.id}
-          node={node}
-          depth={depth}
-          isActive={props.activeNodeId === node.id}
-          onSelect={props.onSelect}
-          onText={props.onText}
-          onKeyDown={props.onKeyDown}
-          onPatch={props.onPatch}
-          onInsertAfter={props.onInsertAfter}
-          onInsertChild={props.onInsertChild}
-          onRemove={props.onRemove}
-          setNodeRef={props.setNodeRef}
-          onOpenMenu={handleOpenMenu}
-          onDragStart={handleDragStart}
-          onDragOver={handleDragOver}
-          onDragLeave={handleDragLeave}
-          onDragEnd={handleDragEnd}
-          onDrop={handleDrop}
-          dropZone={dropState?.id === node.id ? dropState.zone : null}
-          onAiAction={props.onAiAction}
-          isAiBusy={props.isAiBusy(node.id)}
-          onSuggestLinks={props.onSuggestLinks}
-          onBindLink={props.onBindLink}
-          onCreateLink={props.onCreateLink}
-          onPublishLabel={props.onPublishLabel}
-          onLabelFocus={props.onLabelFocus}
-          onFollowLink={props.onFollowLink}
-          located={props.locatedNodeId === node.id}
-        />
-      ))}
+      {rows.map(({ node, depth }) => {
+        const isActive = props.activeNodeId === node.id;
+        const dropZone = dropState?.id === node.id ? dropState.zone : null;
+        const isAiBusy = props.isAiBusy(node.id);
+        const located = props.locatedNodeId === node.id;
+        const cached = rowCache.get(node);
+        if (cached && cached.depth === depth && cached.isActive === isActive
+          && cached.dropZone === dropZone && cached.isAiBusy === isAiBusy && cached.located === located) {
+          return cached.element;
+        }
+        const element = (
+          <OutlineNodeRow
+            key={node.id}
+            node={node}
+            depth={depth}
+            {...rowCallbacks}
+            isActive={isActive}
+            dropZone={dropZone}
+            isAiBusy={isAiBusy}
+            located={located}
+          />
+        );
+        rowCache.set(node, { depth, isActive, dropZone, isAiBusy, located, element });
+        return element;
+      })}
       {menuState && menuNode && (
         <NodeMenu
           node={menuNode}
@@ -6497,7 +6657,7 @@ function OutlineView(props: OutlineViewProps) {
       )}
     </div>
   );
-}
+});
 
 interface NodeMenuProps {
   node: OutlineNode;
@@ -6719,6 +6879,128 @@ interface MindMapItem {
   parentId: string | null;
   lines: string[];
 }
+
+interface MindMapNodeProps {
+  item: MindMapItem;
+  active: boolean;
+  draft: string | null;
+  actionTargetId: string;
+  suppressClickRef: React.MutableRefObject<boolean>;
+  onSelect: MindMapProps["onSelect"];
+  onEdit: (id: string, text: string) => void;
+  onContextMenu: (menu: { nodeId: string; x: number; y: number }) => void;
+  onDraft: (text: string) => void;
+  onText: MindMapProps["onText"];
+  onEditingNodeChange: (id: string | null) => void;
+  onAiAction: MindMapProps["onAiAction"];
+  aiBusy: boolean;
+  onInsertChild: MindMapProps["onInsertChild"];
+}
+
+const MindMapNode = React.memo(function MindMapNode({
+  item, active, draft, actionTargetId, suppressClickRef, onSelect, onEdit,
+  onContextMenu, onDraft, onText, onEditingNodeChange, onAiAction, aiBusy, onInsertChild,
+}: MindMapNodeProps) {
+  const isRoot = item.node.id === MINDMAP_ROOT_ID;
+  return (
+    <foreignObject
+      data-node-id={item.node.id}
+      className="map-node-object"
+      x={item.x}
+      y={item.y}
+      width={item.width}
+      height={item.height}
+      onPointerDown={(event) => event.stopPropagation()}
+      onClick={(event) => {
+        if (suppressClickRef.current) {
+          event.stopPropagation();
+          return;
+        }
+        if (!isRoot) onSelect(item.node.id);
+        onEdit(item.node.id, item.node.text);
+      }}
+      onContextMenu={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (!isRoot) onSelect(item.node.id);
+        onContextMenu({
+          nodeId: item.node.id,
+          x: event.clientX,
+          y: event.clientY,
+        });
+      }}
+    >
+      <div
+        className={classNames(
+          "map-node",
+          active && "active",
+          draft !== null && "editing",
+          `depth-${item.depth}`,
+          `node-${normalizeColor(item.node.color)}`,
+          `heading-${item.node.headingLevel ?? 0}`,
+          item.node.highlight && "is-highlighted",
+          item.node.bold && "is-bold",
+          item.node.italic && "is-italic",
+          item.node.underline && "is-underline",
+          item.node.strike && "is-strike",
+        )}
+      >
+        {draft !== null ? (
+          <div className="map-node-edit-wrap">
+            <textarea
+              autoFocus
+              value={draft}
+              placeholder="输入文字"
+              onChange={(event) => onDraft(event.target.value)}
+              onClick={(event) => event.stopPropagation()}
+              onPointerDown={(event) => event.stopPropagation()}
+              onKeyDown={(event) => {
+                if (event.nativeEvent.isComposing) return;
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  onText(item.node.id, draft);
+                  onEditingNodeChange(null);
+                }
+                if (event.key === "Escape") {
+                  event.preventDefault();
+                  onEditingNodeChange(null);
+                }
+              }}
+              onBlur={() => {
+                onText(item.node.id, draft);
+                onEditingNodeChange(null);
+              }}
+            />
+            <AiInlineMenu
+              busy={aiBusy}
+              onAction={(action) =>
+                onAiAction(action, actionTargetId)
+              }
+            />
+            <button
+              className="map-node-add"
+              title="新增下级主题"
+              onClick={(event) => {
+                event.stopPropagation();
+                onInsertChild(actionTargetId);
+              }}
+              onPointerDown={(event) => event.stopPropagation()}
+            >
+              <Plus size={18} />
+            </button>
+          </div>
+        ) : (
+          <span className="map-node-lines">
+            {item.lines.map((line, index) => (
+              <span key={`${item.node.id}-${index}`}>{line}</span>
+            ))}
+          </span>
+        )}
+        <AttachmentItems node={item.node} compact />
+      </div>
+    </foreignObject>
+  );
+});
 
 function MindMap({
   title,
@@ -7024,9 +7306,13 @@ function MindMap({
     }
     onSelect(id);
   };
-  const setMapNodeText = (id: string, text: string) => {
+  const editMapNode = useCallback((id: string, text: string) => {
+    setEditingDraft(text);
+    setEditingNodeId(id);
+  }, []);
+  const setMapNodeText = useCallback((id: string, text: string) => {
     const cleanText = text.replace(/\r?\n/g, " ");
-    if (isRootNode(id)) {
+    if (id === mapRootId) {
       if (rootTargetId) {
         onText(rootTargetId, cleanText || "未命名主题");
       } else {
@@ -7035,7 +7321,7 @@ function MindMap({
       return;
     }
     onText(id, cleanText);
-  };
+  }, [rootTargetId, onText, onTitle]);
 
   const copyMapNode = async (item: MindMapItem) => {
     try {
@@ -7044,6 +7330,18 @@ function MindMap({
       // Clipboard may be unavailable in some browser contexts; the menu still closes.
     }
   };
+
+  const renderedEdges = useMemo(() => layout.edges.map((edge) => (
+    <path
+      key={`${edge.from.node.id}-${edge.to.node.id}`}
+      className={classNames("mindmap-edge", `edge-${normalizeColor(edge.to.node.color)}`)}
+      d={`M ${edge.from.x + edge.from.width} ${edge.from.y + edge.from.height / 2} C ${
+        edge.from.x + edge.from.width + 52
+      } ${edge.from.y + edge.from.height / 2}, ${edge.to.x - 52} ${
+        edge.to.y + edge.to.height / 2
+      }, ${edge.to.x} ${edge.to.y + edge.to.height / 2}`}
+    />
+  )), [layout.edges]);
 
   return (
     <div
@@ -7111,116 +7409,25 @@ function MindMap({
               <path d="M0,0 L6,3 L0,6" fill="currentColor" />
             </marker>
           </defs>
-          {layout.edges.map((edge) => (
-            <path
-              key={`${edge.from.node.id}-${edge.to.node.id}`}
-              className={classNames("mindmap-edge", `edge-${normalizeColor(edge.to.node.color)}`)}
-              d={`M ${edge.from.x + edge.from.width} ${edge.from.y + edge.from.height / 2} C ${
-                edge.from.x + edge.from.width + 52
-              } ${edge.from.y + edge.from.height / 2}, ${edge.to.x - 52} ${
-                edge.to.y + edge.to.height / 2
-              }, ${edge.to.x} ${edge.to.y + edge.to.height / 2}`}
-            />
-          ))}
+          {renderedEdges}
           {renderedItems.map((item) => (
-            <foreignObject
+            <MindMapNode
               key={item.node.id}
-              data-node-id={item.node.id}
-              className="map-node-object"
-              x={item.x}
-              y={item.y}
-              width={item.width}
-              height={item.height}
-              onPointerDown={(event) => event.stopPropagation()}
-              onClick={(event) => {
-                if (suppressClickRef.current) {
-                  event.stopPropagation();
-                  return;
-                }
-                if (!isRootNode(item.node.id)) onSelect(item.node.id);
-                setEditingDraft(isRootNode(item.node.id) ? title : item.node.text);
-                setEditingNodeId(item.node.id);
-              }}
-              onContextMenu={(event) => {
-                event.preventDefault();
-                event.stopPropagation();
-                if (!isRootNode(item.node.id)) onSelect(item.node.id);
-                setContextMenu({
-                  nodeId: item.node.id,
-                  x: event.clientX,
-                  y: event.clientY,
-                });
-              }}
-            >
-              <div
-                className={classNames(
-                  "map-node",
-                  renderedActiveNodeId === item.node.id && "active",
-                  editingNodeId === item.node.id && "editing",
-                  `depth-${item.depth}`,
-                  `node-${normalizeColor(item.node.color)}`,
-                  `heading-${item.node.headingLevel ?? 0}`,
-                  item.node.highlight && "is-highlighted",
-                  item.node.bold && "is-bold",
-                  item.node.italic && "is-italic",
-                  item.node.underline && "is-underline",
-                  item.node.strike && "is-strike",
-                )}
-              >
-                {editingNodeId === item.node.id ? (
-                  <div className="map-node-edit-wrap">
-                    <textarea
-                      autoFocus
-                      value={editingDraft}
-                      placeholder="输入文字"
-                      onChange={(event) => setEditingDraft(event.target.value)}
-                      onClick={(event) => event.stopPropagation()}
-                      onPointerDown={(event) => event.stopPropagation()}
-                      onKeyDown={(event) => {
-                        if (event.nativeEvent.isComposing) return;
-                        if (event.key === "Enter") {
-                          event.preventDefault();
-                          setMapNodeText(item.node.id, editingDraft);
-                          setEditingNodeId(null);
-                        }
-                        if (event.key === "Escape") {
-                          event.preventDefault();
-                          setEditingNodeId(null);
-                        }
-                      }}
-                      onBlur={() => {
-                        setMapNodeText(item.node.id, editingDraft);
-                        setEditingNodeId(null);
-                      }}
-                    />
-                    <AiInlineMenu
-                      busy={isAiBusy(isRootNode(item.node.id) ? rootActionTargetId() : item.node.id)}
-                      onAction={(action) =>
-                        onAiAction(action, isRootNode(item.node.id) ? rootActionTargetId() : item.node.id)
-                      }
-                    />
-                    <button
-                      className="map-node-add"
-                      title="新增下级主题"
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        onInsertChild(isRootNode(item.node.id) ? rootActionTargetId() : item.node.id);
-                      }}
-                      onPointerDown={(event) => event.stopPropagation()}
-                    >
-                      <Plus size={18} />
-                    </button>
-                  </div>
-                ) : (
-                  <span className="map-node-lines">
-                    {item.lines.map((line, index) => (
-                      <span key={`${item.node.id}-${index}`}>{line}</span>
-                    ))}
-                  </span>
-                )}
-                <AttachmentItems node={item.node} compact />
-              </div>
-            </foreignObject>
+              item={item}
+              active={renderedActiveNodeId === item.node.id}
+              draft={editingNodeId === item.node.id ? editingDraft : null}
+              actionTargetId={isRootNode(item.node.id) ? rootActionTargetId() : item.node.id}
+              suppressClickRef={suppressClickRef}
+              onSelect={onSelect}
+              onEdit={editMapNode}
+              onContextMenu={setContextMenu}
+              onDraft={setEditingDraft}
+              onText={setMapNodeText}
+              onEditingNodeChange={setEditingNodeId}
+              onAiAction={onAiAction}
+              aiBusy={editingNodeId === item.node.id && isAiBusy(isRootNode(item.node.id) ? rootActionTargetId() : item.node.id)}
+              onInsertChild={onInsertChild}
+            />
           ))}
         </svg>), [layout, title, showRelations, visibleRelations, renderedItems, renderedActiveNodeId,
           editingNodeId, editingDraft, onSelect, onInsertChild, onAiAction, isAiBusy, rootTargetId, onText, onTitle])}

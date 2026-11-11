@@ -9,6 +9,7 @@ import yazl from "yazl";
 import { createAttachmentService } from "./attachment-service.cjs";
 import { exportWorkspaceArchive, importWorkspaceArchive } from "./workspace-archive.cjs";
 import { migrateWorkspace } from "../mcp/bike-core.mjs";
+import { sealLocalMigration, localMigrationDigest } from "../shared/bike-local-migration.mjs";
 
 const fixture = async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "bike-zip-test-"));
@@ -87,4 +88,35 @@ test("portable document archives include readable content and retain the recover
   const restored = await importWorkspaceArchive({ filename, attachments: target, migrate: migrateWorkspace });
   assert.equal(restored.workspace.documents[0].id, "doc");
   assert.deepEqual(await target.read(item.asset.assetId), item.bytes);
+});
+
+test("full local archives retain assets referenced only by version history", async (t) => {
+  const item = await fixture(t);
+  const body = migrateWorkspace(item.workspace);
+  const bytes = Buffer.from("history-only original bytes");
+  const historical = await item.attachments.putBytes(bytes, "history.txt");
+  const document = migrateWorkspace({ version: 2, documents: [{
+    id: "history-doc", title: "History", createdAt: "2026-11-11T00:00:00.000Z", updatedAt: "2026-11-11T00:00:00.000Z",
+    nodes: [{ id: "old-node", text: "Old", children: [], attachmentRefs: [{ assetId: historical.assetId, name: "history.txt" }] }],
+    attachments: { version: 1, items: { [historical.assetId]: historical.metadata } },
+  }] }).documents[0];
+  const workspace = sealLocalMigration(body, {
+    format: "bike-local-copy", version: 1, id: "local-copy-fixture", createdAt: "2026-11-11T00:00:00.000Z",
+    source: { actorId: null, revision: 1, workspaceSha256: localMigrationDigest(body) },
+    history: [{ documentId: document.id, snapshots: [{ id: "old-snapshot", documentId: document.id, document }] }],
+    recovery: [], recoveryFiles: [], preAttachment: null, preOperation: null, archives: [],
+    sourceAudit: { audit: [], outbox: [], receipts: {}, conflicts: [] },
+    assets: [item.asset, historical].map(({ assetId, metadata }) => ({ assetId, metadata })),
+  });
+  const filename = path.join(item.root, "local-copy.zip");
+  assert.equal((await exportWorkspaceArchive({ workspace, filename, attachments: item.attachments, migrate: migrateWorkspace })).attachmentCount, 2);
+  const target = createAttachmentService({ directory: path.join(item.root, "local-restored") });
+  const restored = await importWorkspaceArchive({ filename, attachments: target, migrate: migrateWorkspace });
+  assert.equal(restored.attachmentCount, 2);
+  assert.deepEqual(await target.read(historical.assetId), bytes);
+  assert.equal(restored.workspace.localMigration.id, "local-copy-fixture");
+  const invalid = structuredClone(workspace); invalid.localMigration.assets = [];
+  const prior = await fs.readFile(filename);
+  await assert.rejects(exportWorkspaceArchive({ workspace: invalid, filename, attachments: item.attachments, migrate: migrateWorkspace }), /校验|闭合/);
+  assert.deepEqual(await fs.readFile(filename), prior);
 });

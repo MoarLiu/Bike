@@ -1,0 +1,18 @@
+{
+  "version": "2.0.0",
+  "form": "mygo",
+  "name": "Bike MyGO",
+  "executable": "bike-mygo",
+  "identifier": "com.bike.mygo",
+  "profile": "Bike-MyGO",
+  "backupDirectory": "Bike-MyGO",
+  "tagPrefix": "mygo-v",
+  "targetMinimumSystemVersion": "12.0",
+  "minimumSystemVersion": "12.0",
+  "go": "go1.26.10",
+  "goExperiment": "jsonv2",
+  "mygoCompatibilityPatch": "go126-jsonv2-compatibility-1",
+  "mygo": "v0.8.3",
+  "mygoCommit": "5add3817c74bb7505d0b473bc5fb28abe2201b99",
+  "mcpSdk": "v1.8.0"
+}

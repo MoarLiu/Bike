@@ -15,11 +15,15 @@ const MAX_EXTRACTED_BYTES = 1024 * 1024 * 1024;
 const MAX_ENTRIES = 10_000;
 const hash = (bytes) => crypto.createHash("sha256").update(bytes).digest("hex");
 const contracts = () => import("../shared/bike-attachments.mjs");
+const archiveAssets = async (workspace) => {
+  const { readLocalMigration, localMigrationAttachmentAssets } = await import("../shared/bike-local-migration.mjs");
+  readLocalMigration(workspace);
+  return localMigrationAttachmentAssets(workspace);
+};
 
 const exportWorkspaceArchive = async ({ workspace, filename, attachments, migrate, readable }) => {
-  const { workspaceAttachmentAssets } = await contracts();
   const normalized = await migrate(workspace);
-  const assets = workspaceAttachmentAssets(normalized);
+  const assets = await archiveAssets(normalized);
   const json = Buffer.from(`${JSON.stringify(normalized, null, 2)}\n`);
   if (readable && (!["document.md", "index.html"].includes(readable.name) || typeof readable.content !== "string")) throw new Error("导出正文参数无效");
   const readableBytes = readable ? Buffer.from(readable.content) : null;
@@ -79,7 +83,7 @@ const exportWorkspaceArchive = async ({ workspace, filename, attachments, migrat
 };
 
 const importWorkspaceArchive = async ({ filename, attachments, migrate }) => {
-  const { workspaceAttachmentAssets, MAX_ATTACHMENT_BYTES } = await contracts();
+  const { MAX_ATTACHMENT_BYTES } = await contracts();
   let zip;
   let staging;
   try {
@@ -134,7 +138,7 @@ const importWorkspaceArchive = async ({ filename, attachments, migrate }) => {
     }
     const workspace = await migrate(JSON.parse(await fs.readFile(workspaceEntry.target, "utf8")));
     if (manifest.workspaceVersion !== workspace.version) throw new Error("归档工作区版本不一致");
-    const expected = workspaceAttachmentAssets(workspace);
+    const expected = await archiveAssets(workspace);
     if (expected.length !== manifest.assets.length || entries.size !== expected.length + 2 + (manifest.readable ? 1 : 0)) throw new Error("归档附件清单不闭合");
     if (manifest.readable && (!["document.md", "index.html"].includes(manifest.readable.name) || entries.get(manifest.readable.name)?.digest !== manifest.readable.sha256)) throw new Error("归档可读正文校验失败");
     const listed = new Set();

@@ -1,0 +1,31 @@
+{
+  "documentBytes": 67108864,
+  "documentNodes": 100000,
+  "desktopDepth": 256,
+  "jsonDepth": 600,
+  "attachmentBytes": 134217728,
+  "imageBytes": 33554432,
+  "imagePixels": 40000000,
+  "importFiles": 100,
+  "importBytes": 536870912,
+  "operationProtocol": 2,
+  "operationBytes": 4194304,
+  "operationLimits": {
+    "bytes": 4194304,
+    "changes": 4000,
+    "pageBytes": 16777216,
+    "checkpointBytes": 167772160,
+    "pageSize": 100,
+    "outboxBytes": 33554432,
+    "auditEntries": 200,
+    "proposalBytes": 2097152,
+    "proposalGroups": 100,
+    "proposalTtlMs": 900000,
+    "attachmentChunkBytes": 1048576,
+    "attachmentConcurrent": 2
+  },
+  "aiTimeoutMs": 90000,
+  "syncTimeoutMs": 60000,
+  "aiResponseBytes": 2097152,
+  "syncResponseBytes": 83886080
+}

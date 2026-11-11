@@ -1,0 +1,30 @@
+{
+  "version": 3,
+  "activeDocumentId": "doc-m0",
+  "extension": { "中文🙂": "<tag>&value", "fraction": 0.125 },
+  "documents": [
+    {
+      "id": "doc-m0",
+      "title": "MyGO 中文🙂 fixture",
+      "createdAt": "2026-11-10T00:00:00.000Z",
+      "updatedAt": "2026-11-10T01:00:00.123Z",
+      "nodes": [
+        {
+          "id": "root",
+          "text": "中文🙂 <tag>&value",
+          "note": "备注\n第二行",
+          "children": [
+            { "id": "child", "text": "子主题", "children": [] }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "doc-second",
+      "title": "Second",
+      "createdAt": "2026-11-09T00:00:00.000Z",
+      "updatedAt": "2026-11-09T00:00:00.000Z",
+      "nodes": []
+    }
+  ]
+}

@@ -1,0 +1,92 @@
+[
+  {
+    "text": "[[Other]]",
+    "links": [
+      {
+        "start": 0,
+        "end": 9,
+        "raw": "[[Other]]",
+        "documentName": "Other",
+        "nodeName": null,
+        "alias": null,
+        "labelMode": "auto",
+        "label": "Other"
+      }
+    ]
+  },
+  {
+    "text": "\\[[Other]] and [[Other#Target|custom]]",
+    "links": [
+      {
+        "start": 15,
+        "end": 38,
+        "raw": "[[Other#Target|custom]]",
+        "documentName": "Other",
+        "nodeName": "Target",
+        "alias": "custom",
+        "labelMode": "custom",
+        "label": "custom"
+      }
+    ]
+  },
+  {
+    "text": "`[[ignored]]` [[Other]]",
+    "links": [
+      {
+        "start": 14,
+        "end": 23,
+        "raw": "[[Other]]",
+        "documentName": "Other",
+        "nodeName": null,
+        "alias": null,
+        "labelMode": "auto",
+        "label": "Other"
+      }
+    ]
+  },
+  {
+    "text": "```\n[[ignored]]\n```\n[[Other]]",
+    "links": [
+      {
+        "start": 20,
+        "end": 29,
+        "raw": "[[Other]]",
+        "documentName": "Other",
+        "nodeName": null,
+        "alias": null,
+        "labelMode": "auto",
+        "label": "Other"
+      }
+    ]
+  },
+  {
+    "text": "[[Other\\#label|custom]]",
+    "links": [
+      {
+        "start": 0,
+        "end": 23,
+        "raw": "[[Other\\#label|custom]]",
+        "documentName": "Other#label",
+        "nodeName": null,
+        "alias": "custom",
+        "labelMode": "custom",
+        "label": "custom"
+      }
+    ]
+  },
+  {
+    "text": "🙂 [[Other]]",
+    "links": [
+      {
+        "start": 3,
+        "end": 12,
+        "raw": "[[Other]]",
+        "documentName": "Other",
+        "nodeName": null,
+        "alias": null,
+        "labelMode": "auto",
+        "label": "Other"
+      }
+    ]
+  }
+]

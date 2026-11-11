@@ -1708,7 +1708,8 @@ textarea.markdown-source:focus {
 }
 
 .outline-list {
-  display: grid;
+  /* Variable-height rows avoid WebKit's whole-list grid track sizing. */
+  display: block;
   width: min(100%, var(--editor-max-width));
   min-width: 0;
   gap: 0;

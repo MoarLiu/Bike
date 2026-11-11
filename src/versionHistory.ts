@@ -4,6 +4,8 @@ import { documentSignature } from "./documentSignature";
 import { migrateDocument } from "./migrations";
 import { uuid } from "./id";
 import { workspaceAttachmentAssets } from "../shared/bike-attachments.mjs";
+import { localMigrationDigest } from "../shared/bike-local-migration.mjs";
+import type { LocalMigrationHistory } from "../shared/bike-local-migration.mjs";
 
 export type SnapshotReason = "auto" | "manual" | "before-restore" | "sync";
 
@@ -30,6 +32,14 @@ const STORE_NAME = "snapshots";
 const MAX_SNAPSHOTS = 50;
 const MAX_AGE_MS = 60 * 24 * 60 * 60 * 1000;
 const MAX_TOTAL_SIZE = 20 * 1024 * 1024;
+const MIGRATION_KEY = "bike-full-copy-history-import";
+const migrationHistoryDigest = (rows: LocalMigrationHistory[]) => localMigrationDigest(rows.map((row) => ({
+  ...row, snapshots: row.snapshots.map(({ size: _size, ...snapshot }) => snapshot),
+})));
+export interface HistoryMigrationJournal {
+  id: string; archiveId: string; before: LocalMigrationHistory[]; after: LocalMigrationHistory[];
+}
+const pendingMigrationError = () => new Error("版本历史正在安装本机副本，请先完成或恢复导入");
 
 const snapshotKey = (documentId: string) => `document:${documentId}`;
 
@@ -82,12 +92,15 @@ export const listHistoryAttachmentIds = async (): Promise<string[]> => {
     return await new Promise((resolve, reject) => {
       const ids = new Set<string>();
       const tx = db.transaction(STORE_NAME, "readonly");
+      const migration = tx.objectStore(STORE_NAME).get(MIGRATION_KEY);
       const cursor = tx.objectStore(STORE_NAME).openCursor();
       let failure: unknown;
       cursor.onsuccess = () => {
         try {
           const item = cursor.result;
           if (!item) return;
+          if (migration.result) throw pendingMigrationError();
+          if (item.key === MIGRATION_KEY) { item.continue(); return; }
           if (typeof item.key !== "string" || !item.key.startsWith("document:")) throw new Error("历史记录键无效");
           for (const snapshot of readSnapshots(item.value, item.key.slice(9))) {
             for (const asset of workspaceAttachmentAssets({ documents: [snapshot.document] })) ids.add(asset.assetId);
@@ -159,8 +172,10 @@ export const listDocumentSnapshots = async (
     return await new Promise<DocumentSnapshot[]>((resolve, reject) => {
       const tx = db.transaction(STORE_NAME, "readonly");
       const request = tx.objectStore(STORE_NAME).get(snapshotKey(documentId));
+      const migration = tx.objectStore(STORE_NAME).get(MIGRATION_KEY);
       tx.oncomplete = () => {
         try {
+          if (migration.result) throw pendingMigrationError();
           resolve(readSnapshots(request.result, documentId));
         } catch (error) {
           reject(error);
@@ -186,9 +201,11 @@ export const captureSnapshot = async (
       const store = tx.objectStore(STORE_NAME);
       const key = snapshotKey(document.id);
       const request = store.get(key);
+      const migration = store.get(MIGRATION_KEY);
       let written: DocumentSnapshot[] = [];
-      request.onsuccess = () => {
+      migration.onsuccess = () => {
         try {
+          if (migration.result) throw pendingMigrationError();
           written = appendSnapshot(readSnapshots(request.result, document.id), snapshot);
           store.put(written, key);
         } catch (error) {
@@ -203,6 +220,109 @@ export const captureSnapshot = async (
   } finally {
     db.close();
   }
+};
+
+export const normalizeMigrationHistory = (rows: LocalMigrationHistory[]): LocalMigrationHistory[] => {
+  if (!Array.isArray(rows)) throw new Error("完整本机副本缺少版本历史");
+  const ids = new Set<string>();
+  return rows.map((row) => {
+    if (!row || typeof row.documentId !== "string" || !row.documentId || ids.has(row.documentId)) throw new Error("版本历史文档身份无效或重复");
+    ids.add(row.documentId);
+    const snapshots = readSnapshots(row.snapshots, row.documentId);
+    if (new Set(snapshots.map((snapshot) => snapshot.id)).size !== snapshots.length) throw new Error("版本快照身份重复");
+    return { documentId: row.documentId, snapshots };
+  }).sort((left, right) => left.documentId.localeCompare(right.documentId));
+};
+
+// All document keys are enumerated, including history for documents that have
+// already left both the live workspace and trash.
+const historyTransaction = async (
+  mode: IDBTransactionMode,
+  action: (rows: LocalMigrationHistory[], journal: HistoryMigrationJournal | null, store: IDBObjectStore) => void,
+): Promise<{ rows: LocalMigrationHistory[]; journal: HistoryMigrationJournal | null }> => {
+  const db = await openDb();
+  try {
+    return await new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE_NAME, mode);
+      const store = tx.objectStore(STORE_NAME);
+      const marker = store.get(MIGRATION_KEY);
+      const cursor = store.openCursor();
+      const rows: LocalMigrationHistory[] = [];
+      let failure: unknown;
+      cursor.onsuccess = () => {
+        try {
+          const item = cursor.result;
+          if (!item) {
+            rows.sort((left, right) => left.documentId.localeCompare(right.documentId));
+            action(rows, marker.result ?? null, store);
+            return;
+          }
+          if (item.key !== MIGRATION_KEY) {
+            if (typeof item.key !== "string" || !item.key.startsWith("document:")) throw new Error("版本历史包含未知记录，原数据已保留");
+            const documentId = item.key.slice(9);
+            const snapshots = readSnapshots(item.value, documentId);
+            if (snapshots.length) rows.push({ documentId, snapshots });
+          }
+          item.continue();
+        } catch (error) { failure = error; tx.abort(); }
+      };
+      tx.oncomplete = () => resolve({ rows, journal: marker.result ?? null });
+      tx.onabort = () => reject(failure ?? tx.error ?? new Error("版本历史导入事务已中止"));
+      tx.onerror = () => reject(failure ?? tx.error);
+    });
+  } finally { db.close(); }
+};
+export const listAllDocumentSnapshots = async (): Promise<LocalMigrationHistory[]> =>
+  (await historyTransaction("readonly", (_rows, journal) => { if (journal) throw pendingMigrationError(); })).rows;
+export const readHistoryMigrationJournal = async (): Promise<HistoryMigrationJournal | null> => {
+  const db = await openDb();
+  try {
+    return await new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE_NAME, "readonly");
+      const request = tx.objectStore(STORE_NAME).get(MIGRATION_KEY);
+      tx.oncomplete = () => resolve(request.result ?? null);
+      tx.onabort = () => reject(tx.error ?? new Error("导入历史日志读取失败"));
+      tx.onerror = () => reject(tx.error ?? request.error);
+    });
+  } finally { db.close(); }
+};
+
+export const installMigrationHistory = async (
+  id: string, archiveId: string, expected: LocalMigrationHistory[], imported: LocalMigrationHistory[],
+) => {
+  const incoming = normalizeMigrationHistory(imported);
+  await historyTransaction("readwrite", (rows, journal, store) => {
+    if (journal) throw pendingMigrationError();
+    if (migrationHistoryDigest(rows) !== migrationHistoryDigest(expected)) throw new Error("版本历史在导入期间变化，请重新导入");
+    const byId = new Map(rows.map((row) => [row.documentId, row]));
+    const before = [...rows];
+    for (const row of incoming) {
+      const current = byId.get(row.documentId);
+      const snapshots = new Map((current?.snapshots ?? []).map((snapshot) => [snapshot.id, snapshot]));
+      if (!current) before.push({ documentId: row.documentId, snapshots: [] });
+      for (const snapshot of row.snapshots) {
+        const existing = snapshots.get(snapshot.id);
+        if (existing && localMigrationDigest({ ...existing, size: 0 }) !== localMigrationDigest({ ...snapshot, size: 0 }))
+          throw new Error("相同版本快照身份具有不同内容，已停止导入");
+        snapshots.set(snapshot.id, snapshot);
+      }
+      byId.set(row.documentId, { documentId: row.documentId, snapshots: [...snapshots.values()].sort((left, right) => right.createdAt.localeCompare(left.createdAt) || left.id.localeCompare(right.id)) });
+    }
+    const after = [...byId.values()].sort((left, right) => left.documentId.localeCompare(right.documentId));
+    store.put({ id, archiveId, before, after } satisfies HistoryMigrationJournal, MIGRATION_KEY);
+    for (const row of after) store.put(row.snapshots, snapshotKey(row.documentId));
+  });
+};
+
+export const finishMigrationHistory = async (id: string, rollback: boolean) => {
+  await historyTransaction("readwrite", (rows, journal, store) => {
+    if (!journal) return;
+    if (journal.id !== id) throw new Error("另一版本历史导入会话尚未完成");
+    if (migrationHistoryDigest(rows) !== migrationHistoryDigest(journal.after.filter((row) => row.snapshots.length)))
+      throw new Error("导入历史已被外部改变，已保留日志等待恢复");
+    if (rollback) for (const row of journal.before) store.put(row.snapshots, snapshotKey(row.documentId));
+    store.put(null, MIGRATION_KEY);
+  });
 };
 
 const nodeIndex = (

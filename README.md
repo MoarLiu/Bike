@@ -7,6 +7,9 @@ Bike 是一个本地优先的大纲、思维导图和 Markdown 写作工具。�
 | 平台 | 版本 | 状态 | 位置 |
 | --- | --- | --- | --- |
 | Electron macOS Apple Silicon / Web / Sync Server | `2.0.0` | 正式版，macOS 使用 ad-hoc 签名，真实接入与实机验证由用户后续补测 | 根目录 |
+| MyGO macOS Apple Silicon | `2.0.0` | Go + WKWebView，ad-hoc 签名，DMG 手动安装 | [发布说明](docs/release-mygo-2.0.0.md) |
+
+MyGO 版作为同版本的独立客户端新增，保留现有 Electron 和 Web。应用身份、数据目录、MCP、备份和更新渠道分别隔离，具体范围与阶段验收见开发计划。
 
 ## 2.0.0
 

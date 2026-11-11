@@ -1,0 +1,149 @@
+{
+  "baseline": "electron/preload.cjs",
+  "members": [
+    {
+      "name": "acceptBackupBaseline",
+      "kind": "request"
+    },
+    {
+      "name": "cancelAiRequest",
+      "kind": "request"
+    },
+    {
+      "name": "cancelAttachmentImport",
+      "kind": "request"
+    },
+    {
+      "name": "cancelAttachmentSync",
+      "kind": "request"
+    },
+    {
+      "name": "checkForUpdates",
+      "kind": "request"
+    },
+    {
+      "name": "cleanAttachments",
+      "kind": "request"
+    },
+    {
+      "name": "enqueueBackup",
+      "kind": "request"
+    },
+    {
+      "name": "exportWorkspaceArchive",
+      "kind": "request"
+    },
+    {
+      "name": "finishBackupFlush",
+      "kind": "acknowledgment"
+    },
+    {
+      "name": "getBackupStatus",
+      "kind": "request"
+    },
+    {
+      "name": "getLiveMcpState",
+      "kind": "request"
+    },
+    {
+      "name": "importAttachments",
+      "kind": "request"
+    },
+    {
+      "name": "importWorkspaceArchive",
+      "kind": "request"
+    },
+    {
+      "name": "inspectBackup",
+      "kind": "request"
+    },
+    {
+      "name": "invokeAiProvider",
+      "kind": "request"
+    },
+    {
+      "name": "invokeSyncRequest",
+      "kind": "request"
+    },
+    {
+      "name": "loadICloudBackup",
+      "kind": "request"
+    },
+    {
+      "name": "onAttachmentSyncProgress",
+      "kind": "subscription"
+    },
+    {
+      "name": "onBackupFlush",
+      "kind": "subscription"
+    },
+    {
+      "name": "onEditCommand",
+      "kind": "subscription"
+    },
+    {
+      "name": "onLiveMcpRequest",
+      "kind": "subscription"
+    },
+    {
+      "name": "onLiveMcpRevoke",
+      "kind": "subscription"
+    },
+    {
+      "name": "onOpenApiConfig",
+      "kind": "subscription"
+    },
+    {
+      "name": "onPrepareUpdate",
+      "kind": "subscription"
+    },
+    {
+      "name": "onUpdateState",
+      "kind": "subscription"
+    },
+    {
+      "name": "openAttachment",
+      "kind": "request"
+    },
+    {
+      "name": "pauseBackup",
+      "kind": "request"
+    },
+    {
+      "name": "readAttachment",
+      "kind": "request"
+    },
+    {
+      "name": "replaceBackupWithLocal",
+      "kind": "request"
+    },
+    {
+      "name": "saveAttachment",
+      "kind": "request"
+    },
+    {
+      "name": "saveICloudBackup",
+      "kind": "request"
+    },
+    {
+      "name": "scanAttachments",
+      "kind": "request"
+    },
+    {
+      "name": "setBackupAuto",
+      "kind": "request"
+    },
+    {
+      "name": "startLiveMcp",
+      "kind": "request"
+    },
+    {
+      "name": "stopLiveMcp",
+      "kind": "request"
+    },
+    {
+      "name": "syncAttachments",
+      "kind": "request"
+    }
+  ]
+}

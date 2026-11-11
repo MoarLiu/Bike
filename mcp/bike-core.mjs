@@ -1474,7 +1474,7 @@ export const updateNodeForMcp = async (store, args = {}) =>
           documentId: document.id,
           nodeId: located.node.id,
           ...Object.fromEntries(
-            fieldChanges.map((change) => [change.field, change.after]),
+            fieldChanges.map((change) => [change.field, change.field === "codeLanguage" ? (change.after ?? "") : change.after]),
           ),
         },
       });

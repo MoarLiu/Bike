@@ -14,3 +14,8 @@ output/playwright/
 .review-test/
 代码审查报告*.md
 修复验收报告*.md
+desktop-mygo/internal/frontend/dist/
+desktop-mygo/internal/sourceexport/generated/
+desktop-mygo/.cache/
+output/mygo/
+docs/evidence-mygo-*/

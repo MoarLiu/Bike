@@ -101,6 +101,23 @@ const makeStore = async ({ mode = "readonly" } = {}) => {
   });
 };
 
+test("serialized confirmation preserves clearing code language", async (t) => {
+  const store = await makeStore({ mode: "write" });
+  t.after(() => fs.rm(path.dirname(store.config.workspacePath), { recursive: true, force: true }));
+  const workspace = sampleWorkspace();
+  workspace.documents[0].nodes[0].codeLanguage = "rust";
+  await fs.writeFile(store.config.workspacePath, JSON.stringify(workspace));
+  const snapshot = await store.load();
+  const preview = await updateNodeForMcp(store, { documentId: "doc_mcp", nodeId: "node_background", codeLanguage: "", expectedRevision: snapshot.revision });
+  const confirmation = JSON.parse(JSON.stringify(preview.confirmationArgs));
+  assert.equal(confirmation.codeLanguage, "");
+  const result = await updateNodeForMcp(store, confirmation);
+  assert.equal(result.applied, true);
+  assert.equal(result.nextWorkspaceRevision, preview.nextWorkspaceRevision);
+  assert.equal((await store.load()).workspace.documents[0].nodes[0].codeLanguage, undefined);
+  assert.equal(Object.hasOwn(JSON.parse(await fs.readFile(store.config.workspacePath, "utf8")).documents[0].nodes[0], "codeLanguage"), false);
+});
+
 test("MCP v2 reads expose attachment identity and text writes preserve it", async (t) => {
   const store = await makeStore({ mode: "write" });
   t.after(() => fs.rm(path.dirname(store.config.workspacePath), { recursive: true, force: true }));

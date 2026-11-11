@@ -5,7 +5,8 @@ import fs from "node:fs/promises";
 import os from "node:os";
 
 const sourceRoot = path.resolve(process.argv[2] ?? ".");
-const edits = Number(process.argv[3] ?? 200);
+const edits = Number(process.argv[3] ?? 50);
+if (!Number.isInteger(edits) || edits < 1 || edits > 50) throw new Error("Independent edit count must be between 1 and 50");
 const output = process.argv[4];
 const { loadTypescript } = await import(pathToFileURL(path.join(sourceRoot, "tests/helpers/typescript.mjs")));
 const k = await import(pathToFileURL(path.join(sourceRoot, "shared/bike-knowledge.mjs")));

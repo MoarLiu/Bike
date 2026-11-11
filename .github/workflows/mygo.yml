@@ -1,0 +1,71 @@
+name: MyGO candidate checks
+
+on:
+  push:
+    branches: ['codex/mygo-*']
+  pull_request:
+    paths:
+      - 'desktop-mygo/**'
+      - 'scripts/*mygo*'
+      - 'shared/**'
+      - 'src/**'
+      - 'mcp/**'
+      - 'electron/preload.cjs'
+      - 'package*.json'
+      - 'vite.config.ts'
+      - '.github/workflows/mygo.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mygo-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  candidate:
+    runs-on: macos-15
+    timeout-minutes: 30
+    env:
+      GOTOOLCHAIN: local
+      GOEXPERIMENT: jsonv2
+      BIKE_MYGO_CHANNEL: preview
+      BIKE_MYGO_BUILD: ${{ github.run_number }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22.13.0
+          cache: npm
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5
+        with:
+          go-version: '1.26.10'
+          cache-dependency-path: desktop-mygo/go.sum
+      - run: go version && go env GOOS GOARCH CGO_ENABLED && xcrun --show-sdk-version
+      - run: test "$(uname -m)" = arm64
+      - run: npm ci
+      - run: npm run check
+      - run: npm run mygo:test:contracts
+      - run: npm run mygo:test
+      - run: npm run mygo:test:race
+      - run: npm run mygo:build
+      - run: npm run mygo:test:mcp
+      - run: npm run mygo:test:runtime
+      - run: npm run mygo:test:interop
+      - run: npm run mygo:dist:mac
+      - run: npm run mygo:verify:package
+      - run: git diff --check
+      - name: Retain candidate artifacts and local evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: mygo-preview-build-${{ github.run_number }}
+          path: |
+            release/mygo/**/*.dmg
+            release/mygo/**/*.tar.gz
+            release/mygo/**/*.json
+            release/mygo/**/SHA256SUMS
+            output/mygo/**
+          retention-days: 14
+          if-no-files-found: warn

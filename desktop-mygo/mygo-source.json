@@ -1,0 +1,11 @@
+{
+  "module": "github.com/egoist/mygo",
+  "version": "v0.8.3",
+  "commit": "5add3817c74bb7505d0b473bc5fb28abe2201b99",
+  "sum": "h1:aTLEhS221YhsX+gKGNLQ5xEKMLCcYYr3pH9AkTwIRs4=",
+  "zipSHA256": "631fe8925fe19f0d67ea518060538b988319fd0677dd397df8e16498c4cd0777",
+  "upstreamGoDirective": "go 1.27.3",
+  "patchedGoDirective": "go 1.26.10",
+  "patch": "go126-jsonv2-compatibility-1",
+  "experiment": "jsonv2"
+}
