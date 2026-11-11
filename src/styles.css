@@ -2051,6 +2051,9 @@ textarea.markdown-source:focus {
   min-width: 0;
   justify-content: flex-end;
   gap: 4px;
+  visibility: hidden;
+  content-visibility: hidden;
+  contain-intrinsic-size: 80px 24px;
   opacity: 0;
   transition: opacity 120ms ease;
 }
@@ -2058,6 +2061,8 @@ textarea.markdown-source:focus {
 .outline-row:hover .row-actions,
 .outline-row.active .row-actions,
 .outline-row:focus-within .row-actions {
+  visibility: visible;
+  content-visibility: visible;
   opacity: 1;
 }
 
@@ -2226,6 +2231,13 @@ textarea.markdown-source:focus {
     transform 120ms ease;
 }
 
+.outline-row .ai-inline {
+  /* Keep the button's slot while its hidden SVG subtree stays unrendered. */
+  visibility: hidden;
+  content-visibility: hidden;
+  contain-intrinsic-size: 26px 26px;
+}
+
 .ai-inline.open,
 .ai-inline.busy,
 .outline-row:hover .ai-inline,
@@ -2233,6 +2245,8 @@ textarea.markdown-source:focus {
 .outline-row:focus-within .ai-inline,
 .markdown-source-wrap.has-ai-target .ai-inline,
 .map-node.editing .ai-inline {
+  visibility: visible;
+  content-visibility: visible;
   opacity: 1;
 }
 
@@ -3763,6 +3777,8 @@ svg.ai-button-glyph {
 
   .row-actions {
     grid-column: 4;
+    visibility: visible;
+    content-visibility: visible;
     opacity: 1;
   }
 
