@@ -1,6 +1,6 @@
 # Changelog
 
-## 2.0.1 — 2026-11-13，本地候选，未发布
+## 2.0.1 — 2026-11-13
 
 - 修复操作排序墓碑、重启后的默认字段伪差异、批量编辑保存预算、草稿提交和同步接收竞态；保留幂等身份，并为大提交增加经过摘要验证的原子分片传输。
 - 同步文档顺序，减少 checkpoint 重复数据和空同步写入；首次同 ID 异内容连接需明确确认及备份。
@@ -12,7 +12,8 @@
 - 修复安装配置属主、路径安全、systemd 引号、服务用户、重启及稳定版本筛选；加强 Cookie 变更请求来源校验、权限回调和错误信息边界。
 - 核对签名命令的 stderr、Team ID、证书/公证前置条件、bundle 版本及完整差分索引；隔离签名凭据，阻止失败候选上传，增加发布渠道检查。
 - 补充 Node 22、Go 差分/并发和真实应用交互回归。详细结果与保留的兼容边界见 `docs/remediation-2.0.1.md`。
-- 发布候选说明见 [Electron / Web / Sync](docs/release-2.0.1.md) 与 [MyGO](docs/release-mygo-2.0.1.md)。继续采用 arm64、ad-hoc 签名与手动 DMG 升级。
+- 已发布 `v2.0.1` 和独立 `mygo-v2.0.1`，MyGO 为 stable build 16。14 个附件匿名公开下载摘要一致，公开 DMG 与部署归档回归通过；候选、main、两标签 CI 全部通过。
+- 更新说明见 [Electron / Web / Sync](docs/release-2.0.1.md) 与 [MyGO](docs/release-mygo-2.0.1.md)，完整结果见 [发布验证](docs/publish-verification-2.0.1.md)。继续采用 arm64、ad-hoc 签名与手动 DMG 升级。
 
 ## MyGO 2.0.0 — 2026-11-11
 

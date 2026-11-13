@@ -1,6 +1,6 @@
 # Bike 2.0.1 更新说明
 
-2026-11-13 发布候选，包含 Electron macOS Apple Silicon、Web、Sync Server 与 Node MCP。正式标签计划为 `v2.0.1`。当前尚未创建标签或公开发布。
+2026-11-13 14:19（Asia/Shanghai）公开发布，包含 Electron macOS Apple Silicon、Web、Sync Server 与 Node MCP。标签为 `v2.0.1`，源码为 `7bf6985ae5dd82ae0f0c7b57b81681a1e58b8fd0`，仓库 Latest 指向本版。下载见 [GitHub Release](https://github.com/MoarLiu/Bike/releases/tag/v2.0.1)，摘要、CI 与公开下载结果见 [发布验证](publish-verification-2.0.1.md)。
 
 ## 保存、同步与恢复
 

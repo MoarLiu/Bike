@@ -1,5 +1,7 @@
 # Bike 2.0.1 发布前检查
 
+发布流程已于 2026-11-13 完成，最终结果见 [发布验证](publish-verification-2.0.1.md)。下文保留确认发布前的检查与操作计划快照。
+
 检查日期为 2026-11-13。源码分支为 `codex/fix-2.0.1`，基线为 `575331fedbb2df743c25520283ba3037cc956952`。目标为 Electron / Web / Sync 的 `v2.0.1` 和独立 MyGO 的 `mygo-v2.0.1`，标题分别为 Bike 2.0.1 与 Bike MyGO 2.0.1。
 
 ## 本地检查
@@ -36,7 +38,7 @@ MyGO 计划上传正式 DMG、DMG `.sha256`、tar.gz、`update-darwin-arm64.json
 
 ## 待确认操作
 
-当前未执行源码 commit、tag、push 或 GitHub Release 创建/上传。
+确认前未执行源码 commit、tag、push 或 GitHub Release 创建/上传。
 
 确认后按以下顺序执行。任一门禁失败均先修复并复验，再推进公开发布。
 

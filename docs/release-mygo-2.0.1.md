@@ -1,6 +1,6 @@
 # Bike MyGO 2.0.1 更新说明
 
-2026-11-13 发布候选，计划采用 macOS arm64 stable build 16，标签为 `mygo-v2.0.1`。正式包须在确认提交后，从干净源码工作区构建并完成安装包检查，当前尚未公开发布。
+2026-11-13 14:19（Asia/Shanghai）公开发布，macOS arm64 stable build 16，标签为 `mygo-v2.0.1`，源码为 `7bf6985ae5dd82ae0f0c7b57b81681a1e58b8fd0`。正式包从干净源码构建并通过安装包检查。下载见 [GitHub Release](https://github.com/MoarLiu/Bike/releases/tag/mygo-v2.0.1)，完整结果见 [发布验证](publish-verification-2.0.1.md)。
 
 ## 本次修复
 
@@ -12,7 +12,7 @@
 
 ## 安装、数据与更新
 
-正式安装包计划为 `bike-mygo-2.0.1-arm64.dmg`，应用身份为 `com.bike.mygo`，继续使用 `Bike-MyGO` 数据与备份目录。现有 `Bike MyGO Preview` 候选使用独立身份，不能作为正式更新包上传。
+正式安装包为 `bike-mygo-2.0.1-arm64.dmg`，应用身份为 `com.bike.mygo`，继续使用 `Bike-MyGO` 数据与备份目录。`Bike MyGO Preview` 候选使用独立身份，保留为本地验收记录。
 
 包内运行无需 Node，工具链固定为 Go 1.26.10、`GOEXPERIMENT=jsonv2` 与 MyGO v0.8.3。最低系统声明继续为 macOS 12.0。
 
@@ -26,6 +26,6 @@ Go internal 测试、race、全部命令编译、36 项桌面桥契约及跨实�
 
 20,000 主题的原生布局样本首屏挂载 31 行、末端 35 行，4 次独立编辑全部在重启后回读。真实导出检查覆盖 14 份文件和 16 份视图截屏，包括 PDF、SVG 和 PNG。样本仅代表本机受控场景。
 
-正式 stable 制品仍须在提交后验证源码指纹、构建号、ad-hoc 签名、只读 DMG 挂载、复制安装、tar 解压与 Node-free CLI。最终摘要和公开下载核验将在发布记录补齐。
+正式 stable 制品的源码指纹、构建号、ad-hoc 签名、只读 DMG 挂载、复制安装、tar 解压与 Node-free CLI 均已核验。公开附件经匿名下载校验，公开 DMG 的真实 Go MCP 回归通过。最终摘要见附件 `SHA256SUMS` 和发布验证记录。
 
 真实输入法、macOS 12/13、其他物理设备、Finder/剪贴板/拖放、iCloud、真实 AI provider、外部 MCP 和 Gatekeeper 的人工体验继续列为验收边界。

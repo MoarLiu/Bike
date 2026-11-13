@@ -6,12 +6,12 @@ Bike 是一个本地优先的大纲、思维导图和 Markdown 写作工具。�
 
 | 平台 | 版本 | 状态 | 位置 |
 | --- | --- | --- | --- |
-| Electron macOS Apple Silicon / Web / Sync Server | `2.0.1` | 本地发布候选，尚未发布 | [更新说明](docs/release-2.0.1.md) |
-| MyGO macOS Apple Silicon | `2.0.1` | preview 已验收，stable 待确认提交后构建 | [更新说明](docs/release-mygo-2.0.1.md) |
+| Electron macOS Apple Silicon / Web / Sync Server | `2.0.1` | 已发布，仓库 Latest | [更新说明](docs/release-2.0.1.md) |
+| MyGO macOS Apple Silicon | `2.0.1` | 已发布，stable build 16，独立更新渠道 | [更新说明](docs/release-mygo-2.0.1.md) |
 
 MyGO 版作为同版本的独立客户端新增，保留现有 Electron 和 Web。应用身份、数据目录、MCP、备份和更新渠道分别隔离，具体范围与阶段验收见开发计划。
 
-## 2.0.1 候选
+## 2.0.1
 
 - 修复 version 3 保存、默认字段、草稿竞态与文档顺序；大批修改先原子保存，再按完整提交分片同步。请先备份并关闭旧客户端，把 Sync Server 升级到 2.0.1，再更新使用同一空间的客户端。旧客户端的节点同步会被明确拒绝，避免用旧算法解释新操作。
 - 首次连接遇到同 ID、不同内容的文档时先停止，手动确认并下载本机备份后才进入冲突比较。
