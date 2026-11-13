@@ -5,10 +5,23 @@ export const OPERATION_PROTOCOL = 2;
 export const OPERATION_CAPABILITY = 'node-operations-v2';
 export const OPERATION_LIMITS = Object.freeze({
   bytes: 4 * 1024 * 1024, changes: 4000, pageBytes: 16 * 1024 * 1024, checkpointBytes: 160 * 1024 * 1024,
+  commitBytes: 160 * 1024 * 1024, commitChanges: 200_000, chunkCharacters: 128 * 1024,
   pageSize: 100, outboxBytes: 32 * 1024 * 1024, auditEntries: 200,
   proposalBytes: 2 * 1024 * 1024, proposalGroups: 100, proposalTtlMs: 15 * 60 * 1000,
   attachmentChunkBytes: 1024 * 1024, attachmentConcurrent: 2,
 });
+
+export const splitOperationPayload = (text) => {
+  const parts = [];
+  for (let start = 0; start < text.length;) {
+    let end = Math.min(text.length, start + OPERATION_LIMITS.chunkCharacters);
+    const last = text.charCodeAt(end - 1), next = text.charCodeAt(end);
+    if (end < text.length && last >= 0xd800 && last <= 0xdbff && next >= 0xdc00 && next <= 0xdfff) end--;
+    parts.push(text.slice(start, end));
+    start = end;
+  }
+  return parts;
+};
 
 export const canonicalJson = (value) => JSON.stringify(value, (_key, item) =>
   item && typeof item === 'object' && !Array.isArray(item)
@@ -20,9 +33,14 @@ const setOwn = (object, key, value) => Object.defineProperty(object, key, { valu
 const identity = (value) => typeof value === 'string' && value.length > 0 && value.length <= 200;
 const documentFields = (document) => Object.fromEntries(Object.entries(document).filter(([key, value]) =>
   !['id', 'nodes', 'updatedAt', 'markdownUpdatedAt'].includes(key) && value !== undefined));
+const nodeDefaults = Object.freeze({ note: '', checked: false, collapsed: false, color: 'plain',
+  headingLevel: 0, bold: false, italic: false, underline: false, strike: false, highlight: false, isTodo: false });
 const nodeFields = (node) => Object.fromEntries(Object.entries(node).filter(([key, value]) => !['id', 'children'].includes(key) && value !== undefined));
+const comparableNodeFields = (node) => ({ ...nodeDefaults, ...nodeFields(node) });
+const comparableNodes = (nodes) => nodes.map((node) => ({ id: node.id, ...comparableNodeFields(node), children: comparableNodes(node.children) }));
+export const canonicalOperationDocument = (document) => canonicalJson({ ...documentFields(document), id: document.id, nodes: comparableNodes(document.nodes) });
 export const sameOperationDocument = (left, right) => left === right || Boolean(left && right &&
-  equalValue({ ...documentFields(left), id: left.id, nodes: left.nodes }, { ...documentFields(right), id: right.id, nodes: right.nodes }));
+  canonicalOperationDocument(left) === canonicalOperationDocument(right));
 
 export const indexOperationNodes = (document) => {
   const result = new Map();
@@ -84,8 +102,10 @@ const fieldChanges = (documentId, nodeId, before, after) => [...new Set([...Obje
 
 export const createWorkspaceOperation = (before, after, {
   id, actorId, clock = 1, batchId = id, source = { kind: 'user', label: '编辑' },
-  createdAt = new Date().toISOString(), positions = initialPositions(before), resolves = [], resolutionBaselines = {},
+  createdAt = new Date().toISOString(), positions = initialPositions(before), resolves = [], resolutionBaselines = {}, includeOrder = true, commit = false, orderingVersion = 2,
 }) => {
+  if (orderingVersion !== 1 && orderingVersion !== 2) throw new Error('操作排序版本需要升级');
+  positions = { ...positions };
   const changes = [];
   const oldDocuments = new Map(before.documents.map((document) => [document.id, document]));
   const newDocuments = new Map(after.documents.map((document) => [document.id, document]));
@@ -96,6 +116,7 @@ export const createWorkspaceOperation = (before, after, {
     if (!document) { changes.push({ type: 'delete-document', documentId, before: clone(oldDocument) }); continue; }
     changes.push(...fieldChanges(documentId, null, documentFields(oldDocument), documentFields(document)));
     const oldNodes = indexOperationNodes(oldDocument), nodes = indexOperationNodes(document);
+    if (orderingVersion === 2) setOwn(positions, documentId, positionsForVisibleTree(oldDocument, positions[documentId], orderingVersion, oldNodes));
     const oldGroups = siblingGroups(oldNodes), groups = siblingGroups(nodes);
     const stable = new Set();
     for (const [parent, ids] of groups) {
@@ -110,7 +131,7 @@ export const createWorkspaceOperation = (before, after, {
       if (!oldNode) changes.push({ type: 'insert-node', documentId, nodeId, value: clone(node.value),
         position: { parentId: node.parentId, afterId: node.afterId }, restore: ['undo', 'redo', 'restore', 'conflict'].includes(source.kind) });
       else {
-        changes.push(...fieldChanges(documentId, nodeId, oldNode.value, node.value));
+        changes.push(...fieldChanges(documentId, nodeId, comparableNodeFields(oldNode.value), comparableNodeFields(node.value)));
         if (!stable.has(nodeId) || oldNode.parentId !== node.parentId) changes.push({ type: 'move-node', documentId, nodeId,
           before: { parentId: oldNode.parentId, ...(positions[documentId]?.[nodeId] ?? {}) },
           position: { parentId: node.parentId, afterId: node.afterId } });
@@ -118,13 +139,32 @@ export const createWorkspaceOperation = (before, after, {
     }
   }
   const operation = { protocol: OPERATION_PROTOCOL, id, actorId, clock, batchId, source: clone(source), createdAt, changes, resolves, resolutionBaselines };
-  validateWorkspaceOperation(operation);
+  if (orderingVersion === 2) operation.orderingVersion = 2;
+  const beforeOrder = before.documents.map((document) => document.id), afterOrder = after.documents.map((document) => document.id);
+  if (includeOrder && !equalValue(beforeOrder, afterOrder)) operation.documentOrder = { before: beforeOrder, after: afterOrder };
+  try { validateWorkspaceOperation(operation, { commit }); }
+  catch (error) {
+    if (!commit || !/预算/.test(error.message)) throw error;
+    // A large field-by-field diff can exceed the size of both complete
+    // documents. Keep the logical commit atomic using bounded document CAS.
+    operation.changes = [];
+    for (const documentId of new Set([...oldDocuments.keys(), ...newDocuments.keys()])) {
+      const previous = oldDocuments.get(documentId), document = newDocuments.get(documentId);
+      if (!previous) operation.changes.push({ type: 'create-document', documentId, document: clone(document) });
+      else if (!document) operation.changes.push({ type: 'delete-document', documentId, before: clone(previous) });
+      else if (!sameOperationDocument(previous, document)) operation.changes.push({ type: 'replace-document', documentId, before: clone(previous), document: clone(document) });
+    }
+    validateWorkspaceOperation(operation, { commit: true });
+  }
   return operation;
 };
 
-export const validateWorkspaceOperation = (operation) => {
-  assertValueBudget(operation, { maxDepth: 600, maxBytes: OPERATION_LIMITS.bytes, maxValues: 200_000 });
+export const validateWorkspaceOperation = (operation, { commit = false } = {}) => {
+  const maxBytes = commit ? OPERATION_LIMITS.commitBytes : OPERATION_LIMITS.bytes;
+  assertValueBudget(operation, { maxDepth: 600, maxBytes, maxValues: commit ? 4_100_000 : 200_000 });
+  if (new TextEncoder().encode(JSON.stringify(operation)).byteLength > maxBytes) throw new Error(`操作超过 ${maxBytes / 1024 / 1024} MiB 传输预算`);
   if (!operation || operation.protocol !== OPERATION_PROTOCOL) throw new Error('操作协议需要升级');
+  if (operation.orderingVersion !== undefined && operation.orderingVersion !== 2) throw new Error('操作排序版本需要升级');
   for (const field of ['id', 'actorId', 'batchId']) if (!identity(operation[field])) throw new Error(`无效操作身份 ${field}`);
   if (!Number.isSafeInteger(operation.clock) || operation.clock < 1) throw new Error('无效逻辑时钟');
   if (!['user', 'ai', 'mcp', 'undo', 'redo', 'restore', 'import', 'conflict'].includes(operation.source?.kind) ||
@@ -133,11 +173,16 @@ export const validateWorkspaceOperation = (operation) => {
   if (!Number.isFinite(Date.parse(operation.createdAt))) throw new Error('无效操作时间');
   if (!Array.isArray(operation.resolves) || operation.resolves.length > 100 || !operation.resolves.every(identity)) throw new Error('无效冲突关联');
   if (operation.resolutionBaselines !== undefined && (!operation.resolutionBaselines || typeof operation.resolutionBaselines !== 'object' || Array.isArray(operation.resolutionBaselines) || Object.entries(operation.resolutionBaselines).some(([id, digest]) => !identity(id) || !(digest === null || /^[a-f0-9]{64}$/.test(digest))))) throw new Error('无效解决基线');
-  if (!Array.isArray(operation.changes) || operation.changes.length > OPERATION_LIMITS.changes) throw new Error('操作超过变更预算');
+  if (!Array.isArray(operation.changes) || operation.changes.length > (commit ? OPERATION_LIMITS.commitChanges : OPERATION_LIMITS.changes)) throw new Error('操作超过变更预算');
+  if (operation.documentOrder) {
+    for (const order of [operation.documentOrder.before, operation.documentOrder.after]) {
+      if (!Array.isArray(order) || order.length > 100_000 || !order.every(identity) || new Set(order).size !== order.length) throw new Error('文档顺序无效');
+    }
+  }
   const targets = new Set();
   for (const change of operation.changes) {
     if (!identity(change.documentId)) throw new Error('无效目标文档');
-    if (!['field', 'create-document', 'delete-document', 'insert-node', 'delete-node', 'move-node'].includes(change.type)) throw new Error('不支持的操作');
+    if (!['field', 'create-document', 'delete-document', 'replace-document', 'insert-node', 'delete-node', 'move-node'].includes(change.type)) throw new Error('不支持的操作');
     if (change.nodeId != null && !identity(change.nodeId)) throw new Error('无效目标主题');
     const target = canonicalJson([change.documentId, change.nodeId ?? null, change.type, change.field ?? null]);
     if (targets.has(target)) throw new Error('操作包含重复目标');
@@ -159,6 +204,10 @@ export const validateWorkspaceOperation = (operation) => {
     }
     if (change.type === 'create-document') validateOperationDocument(change.document, change.documentId);
     if (change.type === 'delete-document') validateOperationDocument(change.before, change.documentId);
+    if (change.type === 'replace-document') {
+      validateOperationDocument(change.before, change.documentId);
+      validateOperationDocument(change.document, change.documentId);
+    }
   }
   return operation;
 };
@@ -168,7 +217,113 @@ const validateOperationDocument = (document, id) => {
   validateDocumentAttachments(document);
 };
 
-const rebuildDocument = (document, nodes, positions) => {
+const orderSiblingsV2 = (ids, positions, parent) => {
+  const idSet = new Set(ids), orderingIds = new Set(ids), byAnchor = new Map();
+  // Tombstones retain a place in the ordering graph. Flattening their
+  // descendants onto an earlier anchor sorts them against unrelated siblings.
+  for (const id of ids) {
+    let anchor = positions[id].afterId;
+    const visited = new Set([id]);
+    while (anchor !== null && !idSet.has(anchor)) {
+      if (visited.has(anchor) || !positions[anchor] || positions[anchor].parentId !== parent) throw new Error('主题排序锚点已变化或无效');
+      visited.add(anchor);
+      orderingIds.add(anchor);
+      anchor = positions[anchor].afterId;
+    }
+  }
+  for (const id of orderingIds) {
+    const anchor = positions[id].afterId;
+    if (!byAnchor.has(anchor)) byAnchor.set(anchor, []);
+    byAnchor.get(anchor).push(id);
+  }
+  const compare = (a, b) => positions[b].clock - positions[a].clock ||
+    (positions[a].stamp < positions[b].stamp ? -1 : positions[a].stamp > positions[b].stamp ? 1 : a < b ? -1 : 1);
+  for (const items of byAnchor.values()) items.sort(compare);
+  const result = [], visited = new Set();
+  const stack = [...(byAnchor.get(null) ?? [])].reverse();
+  while (stack.length) {
+    const id = stack.pop();
+    if (visited.has(id)) throw new Error('主题顺序形成环');
+    visited.add(id);
+    if (idSet.has(id)) result.push(id);
+    const following = byAnchor.get(id) ?? [];
+    for (let index = following.length - 1; index >= 0; index--) stack.push(following[index]);
+  }
+  if (result.length !== ids.length) throw new Error('主题顺序形成环');
+  return result;
+};
+
+// Keep the original engine for immutable, already-issued 2.0.0 operations.
+// Reinterpreting those receipts with a new traversal would change their result.
+const orderSiblingsLegacy = (ids, positions, parent) => {
+  const idSet = new Set(ids), byAnchor = new Map();
+  for (const id of ids) {
+    let anchor = positions[id].afterId;
+    const visited = new Set([id]);
+    while (anchor !== null && !idSet.has(anchor)) {
+      if (visited.has(anchor) || !positions[anchor] || positions[anchor].parentId !== parent) throw new Error('主题排序锚点已变化或无效');
+      visited.add(anchor); anchor = positions[anchor].afterId;
+    }
+    if (!byAnchor.has(anchor)) byAnchor.set(anchor, []);
+    byAnchor.get(anchor).push(id);
+  }
+  const compare = (a, b) => positions[b].clock - positions[a].clock ||
+    (positions[a].stamp < positions[b].stamp ? -1 : positions[a].stamp > positions[b].stamp ? 1 : a < b ? -1 : 1);
+  for (const items of byAnchor.values()) items.sort(compare);
+  const result = [], visited = new Set(), stack = [...(byAnchor.get(null) ?? [])].reverse();
+  while (stack.length) {
+    const id = stack.pop();
+    if (visited.has(id)) throw new Error('主题顺序形成环');
+    visited.add(id); result.push(id);
+    const following = byAnchor.get(id) ?? [];
+    for (let index = following.length - 1; index >= 0; index--) stack.push(following[index]);
+  }
+  if (result.length !== ids.length) throw new Error('主题顺序形成环');
+  return result;
+};
+const orderSiblings = (ids, positions, parent, version = 2) =>
+  (version === 2 ? orderSiblingsV2 : orderSiblingsLegacy)(ids, positions, parent);
+
+const positionsForVisibleTree = (document, original, version, nodes = indexOperationNodes(document)) => {
+  if (!original) return initialPositions({ documents: [document] })[document.id];
+  const groups = siblingGroups(nodes);
+  const matches = positions => {
+    for (const [parent, ids] of groups) {
+      try {
+        if (ids.some(id => positions[id]?.parentId !== parent) ||
+            !equalValue(orderSiblings(ids, positions, parent, version), ids)) return false;
+      } catch { return false; }
+    }
+    return true;
+  };
+  if (version === 1) {
+    const restored = { ...original };
+    let changed = false;
+    for (const id of nodes.keys()) if (own(original[id] ?? {}, 'previousAfterId')) {
+      const position = { ...original[id], afterId: original[id].previousAfterId };
+      delete position.previousAfterId;
+      setOwn(restored, id, position); changed = true;
+    }
+    if (changed && matches(restored)) return restored;
+  }
+  if (matches(original)) return original;
+  // The committed visible tree remains authoritative at an engine boundary.
+  // Preserve clocks, stamps and tombstones; only normalize invisible anchors.
+  const positions = { ...original };
+  for (const [id, node] of nodes) setOwn(positions, id, {
+    ...(original[id] ?? { clock: 0, stamp: id }), parentId: node.parentId, afterId: node.afterId,
+    ...(original[id]?.parentId === node.parentId && original[id]?.afterId !== node.afterId ? { previousAfterId: original[id].afterId } : {}),
+  });
+  return positions;
+};
+// A metadata-only reanchor is CAS-equivalent to its previous anchor. Any
+// structural move/detachment clears that alias, and clocks/stamps still guard
+// the node's actual movement.
+const samePosition = (current, expected) => Boolean(current && expected &&
+  current.parentId === expected.parentId && current.clock === expected.clock && current.stamp === expected.stamp &&
+  (current.afterId === expected.afterId || own(current, 'previousAfterId') && current.previousAfterId === expected.afterId));
+
+const rebuildDocument = (document, nodes, positions, orderingVersion = 2) => {
   const byParent = new Map();
   for (const [id, item] of nodes) {
     const position = positions[id];
@@ -176,43 +331,11 @@ const rebuildDocument = (document, nodes, positions) => {
     if (!byParent.has(position.parentId)) byParent.set(position.parentId, []);
     byParent.get(position.parentId).push(id);
   }
-  const ordered = (parent) => {
-    const ids = byParent.get(parent) ?? [];
-    const idSet = new Set(ids), byAnchor = new Map();
-    const anchorFor = (id) => {
-      let anchor = positions[id].afterId;
-      const visited = new Set([id]);
-      while (anchor !== null && !idSet.has(anchor)) {
-        if (visited.has(anchor) || !positions[anchor] || positions[anchor].parentId !== parent) throw new Error('主题排序锚点已变化或无效');
-        visited.add(anchor);
-        anchor = positions[anchor].afterId;
-      }
-      return anchor;
-    };
-    for (const id of ids) {
-      const anchor = anchorFor(id);
-      if (!byAnchor.has(anchor)) byAnchor.set(anchor, []);
-      byAnchor.get(anchor).push(id);
-    }
-    const compare = (a, b) => positions[b].clock - positions[a].clock ||
-      (positions[a].stamp < positions[b].stamp ? -1 : positions[a].stamp > positions[b].stamp ? 1 : a < b ? -1 : 1);
-    for (const items of byAnchor.values()) items.sort(compare);
-    const result = [], visited = new Set();
-    const stack = [...(byAnchor.get(null) ?? [])].reverse();
-    while (stack.length) {
-      const id = stack.pop();
-      if (visited.has(id)) throw new Error('主题顺序形成环');
-      visited.add(id); result.push(id);
-      const following = byAnchor.get(id) ?? [];
-      for (let index = following.length - 1; index >= 0; index--) stack.push(following[index]);
-    }
-    if (result.length !== ids.length) throw new Error('主题顺序形成环');
-    return result;
-  };
+
   const visited = new Set();
   const build = (parent, depth) => {
     if (depth > 256) throw new Error('主题层级超过预算');
-    return ordered(parent).map((id) => {
+    return orderSiblings(byParent.get(parent) ?? [], positions, parent, orderingVersion).map((id) => {
       if (visited.has(id)) throw new Error('主题形成环或重复父级');
       visited.add(id);
       return { id, ...nodes.get(id).value, children: build(id, depth + 1) };
@@ -225,14 +348,24 @@ const rebuildDocument = (document, nodes, positions) => {
 };
 
 export const applyWorkspaceOperation = (workspace, originalPositions, operation) => {
-  validateWorkspaceOperation(operation);
-  const documents = new Map(workspace.documents.map((document) => [document.id, clone(document)]));
-  const positions = clone(originalPositions);
+  validateWorkspaceOperation(operation, { commit: true });
+  const documents = new Map(workspace.documents.map((document) => [document.id, document]));
+  const positions = { ...originalPositions };
+  const touched = new Set(operation.changes.map((change) => change.documentId));
+  const orderingVersion = operation.orderingVersion ?? 1;
+  for (const id of touched) {
+    if (documents.has(id)) documents.set(id, clone(documents.get(id)));
+    if (own(positions, id)) setOwn(positions, id, clone(positions[id]));
+    if (documents.has(id)) setOwn(positions, id, positionsForVisibleTree(documents.get(id), positions[id], orderingVersion));
+  }
+  const moveBaselines = new Map(operation.changes.filter(change => change.type === 'move-node').map(change => [
+    change, clone(positions[change.documentId]?.[change.nodeId]),
+  ]));
   const nodeMaps = new Map();
   const conflicts = [];
   const conflict = (change, current, message) => conflicts.push({
     documentId: change.documentId, nodeId: change.nodeId ?? null, field: change.field ?? change.type,
-    baseline: clone(change.before), current: clone(current), candidate: clone(change.after ?? change.value ?? change.position ?? null), message,
+    baseline: clone(change.before), current: clone(current), candidate: clone(change.after ?? change.value ?? change.position ?? change.document ?? null), message,
   });
   for (const change of operation.changes) {
     const document = documents.get(change.documentId);
@@ -245,6 +378,16 @@ export const applyWorkspaceOperation = (workspace, originalPositions, operation)
       continue;
     }
     if (!document) { conflict(change, null, '目标文档已删除'); continue; }
+    if (change.type === 'replace-document') {
+      if (!sameOperationDocument(document, change.before) && !sameOperationDocument(document, change.document)) conflict(change, document, '批量修改与远端文档编辑冲突');
+      else {
+        documents.set(change.documentId, clone(change.document));
+        const refreshed = initialPositions({ documents: [change.document] })[change.documentId];
+        for (const position of Object.values(refreshed)) { position.clock = operation.clock; position.stamp = operation.id; }
+        setOwn(positions, change.documentId, { ...positions[change.documentId], ...refreshed });
+      }
+      continue;
+    }
     if (change.type === 'delete-document') {
       if (!sameOperationDocument(document, change.before)) conflict(change, document, '删除与远端编辑冲突');
       else documents.delete(change.documentId);
@@ -259,28 +402,42 @@ export const applyWorkspaceOperation = (workspace, originalPositions, operation)
       const fields = change.nodeId === null ? document : node?.value;
       if (!fields) { conflict(change, null, '目标主题已删除'); continue; }
       const current = valueSlot(fields, change.field);
-      if (!equalValue(current, change.before) && !equalValue(current, change.after)) { conflict(change, current, '同一字段有并发修改'); continue; }
+      const normalizeSlot = (slot) => change.nodeId !== null && !slot.present && own(nodeDefaults, change.field)
+        ? { present: true, value: nodeDefaults[change.field] } : slot;
+      if (!equalValue(normalizeSlot(current), normalizeSlot(change.before)) && !equalValue(normalizeSlot(current), normalizeSlot(change.after))) { conflict(change, current, '同一字段有并发修改'); continue; }
       if (change.after.present) Object.defineProperty(fields, change.field, { value: clone(change.after.value), enumerable: true, writable: true, configurable: true });
       else delete fields[change.field];
     } else if (change.type === 'insert-node') {
-      if (node) { if (!equalValue(node.value, change.value)) conflict(change, node.value, '主题身份已存在'); continue; }
+      if (node) { if (!equalValue(comparableNodeFields(node.value), comparableNodeFields(change.value))) conflict(change, node.value, '主题身份已存在'); continue; }
       if (own(documentPositions, change.nodeId) && !(change.restore === true && ['undo', 'redo', 'restore', 'conflict'].includes(operation.source.kind))) { conflict(change, null, '已删除的主题需要显式恢复'); continue; }
-      nodes.set(change.nodeId, { value: clone(change.value) });
+      nodes.set(change.nodeId, { value: nodeFields(clone(change.value)) });
       setOwn(documentPositions, change.nodeId, { ...change.position, clock: operation.clock, stamp: operation.id });
     } else if (change.type === 'delete-node') {
       if (!node) continue;
-      if (!equalValue(node.value, change.before) || documentPositions[change.nodeId]?.parentId !== change.parentId) {
+      if (!equalValue(comparableNodeFields(node.value), comparableNodeFields(change.before)) || documentPositions[change.nodeId]?.parentId !== change.parentId) {
         conflict(change, node.value, '删除与编辑或移动冲突'); continue;
       }
       nodes.delete(change.nodeId);
     } else if (change.type === 'move-node') {
       if (!node) { conflict(change, null, '移动的主题已删除'); continue; }
       const current = documentPositions[change.nodeId];
-      if (!equalValue(originalPositions[change.documentId]?.[change.nodeId] ?? current, change.before)) { conflict(change, current, '同一主题有并发移动'); continue; }
-      // Detach the moving item without dragging its old following siblings.
+      if (!samePosition(moveBaselines.get(change) ?? current, change.before)) { conflict(change, current, '同一主题有并发移动'); continue; }
+      // Detach from the current visible predecessor, including earlier moves
+      // in this same batch. The historical anchor need not be its predecessor.
+      const following = Object.entries(documentPositions).filter(([id, position]) =>
+        id !== change.nodeId && position.parentId === current.parentId && position.afterId === change.nodeId);
+      let predecessor = current.afterId;
+      if (orderingVersion === 2 && following.length) {
+        try {
+          const siblings = orderSiblings([...nodes.keys()].filter((id) => documentPositions[id]?.parentId === current.parentId), documentPositions, current.parentId);
+          predecessor = siblings[siblings.indexOf(change.nodeId) - 1] ?? null;
+        } catch (error) { conflict(change, current, error.message); continue; }
+      }
       for (const [id, position] of Object.entries(documentPositions)) {
-        if (id !== change.nodeId && position.parentId === current.parentId && position.afterId === change.nodeId)
-          position.afterId = current.afterId;
+        if (id !== change.nodeId && position.parentId === current.parentId && position.afterId === change.nodeId) {
+          position.afterId = predecessor;
+          delete position.previousAfterId;
+        }
       }
       setOwn(documentPositions, change.nodeId, { ...change.position, clock: operation.clock, stamp: operation.id });
     }
@@ -289,7 +446,7 @@ export const applyWorkspaceOperation = (workspace, originalPositions, operation)
     try {
       for (const [id, nodes] of nodeMaps) {
         const document = documents.get(id);
-        if (document) documents.set(id, rebuildDocument(document, nodes, positions[id]));
+        if (document) documents.set(id, rebuildDocument(document, nodes, positions[id], orderingVersion));
       }
       for (const change of operation.changes) {
         const document = documents.get(change.documentId);
@@ -304,6 +461,10 @@ export const applyWorkspaceOperation = (workspace, originalPositions, operation)
   const nextDocuments = workspace.documents.filter((document) => documents.has(document.id)).map((document) => documents.get(document.id));
   const existing = new Set(nextDocuments.map((document) => document.id));
   for (const [id, document] of documents) if (!existing.has(id)) nextDocuments.push(document);
+  if (operation.documentOrder) {
+    const rank = new Map(operation.documentOrder.after.map((id, index) => [id, index]));
+    nextDocuments.sort((a, b) => (rank.get(a.id) ?? rank.size) - (rank.get(b.id) ?? rank.size));
+  }
   return { status: 'applied', workspace: { ...workspace, documents: nextDocuments,
     activeDocumentId: documents.has(workspace.activeDocumentId) ? workspace.activeDocumentId : nextDocuments[0]?.id ?? '' }, positions, conflicts: [] };
 };
@@ -311,20 +472,25 @@ export const applyWorkspaceOperation = (workspace, originalPositions, operation)
 // Generate a compensating operation against the latest state. Only fields
 // touched by the original action are reverted. Remote changes remain intact.
 export const compensateWorkspaceChange = (current, before, after, options) => {
-  const inverse = createWorkspaceOperation(after, before, options);
+  const inverse = createWorkspaceOperation(after, before, { ...options, commit: true });
   return { operation: inverse, ...applyWorkspaceOperation(current, options.positions ?? initialPositions(current), inverse) };
 };
 
-export const operationSummary = (operation) => operation.changes.map((change) => ({
+export const operationSummary = (operation) => [...operation.changes.map((change) => ({
   type: change.type, documentId: change.documentId, nodeId: change.nodeId ?? null, field: change.field,
   before: clone(change.before), after: clone(change.after ?? change.value ?? change.position ?? change.document ?? null),
-}));
+})), ...(operation.documentOrder ? [{
+  type: 'reorder-documents', documentId: operation.documentOrder.after[0] ?? operation.documentOrder.before[0],
+  nodeId: null, before: [...operation.documentOrder.before], after: [...operation.documentOrder.after],
+}] : [])];
 
 export const invertWorkspaceOperation = (operation, { id, actorId, clock, createdAt = new Date().toISOString() }) => ({
-  protocol: OPERATION_PROTOCOL, id, actorId, clock, batchId: id, createdAt, source: { kind: 'restore', label: `恢复 ${operation.source.label}`.slice(0, 300) }, resolves: [], resolutionBaselines: {},
+  protocol: OPERATION_PROTOCOL, orderingVersion: 2, id, actorId, clock, batchId: id, createdAt, source: { kind: 'restore', label: `恢复 ${operation.source.label}`.slice(0, 300) }, resolves: [], resolutionBaselines: {},
+  ...(operation.documentOrder ? { documentOrder: { before: operation.documentOrder.after, after: operation.documentOrder.before } } : {}),
   changes: [...operation.changes].reverse().map((change) => {
     if (change.type === 'field') return { ...change, before: clone(change.after), after: clone(change.before) };
     if (change.type === 'create-document') return { type: 'delete-document', documentId: change.documentId, before: clone(change.document) };
+    if (change.type === 'replace-document') return { ...change, before: clone(change.document), document: clone(change.before) };
     if (change.type === 'delete-document') return { type: 'create-document', documentId: change.documentId, document: clone(change.before), restore: true };
     if (change.type === 'insert-node') return { type: 'delete-node', documentId: change.documentId, nodeId: change.nodeId, before: clone(change.value), parentId: change.position.parentId };
     if (change.type === 'delete-node') return { type: 'insert-node', documentId: change.documentId, nodeId: change.nodeId, value: clone(change.before), position: { parentId: change.position.parentId, afterId: change.position.afterId }, restore: true };

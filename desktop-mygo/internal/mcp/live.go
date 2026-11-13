@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -20,10 +21,13 @@ import (
 // LiveStore is a serialized, bounded client of the existing protocol-2 socket.
 // It requests snapshots from the renderer and never substitutes a file store.
 type LiveStore struct {
-	connection net.Conn
-	reader     *bufio.Reader
-	token      string
-	mu         sync.Mutex
+	connection     net.Conn
+	reader         *bufio.Reader
+	token          string
+	discoveryPath  string
+	closed         bool
+	candidatePatch bool
+	mu             sync.Mutex
 }
 
 func OpenLive(ctx context.Context, discoveryPath string) (*LiveStore, error) {
@@ -62,14 +66,36 @@ func OpenLive(ctx context.Context, discoveryPath string) (*LiveStore, error) {
 	if err != nil || len(decoded) != 32 || discovery.Protocol != 2 || discovery.SocketPath == "" || hex.EncodeToString(decoded) != discovery.Token {
 		return nil, fmt.Errorf("Live 发现协议无效")
 	}
+	socketInfo, err := os.Lstat(discovery.SocketPath)
+	if err != nil || socketInfo.Mode()&os.ModeSocket == 0 || !ownedByCurrentUser(socketInfo) {
+		return nil, fmt.Errorf("Live socket 身份无效")
+	}
+	parent, err := os.Lstat(filepath.Dir(discovery.SocketPath))
+	if err != nil || !parent.IsDir() || parent.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(parent) {
+		return nil, fmt.Errorf("Live socket 目录权限无效")
+	}
 	connection, err := (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, "unix", discovery.SocketPath)
 	if err != nil {
 		return nil, fmt.Errorf("Live 已断开，请在应用中检查授权后重新连接")
 	}
-	return &LiveStore{connection: connection, reader: bufio.NewReader(connection), token: discovery.Token}, nil
+	return &LiveStore{connection: connection, reader: bufio.NewReader(connection), token: discovery.Token, discoveryPath: discoveryPath}, nil
 }
 
-func (store *LiveStore) Close() error { return store.connection.Close() }
+func (store *LiveStore) Close() error {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	store.closed = true
+	if store.connection != nil {
+		return store.connection.Close()
+	}
+	return nil
+}
+func (store *LiveStore) disconnect() {
+	if store.connection != nil {
+		store.connection.Close()
+	}
+	store.connection = nil
+}
 
 func (store *LiveStore) rpc(ctx context.Context, method string, payload *object) (*object, error) {
 	store.mu.Lock()
@@ -77,14 +103,30 @@ func (store *LiveStore) rpc(ctx context.Context, method string, payload *object)
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	if store.closed {
+		return nil, fmt.Errorf("Live 连接已关闭")
+	}
+	if store.connection == nil {
+		next, err := OpenLive(ctx, store.discoveryPath)
+		if err != nil {
+			return nil, err
+		}
+		if next.token != store.token {
+			next.Close()
+			return nil, fmt.Errorf("Live 授权已变化，请明确重新连接")
+		}
+		store.connection, store.reader = next.connection, next.reader
+	}
 	deadline := time.Now().Add(30 * time.Second)
 	if at, ok := ctx.Deadline(); ok && at.Before(deadline) {
 		deadline = at
 	}
 	if err := store.connection.SetDeadline(deadline); err != nil {
+		store.disconnect()
 		return nil, err
 	}
-	stop := context.AfterFunc(ctx, func() { store.connection.Close() })
+	connection := store.connection
+	stop := context.AfterFunc(ctx, func() { connection.Close() })
 	defer stop()
 	id := make([]byte, 16)
 	if _, err := rand.Read(id); err != nil {
@@ -96,16 +138,16 @@ func (store *LiveStore) rpc(ctx context.Context, method string, payload *object)
 	if err != nil {
 		return nil, err
 	}
-	if len(encoded)+1 >= contracts.Limits.OperationBytes {
-		return nil, fmt.Errorf("Live 请求超过 4 MiB 处理预算")
+	if len(encoded)+1 >= 80*1024*1024 {
+		return nil, fmt.Errorf("Live 请求超过 80 MiB 处理预算")
 	}
 	if _, err := store.connection.Write(append(encoded, '\n')); err != nil {
-		store.connection.Close()
+		store.disconnect()
 		return nil, fmt.Errorf("Live 已断开，请重新连接")
 	}
 	raw, err := readLine(store.reader, contracts.Limits.DocumentBytes+16*1024*1024)
 	if err != nil {
-		store.connection.Close()
+		store.disconnect()
 		return nil, fmt.Errorf("Live 响应中断、超时或超过预算，请重新连接")
 	}
 	var response struct {
@@ -115,7 +157,7 @@ func (store *LiveStore) rpc(ctx context.Context, method string, payload *object)
 		Result json.RawMessage `json:"result"`
 	}
 	if err := json.Unmarshal(raw, &response); err != nil || response.ID != requestID {
-		store.connection.Close()
+		store.disconnect()
 		return nil, fmt.Errorf("Live 响应协议无效")
 	}
 	if !response.OK {
@@ -123,7 +165,7 @@ func (store *LiveStore) rpc(ctx context.Context, method string, payload *object)
 	}
 	parsed, err := contracts.ParseJSON(response.Result)
 	if err != nil || asObject(parsed) == nil {
-		store.connection.Close()
+		store.disconnect()
 		return nil, fmt.Errorf("Live 响应协议无效")
 	}
 	return asObject(parsed), nil
@@ -136,6 +178,14 @@ func (store *LiveStore) Load(ctx context.Context) (Snapshot, error) {
 		return snapshot, err
 	}
 	snapshot.Ordered = result.Child("workspace")
+	store.mu.Lock()
+	store.candidatePatch = false
+	for _, capability := range result.Array("capabilities") {
+		if capability == "candidate-patch-v1" {
+			store.candidatePatch = true
+		}
+	}
+	store.mu.Unlock()
 	if snapshot.Ordered == nil || snapshot.Ordered.Get("version") != float64(3) || result.String("revision") == "" {
 		return snapshot, fmt.Errorf("Live 工作区格式无效")
 	}
@@ -238,7 +288,40 @@ func (store *LiveStore) Mutate(ctx context.Context, operation string, args *obje
 		requestID = strings.TrimPrefix(newID(""), "_")
 	}
 	reason := args.String("reason")
-	result, err := store.rpc(ctx, "proposal", ordered("requestId", requestID, "operation", operation, "expectedRevision", expected, "workspaceId", current.WorkspaceID, "candidate", draft, "clientDigest", digest, "reason", reason, "dryRun", !actual))
+	payload := ordered("requestId", requestID, "operation", operation, "expectedRevision", expected, "workspaceId", current.WorkspaceID, "clientDigest", digest, "reason", reason, "dryRun", !actual)
+	store.mu.Lock()
+	supportsPatch := store.candidatePatch
+	store.mu.Unlock()
+	if supportsPatch {
+		previous := map[string]string{}
+		for _, raw := range current.Ordered.Array("documents") {
+			document := asObject(raw)
+			previous[document.String("id")], _ = contracts.Digest(document)
+		}
+		changed, order := []any{}, []any{}
+		for _, raw := range draft.Array("documents") {
+			document := asObject(raw)
+			hash, err := contracts.Digest(document)
+			if err != nil {
+				return nil, err
+			}
+			order = append(order, document.String("id"))
+			if hash != previous[document.String("id")] {
+				changed = append(changed, document)
+			}
+		}
+		payload.Set("candidatePatch", ordered("documents", changed, "documentOrder", order, "activeDocumentId", draft.String("activeDocumentId")))
+	} else {
+		payload.Set("candidate", draft)
+		encoded, err := contracts.Stringify(payload, false, false)
+		if err != nil {
+			return nil, err
+		}
+		if len(encoded) > 4*1024*1024-4096 {
+			return nil, fmt.Errorf("请将桌面应用升级到 2.0.1 后重试大文档 Live 写入")
+		}
+	}
+	result, err := store.rpc(ctx, "proposal", payload)
 	if err != nil {
 		return nil, err
 	}

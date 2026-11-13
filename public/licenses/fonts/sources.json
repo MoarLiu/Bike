@@ -1,0 +1,30 @@
+[
+  {
+    "file": "NotoSansCJKsc-Regular.otf",
+    "source": "https://raw.githubusercontent.com/notofonts/noto-cjk/Sans2.004/Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf",
+    "license": "NotoSansCJK-LICENSE.txt",
+    "bytes": 16437364,
+    "sha256": "2c76254f6fc379fddfce0a7e84fb5385bb135d3e399294f6eeb6680d0365b74b"
+  },
+  {
+    "file": "NotoSansSymbols2-Regular.ttf",
+    "source": "https://raw.githubusercontent.com/google/fonts/main/ofl/notosanssymbols2/NotoSansSymbols2-Regular.ttf",
+    "license": "NotoSansSymbols2-OFL.txt",
+    "bytes": 1233128,
+    "sha256": "7d5fb73b7ca67a6798101741f5d280a3d016a56a197afcd4199dbb57b4b82a21"
+  },
+  {
+    "file": "NotoEmoji.ttf",
+    "source": "https://raw.githubusercontent.com/google/fonts/main/ofl/notoemoji/NotoEmoji%5Bwght%5D.ttf",
+    "license": "NotoEmoji-OFL.txt",
+    "bytes": 1982596,
+    "sha256": "de6c18832938afc99caf132b39d6a30a19bac7f2e812e28db2535b4608d27551"
+  },
+  {
+    "file": "NotoSansSC-ChineseSimplified.ttf",
+    "source": "Existing Bike repository asset, retained from prior releases",
+    "license": "NotoSansSC-OFL.txt",
+    "bytes": 4465880,
+    "sha256": "4ea42ba7e3e5187c378ad2f44e231384dd5ae0919af70b693753a189f978f502"
+  }
+]

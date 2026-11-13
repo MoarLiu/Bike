@@ -73,7 +73,7 @@ func (server *LiveServer) Start(grant Grant) (map[string]any, error) {
 	if err := os.Chmod(server.Directory, 0700); err != nil {
 		return nil, err
 	}
-	temporary, err := os.MkdirTemp("/tmp", "bike-mygo-live-")
+	temporary, err := os.MkdirTemp("", "bike-mygo-live-")
 	if err != nil {
 		return nil, err
 	}
@@ -175,14 +175,13 @@ func (server *LiveServer) accept(ctx context.Context, listener net.Listener, gra
 func (server *LiveServer) serve(ctx context.Context, connection net.Conn, grant Grant, token string) {
 	defer func() { connection.Close(); server.mu.Lock(); delete(server.clients, connection); server.mu.Unlock() }()
 	reader := bufio.NewScanner(connection)
-	reader.Buffer(make([]byte, 4096), 4*1024*1024)
+	reader.Buffer(make([]byte, 4096), 80*1024*1024)
 	session := map[string]any{"id": identifier(), "clientName": "", "connectedAt": time.Now().UTC().Format(time.RFC3339Nano)}
 	var writes sync.Mutex
 	inflight := make(chan struct{}, 4)
 	var pending sync.WaitGroup
 	defer pending.Wait()
 	for {
-		connection.SetReadDeadline(time.Now().Add(120 * time.Second))
 		if !reader.Scan() {
 			return
 		}
@@ -199,7 +198,15 @@ func (server *LiveServer) serve(ctx context.Context, connection net.Conn, grant 
 		select {
 		case inflight <- struct{}{}:
 		default:
-			return
+			raw, _ := json.Marshal(map[string]any{"id": request.ID, "ok": false, "error": "Live 请求繁忙，请稍后重试"})
+			writes.Lock()
+			connection.SetWriteDeadline(time.Now().Add(30 * time.Second))
+			_, err := connection.Write(append(raw, '\n'))
+			writes.Unlock()
+			if err != nil {
+				return
+			}
+			continue
 		}
 		pending.Add(1)
 		go func() {

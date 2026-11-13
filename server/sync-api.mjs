@@ -11,6 +11,7 @@ const securityHeaders = {
   "X-Content-Type-Options": "nosniff",
   "X-Frame-Options": "DENY",
   "Referrer-Policy": "same-origin",
+  "Strict-Transport-Security": "max-age=31536000",
 };
 
 export const sendJson = (response, statusCode, payload, headers = {}) => {
@@ -68,7 +69,9 @@ export const readJsonRequestBody = (request, maxBytes) =>
         return;
       }
       try {
-        resolve(JSON.parse(body));
+        const value = JSON.parse(body);
+        if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("object required");
+        resolve(value);
       } catch {
         reject(new SyncValidationError("请求体不是有效 JSON"));
       }
@@ -151,6 +154,10 @@ export const handleSyncApi = async (
     if (await handleAssetApi(request, response, syncStore.assets, { headers })) return;
   }
   if (pathname.startsWith("/api/v2/")) {
+    if (url.searchParams.get("bikeOrdering") !== "2") {
+      sendJson(response, 426, { error: "client_upgrade_required", message: "节点同步需要 Bike 2.0.1 或更新客户端，请升级后重试；本机数据仍保留" }, headers);
+      return;
+    }
     try {
       const operations = syncStore.operations;
       const query = Object.fromEntries(url.searchParams);
@@ -160,6 +167,11 @@ export const handleSyncApi = async (
       else if (pathname === "/api/v2/checkpoint" && request.method === "GET") result = operations.checkpoint(query);
       else if (pathname === "/api/v2/events" && request.method === "GET") result = operations.events(query);
       else if (pathname === "/api/v2/operations" && request.method === "POST") result = operations.submit(await readJsonRequestBody(request, 4 * 1024 * 1024));
+      else if (pathname === "/api/v2/operation-chunks" && request.method === "POST") result = operations.receiveChunk(await readJsonRequestBody(request, 2 * 1024 * 1024));
+      else if (/^\/api\/v2\/operation-chunks\/[^/]+\/\d+$/.test(url.pathname) && request.method === "GET") {
+        const parts = url.pathname.split("/");
+        result = operations.readChunk(decodeURIComponent(parts[4]), parts[5]);
+      }
       else if (pathname.startsWith("/api/v2/receipts/") && request.method === "GET") {
         result = operations.receipt(pathname.slice("/api/v2/receipts/".length));
         if (!result) { sendJson(response, 404, { error: "receipt_not_found", message: "尚未提交此操作" }, headers); return; }

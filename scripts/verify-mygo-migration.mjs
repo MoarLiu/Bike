@@ -13,6 +13,7 @@ import { localMigrationDigest, sealLocalMigration, withoutLocalMigration } from 
 import { loadTypescript } from '../tests/helpers/typescript.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
+const productVersion = JSON.parse(await fs.readFile(path.join(root, 'package.json'), 'utf8')).version;
 const option = (name, fallback) => process.argv.find((argument) => argument.startsWith(name + '='))?.slice(name.length + 1) ?? fallback;
 const build = option('--build', process.env.BIKE_MYGO_BUILD ?? '1');
 const channel = process.env.BIKE_MYGO_CHANNEL ?? 'preview';
@@ -168,7 +169,7 @@ function phase(mode) {
 try {
   await fs.mkdir(evidence, { recursive: true });
   await fs.mkdir(runDirectory);
-  const manifest = JSON.parse(await fs.readFile(path.join(root, 'release/mygo/2.0.0', `build-${build}-${channel}/build-manifest.json`)));
+  const manifest = JSON.parse(await fs.readFile(path.join(root, 'release/mygo', productVersion, `build-${build}-${channel}/build-manifest.json`)));
   const staged = path.join(root, 'desktop-mygo/internal/frontend/dist');
   assert.equal(await frontendHash(staged), manifest.frontendSHA256, 'Staged frontend differs from the product candidate');
   report.sourceFingerprint = manifest.sourceFingerprint;
@@ -178,7 +179,7 @@ try {
   const identifier = 'com.bike.mygo.preview.migration-acceptance';
   await fs.writeFile(path.join(bundle, 'Contents/Info.plist'), `<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict><key>CFBundleIdentifier</key><string>${identifier}</string><key>CFBundleName</key><string>Bike MyGO Migration Acceptance</string><key>CFBundleExecutable</key><string>bike-mygo-migration</string><key>CFBundlePackageType</key><string>APPL</string><key>LSMinimumSystemVersion</key><string>12.0</string></dict></plist>\n`);
   run(go, ['build', '-mod=readonly', '-trimpath', '-tags', 'mygo_noinspector,mygo_frontend',
-    '-ldflags', `-s -w -X github.com/egoist/mygo.production=1 -X github.com/egoist/mygo.packageIdentifier=${identifier} -X github.com/egoist/mygo.packageVersion=2.0.0`,
+    '-ldflags', `-s -w -X github.com/egoist/mygo.production=1 -X github.com/egoist/mygo.packageIdentifier=${identifier} -X github.com/egoist/mygo.packageVersion=${productVersion}`,
     '-o', binary, './cmd/bike-mygo-migration-acceptance'], { cwd: path.join(root, 'desktop-mygo'), env: environment });
   run('/usr/bin/codesign', ['--force', '--sign', '-', bundle]);
   report.binarySHA256 = digest(await fs.readFile(binary));

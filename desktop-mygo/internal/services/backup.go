@@ -42,17 +42,20 @@ type backupSettings struct {
 	LastError          any     `json:"lastError"`
 }
 type Backups struct {
-	Profile    string
-	Directory  string
-	Library    *Attachments
-	Verify     func(context.Context, BackupRequest) error
-	mu         sync.Mutex
-	settings   backupSettings
-	loaded     bool
-	pending    *BackupRequest
-	lastResult map[string]any
-	retry      *time.Timer
-	closed     bool
+	Profile         string
+	Directory       string
+	Library         *Attachments
+	Verify          func(context.Context, BackupRequest) error
+	mu              sync.Mutex
+	settings        backupSettings
+	loaded          bool
+	pending         *BackupRequest
+	pendingHash     string
+	lastResult      map[string]any
+	retry           *time.Timer
+	closed          bool
+	cloud           *Attachments
+	lastMaintenance time.Time
 }
 
 var errBackupBaselineChanged = errors.New("iCloud 文件有外部修改，已暂停自动备份")
@@ -68,7 +71,6 @@ func (backup *Backups) loadLocked() error {
 	if err := privateDirectory(backup.Profile); err != nil {
 		return err
 	}
-	backup.loaded = true
 	raw, err := readBounded(filepath.Join(backup.Profile, "backup-settings.json"), 1024*1024)
 	if err == nil {
 		if err := json.Unmarshal(raw, &backup.settings); err != nil {
@@ -87,9 +89,15 @@ func (backup *Backups) loadLocked() error {
 			return err
 		}
 		backup.pending = &request
+		content, _, _, err := WorkspaceJSON(request.Workspace)
+		if err != nil {
+			return err
+		}
+		backup.pendingHash = digestBytes(content)
 	} else if !os.IsNotExist(err) {
 		return err
 	}
+	backup.loaded = true
 	return nil
 }
 func (backup *Backups) persistLocked() error {
@@ -100,7 +108,11 @@ func (backup *Backups) persistLocked() error {
 	return writeBytes(filepath.Join(backup.Profile, "backup-settings.json"), value)
 }
 func (backup *Backups) statusLocked() map[string]any {
-	return map[string]any{"auto": backup.settings.Auto, "paused": backup.settings.Paused, "baselineHash": backup.settings.BaselineHash, "lastSuccessAt": backup.settings.LastSuccessAt, "lastSemanticHash": backup.settings.LastSemanticHash, "lastError": backup.settings.LastError, "lastTicket": backup.settings.LastTicket, "writing": false, "pending": backup.pending != nil, "unfinishedReceipt": backup.pending, "lastResult": backup.lastResult}
+	var receipt any
+	if backup.pending != nil {
+		receipt = map[string]any{"sourceRevision": backup.pending.SourceRevision, "sourceHash": backup.pendingHash, "ticket": backup.pending.Ticket}
+	}
+	return map[string]any{"auto": backup.settings.Auto, "paused": backup.settings.Paused, "baselineHash": backup.settings.BaselineHash, "lastSuccessAt": backup.settings.LastSuccessAt, "lastSemanticHash": backup.settings.LastSemanticHash, "lastError": backup.settings.LastError, "lastTicket": backup.settings.LastTicket, "writing": false, "pending": backup.pending != nil, "unfinishedReceipt": receipt, "lastResult": backup.lastResult}
 }
 func (backup *Backups) Status() (map[string]any, error) {
 	backup.mu.Lock()
@@ -181,8 +193,17 @@ func sameHash(left, right *string) bool {
 }
 
 func (backup *Backups) prepareAssets(ctx context.Context, assets []Asset, revision string) error {
-	cloud := NewAttachments(filepath.Join(backup.Directory, "attachments"))
+	if backup.cloud == nil {
+		backup.cloud = NewAttachments(filepath.Join(backup.Directory, "attachments"))
+	}
+	cloud := backup.cloud
 	for _, asset := range assets {
+		if existing, _, err := cloud.Open(asset.AssetID, &asset.Metadata); err == nil {
+			existing.Close()
+			continue
+		} else if !os.IsNotExist(err) {
+			return err
+		}
 		file, _, err := backup.Library.Open(asset.AssetID, &asset.Metadata)
 		if err != nil {
 			return err
@@ -197,9 +218,6 @@ func (backup *Backups) prepareAssets(ctx context.Context, assets []Asset, revisi
 			return fmt.Errorf("备份附件摘要不一致")
 		}
 	}
-	if len(assets) == 0 {
-		return nil
-	}
 	directory := filepath.Join(backup.Directory, "attachment-manifests")
 	if err := privateDirectory(directory); err != nil {
 		return err
@@ -208,7 +226,7 @@ func (backup *Backups) prepareAssets(ctx context.Context, assets []Asset, revisi
 	if err != nil {
 		return err
 	}
-	return writeBytes(filepath.Join(directory, revision+".json"), value)
+	return writeBytes(filepath.Join(directory, "current.json"), value)
 }
 func (backup *Backups) Enqueue(ctx context.Context, request BackupRequest, replace bool) (map[string]any, error) {
 	if request.SourceRevision <= 0 || backup.Verify == nil {
@@ -247,6 +265,7 @@ func (backup *Backups) Enqueue(ctx context.Context, request BackupRequest, repla
 		request.Ticket = max(request.Ticket, backup.pending.Ticket+1)
 	}
 	backup.pending = &request
+	backup.pendingHash = hash
 	pending, err := json.Marshal(request)
 	if err != nil {
 		return nil, err
@@ -415,6 +434,11 @@ func (backup *Backups) pruneLocked() {
 	sort.Slice(files, func(i, j int) bool { return files[i].at.After(files[j].at) })
 	for index := 20; index < len(files); index++ {
 		os.Remove(filepath.Join(backup.Directory, files[index].name))
+	}
+	if time.Since(backup.lastMaintenance) >= 24*time.Hour {
+		if maintainBackupAssets(backup.Directory) == nil {
+			backup.lastMaintenance = time.Now()
+		}
 	}
 }
 func (backup *Backups) Accept(ctx context.Context, hash string, request BackupRequest) (map[string]any, error) {

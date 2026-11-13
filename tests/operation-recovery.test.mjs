@@ -47,6 +47,17 @@ test('a later remote edit invalidates conflict resolution and retains both the c
   assert.match(result.conflicts[0].message, /再次变化/);
 });
 
+test('default fields added on restart do not invalidate a conflict resolution baseline', async t=>{
+  const {store,conflict,workspace,replica}=await fixture(t);
+  const sparse=structuredClone(workspace);
+  for(const node of sparse.documents[0].nodes) for(const field of ['bold','italic','underline','strike','highlight','headingLevel','isTodo']) delete node[field];
+  const proposal=conflictResolutionProposal(sparse,replica,conflict,'current');
+  const selected=acceptProposalGroups(sparse,proposal,['resolution']);
+  const local=recordReplicaCommit(replica,sparse,selected,{requestId:'resolve-sparse',digest:'resolve-sparse',source:proposal.source,at:date,resolves:proposal.resolves,resolutionBaselines:proposal.resolutionBaselines});
+  assert.equal(store.operations.submit(local.operation).status,'applied');
+  assert.equal(store.operations.receipt('two').resolved,true);
+});
+
 test('operation inversion restores deleted nodes without overwriting a later independent edit', () => {
   const original = base(), deleted = { ...original, documents: [{ ...original.documents[0], nodes: original.documents[0].nodes.slice(1) }] };
   const deletion = op(original, deleted, 'delete');

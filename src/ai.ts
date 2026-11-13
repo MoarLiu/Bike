@@ -175,6 +175,10 @@ const providerErrorMessage = (data: unknown): string | undefined => {
   if (typeof data.message === "string") return data.message;
   return undefined;
 };
+export const safeAiError = (value: string, secret = "") => {
+  const redacted = secret ? value.split(secret).join("[已隐藏密钥]") : value;
+  return redacted.slice(0, 2000).replace(/<[^>]*>/g, " ").replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim().slice(0, 500) || "AI 服务暂时不可用，请稍后重试";
+};
 
 const requestBodyFor = (config: AiApiConfig, messages: AiMessage[]) => {
   if (config.endpoint === "chat_completions") {
@@ -300,7 +304,9 @@ const parseJsonText = (value: string): unknown => {
     return JSON.parse(trimmed);
   } catch {
     const jsonSlice = firstBalancedJsonSlice(trimmed);
-    if (jsonSlice) return JSON.parse(jsonSlice);
+    if (jsonSlice) {
+      try { return JSON.parse(jsonSlice); } catch { /* Report a stable, actionable error below. */ }
+    }
     throw new Error("AI 返回内容不是有效 JSON");
   }
 };
@@ -448,7 +454,7 @@ export const requestAiJson = async (
       try {
         const result = await bikeBridge.invokeAiProvider(invokePayload);
         signal.throwIfAborted();
-        if (!result.ok) throw new Error(result.error ?? "AI 请求失败");
+        if (!result.ok) throw new Error(safeAiError(result.error ?? "AI 请求失败", normalized.apiKey));
         data = result.data;
       } finally { signal.removeEventListener("abort", cancel); }
     } else {
@@ -468,7 +474,7 @@ export const requestAiJson = async (
     }
     if (!response.ok) {
       const message = providerErrorMessage(data) ?? `AI 请求失败：HTTP ${response.status}`;
-      throw new Error(message);
+      throw new Error(safeAiError(message, normalized.apiKey));
     }
     }
     const text = extractTextFromResponse(data);

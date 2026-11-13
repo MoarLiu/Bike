@@ -6,6 +6,7 @@ import { createServer } from 'node:net';
 import { createHash } from 'node:crypto';
 import { createSecretHash, createSessionSecret } from '../server/password.mjs';
 const archive = path.resolve(process.argv[2]);
+const baselineArchive = process.argv[3] ? path.resolve(process.argv[3]) : archive;
 const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'bike-deploy-candidate-'));
 const run = (command, args) => new Promise((resolve, reject) => {
   const child = spawn(command, args, { cwd: directory, env: process.env, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -15,7 +16,7 @@ const run = (command, args) => new Promise((resolve, reject) => {
 const port = async () => { const server = createServer(); await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve)); const number = server.address().port; await new Promise((resolve) => server.close(resolve)); return number; };
 let child;
 try {
-  await run('tar', ['-xzf', archive]);
+  await run('tar', ['-xzf', baselineArchive]);
   await run('npm', ['ci', '--omit=dev', '--no-audit', '--no-fund']);
   const mcp = await run(process.execPath, ['mcp/bike-server.mjs', '--help']);
   if (!mcp.startsWith('Bike MCP')) throw new Error('deployment package MCP entry is unavailable');
@@ -55,10 +56,24 @@ try {
   if (!attachmentPut.ok) throw new Error('attachment metadata upload failed');
   const legacyPut = await fetch(attachmentUrl, { method: 'PUT', headers: attachmentHeaders, body: JSON.stringify({ expectedRevision: 1, document: { id: attached.id, title: 'Old client', nodes: [] } }) });
   if (legacyPut.status !== 426) throw new Error('old-client overwrite was not rejected');
+  let baselineSpaceId;
+  if (baselineArchive !== archive) {
+    const baselineManifest = await (await fetch(`http://127.0.0.1:${p}/api/sync/manifest`, { headers: attachmentHeaders })).json();
+    const baselineEnable = await fetch(`http://127.0.0.1:${p}/api/v2/enable`, { method: 'POST', headers: attachmentHeaders,
+      body: JSON.stringify({ expectedRevision: baselineManifest.workspaceRevision }) });
+    const baselineStatus = await baselineEnable.json();
+    if (!baselineEnable.ok || baselineStatus.protocol !== 2 || !baselineStatus.enabled) throw new Error('previous server operation-space seed failed');
+    baselineSpaceId = baselineStatus.spaceId;
+  }
   await stop();
   // Re-extract the deployment archive over an existing installation. Preserve
   // real data/config, then prove revision CAS still sees the previous database.
   await run('tar', ['-xzf', archive]);
+  if (baselineArchive !== archive) {
+    await run('npm', ['ci', '--omit=dev', '--no-audit', '--no-fund']);
+    await fs.copyFile(new URL('../mcp/bike-server.smoke.mjs', import.meta.url), path.join(directory, 'mcp/bike-server.smoke.mjs'));
+    await run(process.execPath, ['mcp/bike-server.smoke.mjs']);
+  }
   await start();
   const read = await fetch(`http://127.0.0.1:${p}/api/documents/candidate`, { headers: { Authorization: 'Bearer fixture-device' } });
   const body = await read.json();
@@ -68,13 +83,20 @@ try {
   if (attachmentBody.revision !== 1 || attachmentBody.document.nodes[0].attachmentRefs[0].assetId !== assetId) throw new Error('upgrade or old-client write lost attachment metadata');
   const currentManifest = await (await fetch(`http://127.0.0.1:${p}/api/sync/manifest`, { headers: attachmentHeaders })).json();
   if (!currentManifest.capabilities?.includes('node-operations-v2')) throw new Error('node operation capability is unavailable');
-  const enabled = await fetch(`http://127.0.0.1:${p}/api/v2/enable`, { method: 'POST', headers: attachmentHeaders,
+  if (!currentManifest.capabilities.includes('operation-ordering-v2')) throw new Error('ordering upgrade capability is unavailable');
+  const enabled = await fetch(`http://127.0.0.1:${p}/api/v2/enable?bikeOrdering=2`, { method: 'POST', headers: attachmentHeaders,
     body: JSON.stringify({ expectedRevision: currentManifest.workspaceRevision }) });
-  if (!enabled.ok || (await enabled.json()).protocol !== 2) throw new Error('node operation protocol upgrade failed');
+  const enabledStatus = await enabled.json();
+  if (!enabled.ok || enabledStatus.protocol !== 2) throw new Error('node operation protocol upgrade failed');
+  if (baselineSpaceId && enabledStatus.spaceId !== baselineSpaceId) throw new Error('upgrade changed the existing operation-space identity');
+  for (const capability of ['operation-ordering-v2', 'atomic-commit-chunks-v1', 'document-order-v1'])
+    if (!enabledStatus.capabilities?.includes(capability)) throw new Error(`deployment capability is unavailable: ${capability}`);
   const protectedPut = await fetch(attachmentUrl, { method: 'PUT', headers: attachmentHeaders, body: JSON.stringify({ expectedRevision: 1, document: attached, capabilities: ['attachments-v1'] }) });
   if (protectedPut.status !== 426) throw new Error('old protocol wrote into an upgraded space');
-  const checkpoint = await fetch(`http://127.0.0.1:${p}/api/v2/checkpoint`, { headers: attachmentHeaders });
+  const checkpoint = await fetch(`http://127.0.0.1:${p}/api/v2/checkpoint?bikeOrdering=2`, { headers: attachmentHeaders });
   if (!checkpoint.ok || (await checkpoint.json()).documents.length !== 2) throw new Error('upgraded checkpoint is unavailable');
+  const oldNodeClient = await fetch(`http://127.0.0.1:${p}/api/v2/checkpoint`, { headers: attachmentHeaders });
+  if (oldNodeClient.status !== 426) throw new Error('old ordering client was not rejected');
   const assetBytes = Buffer.from('deployment-original-attachment');
   const hash = createHash('sha256').update(assetBytes).digest('hex');
   const assetUrl = `http://127.0.0.1:${p}/api/v2/assets/${hash}`;
@@ -93,5 +115,5 @@ try {
   const modes = {};
   for (const file of ['config/candidate.json', 'data/candidate.sqlite']) modes[file] = (await fs.stat(path.join(directory, file))).mode & 0o777;
   if (Object.values(modes).some((mode) => mode !== 0o600)) throw new Error('private file modes changed');
-  console.log(JSON.stringify({ runtime: process.version, platform: process.platform, checks: ['clean archive extraction', 'production dependency install', 'MCP entry, shared file-lock dependency and stdio smoke', 'real login Secure cookie', 'built Web page', 'Sync upload', 'attachment capability and HTTP 426 for old-client overwrite', 'archive upgrade and restart preserves revision, content and attachment metadata', 'v2 capability, explicit upgrade, checkpoint and old-protocol protection', 'original attachment lease, upload, verified installation and download', 'private config/database permissions'], modes }, null, 2));
+  console.log(JSON.stringify({ runtime: process.version, platform: process.platform, upgradeFromPreviousArchive: baselineArchive !== archive, checks: ['clean archive extraction', 'production dependency install', 'MCP entry, shared file-lock dependency and stdio smoke', 'real login Secure cookie', 'built Web page', 'Sync upload', 'attachment capability and HTTP 426 for old-client overwrite', 'archive upgrade and restart preserves revision, content and attachment metadata', 'v2 capability, explicit upgrade, checkpoint and old-protocol protection', '2.0.1 ordering, atomic chunks and document order capabilities; old node client HTTP 426', 'original attachment lease, upload, verified installation and download', 'private config/database permissions'], modes }, null, 2));
 } finally { if (child) { child.kill('SIGTERM'); await new Promise((resolve) => child.once('exit', resolve)); } await fs.rm(directory, { recursive: true, force: true }); }

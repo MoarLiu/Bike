@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 
 REPO="${BIKE_REPO:-MoarLiu/Bike}"
-RAW_BASE="${BIKE_RAW_BASE:-https://raw.githubusercontent.com/${REPO}/main}"
+RAW_BASE="${BIKE_RAW_BASE:-https://raw.githubusercontent.com/${REPO}/${BIKE_BOOTSTRAP_REF:-v2.0.1}}"
 
 warn() {
   printf '%s\n' "$*" >&2
@@ -20,7 +20,7 @@ case "${action}" in
 esac
 
 warn "提示：install-sync-server.sh 已更名为 install.sh，建议改用："
-warn "  curl -fsSL ${RAW_BASE}/scripts/install.sh | bash"
+warn "  curl -fsSL ${RAW_BASE}/scripts/install.sh -o bike-install.sh && bash bike-install.sh"
 
 # Only use a sibling install.sh when this shim runs from a file. When piped
 # (curl ... | bash), BASH_SOURCE is empty and dirname would point at the current
@@ -34,7 +34,11 @@ if [[ -n "${script_path}" && -f "${script_path}" ]]; then
 fi
 
 if command -v curl >/dev/null 2>&1; then
-  exec bash -c 'raw="$1"; shift; curl -fsSL "$raw/scripts/install.sh" | bash -s -- "$@"' bash "${RAW_BASE}" "${action}" "${@:2}"
+  temporary="$(mktemp)"
+  trap 'rm -f "${temporary}"' EXIT
+  curl -fsSL -o "${temporary}" "${RAW_BASE}/scripts/install.sh"
+  bash "${temporary}" "${action}" "${@:2}"
+  exit $?
 fi
 
 warn "错误：未找到 install.sh，且当前系统没有 curl。"

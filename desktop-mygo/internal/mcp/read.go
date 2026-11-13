@@ -8,7 +8,6 @@ import (
 	"regexp"
 	"sort"
 	"strings"
-	"time"
 )
 
 func option(args *object, key string, fallback, minimum, maximum int) int {
@@ -54,9 +53,9 @@ func listDocuments(workspace, args *object) *object {
 		}
 	}
 	sort.SliceStable(documents, func(i, j int) bool {
-		a, ae := time.Parse(time.RFC3339Nano, documents[i].String("updatedAt"))
-		b, be := time.Parse(time.RFC3339Nano, documents[j].String("updatedAt"))
-		return ae == nil && be == nil && a.After(b)
+		a, ae := parseDocumentDate(documents[i].String("updatedAt"))
+		b, be := parseDocumentDate(documents[j].String("updatedAt"))
+		return ae && be && a.After(b)
 	})
 	result := []any{}
 	for _, document := range documents[:min(limit, len(documents))] {
@@ -249,6 +248,9 @@ func getDocument(workspace, args *object, live bool) (*object, error) {
 		return nil, err
 	}
 	format := args.String("format")
+	if !live && (format == "json" || format == "markdown") && treeCount(document.Array("nodes")) > 2000 {
+		return nil, fmt.Errorf("主题数超过 2,000，请缩小读取范围")
+	}
 	result := ordered("documentId", document.Get("id"), "title", document.Get("title"))
 	if format == "json" {
 		result.Set("format", format)

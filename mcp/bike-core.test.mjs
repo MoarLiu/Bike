@@ -412,7 +412,7 @@ test("exports node code blocks with language metadata", () => {
   assert.match(documentToMarkdown(workspace.documents[0]), /````js\n  console\.log\('ok'\)\n  ```\n  ~~~\n  ````/);
 });
 
-test("indexes deeply nested outlines without recursive stack overflow", () => {
+test("indexes the supported 256-level boundary without stack overflow", () => {
   let root = {
     id: "deep_0",
     text: "deep 0",
@@ -423,7 +423,7 @@ test("indexes deeply nested outlines without recursive stack overflow", () => {
     children: [],
   };
   let current = root;
-  for (let index = 1; index < 5000; index += 1) {
+  for (let index = 1; index < 256; index += 1) {
     const child = {
       id: `deep_${index}`,
       text: `deep ${index}`,
@@ -452,12 +452,12 @@ test("indexes deeply nested outlines without recursive stack overflow", () => {
   });
   const index = buildWorkspaceIndex(workspace);
 
-  assert.equal(index.nodeCount, 5000);
+  assert.equal(index.nodeCount, 256);
   assert.equal(
     index.nodesByDocumentId.get("doc_deep").byNodeId.get("deep_0").descendantCount,
-    4999,
+    255,
   );
-  assert.match(documentToMarkdown(workspace.documents[0]), /deep 4999/);
+  assert.match(documentToMarkdown(workspace.documents[0]), /deep 255/);
 
   const snapshot = {
     workspace,
@@ -467,13 +467,13 @@ test("indexes deeply nested outlines without recursive stack overflow", () => {
     },
   };
   const compact = getDocument(snapshot, { documentId: "doc_deep", maxDepth: 0 });
-  assert.equal(compact.content.nodeCount, 5000);
+  assert.equal(compact.content.nodeCount, 256);
   assert.equal(compact.content.nodes.length, 1);
   assert.equal(compact.content.nodes[0].children.length, 0);
   assert.equal(compact.content.knowledge.references.total, 0);
   const deepNode = getNode(snapshot, {
     documentId: "doc_deep",
-    nodeId: "deep_4999",
+    nodeId: "deep_255",
     includeAncestors: true,
     childrenDepth: 0,
     format: "json",
@@ -481,8 +481,8 @@ test("indexes deeply nested outlines without recursive stack overflow", () => {
   assert.equal(deepNode.format, "compact");
   assert.equal(deepNode.truncated, true);
   assert.equal(deepNode.ancestors.length, 9);
-  assert.equal(deepNode.ancestors[0].id, "deep_4990");
-  assert.equal(deepNode.ancestors[8].id, "deep_4998");
+  assert.equal(deepNode.ancestors[0].id, "deep_246");
+  assert.equal(deepNode.ancestors[8].id, "deep_254");
 });
 
 test("limits get_node compact output by maxDocumentNodes", async () => {

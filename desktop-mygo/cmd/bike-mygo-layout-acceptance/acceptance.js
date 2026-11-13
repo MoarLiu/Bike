@@ -66,12 +66,27 @@ try {
   await pause(300);
   const started = performance.now();
   if (config.expanded) document.querySelector('[data-node-id="layout-root"] .disclosure').click();
-  await wait(() => document.querySelectorAll('.outline-row').length === (config.expanded ? config.count : 1), 'mounted rows', 60000);
+  const virtualized = config.expanded && config.count > 1000;
+  await wait(() => {
+    const rows = document.querySelectorAll('.outline-row').length;
+    return virtualized ? rows > 1 && rows < 200 : rows === (config.expanded ? config.count : 1);
+  }, 'mounted rows', 60000);
   await frame();
   result.mountMs = performance.now() - started;
   result.mountedRows = document.querySelectorAll('.outline-row').length;
   result.listDisplay = getComputedStyle(document.querySelector('.outline-list')).display;
   result.geometry = geometry();
+  result.virtualized = virtualized;
+  if (virtualized) {
+    const pane = document.querySelector('.editor-pane');
+    pane.scrollTop = pane.scrollHeight;
+    await wait(() => document.querySelector(`[data-node-id="layout-${config.count - 2}"]`), 'last virtual row');
+    result.bottomRows = document.querySelectorAll('.outline-row').length;
+    if (result.bottomRows >= 200) throw new Error('Bottom viewport escaped virtualization');
+    pane.scrollTop = 0;
+    await wait(() => document.querySelector('[data-node-id="layout-0"]'), 'first virtual row');
+    await frame();
+  }
   await checkpoint({ phase: 'mounted', mountMs: result.mountMs, rows: result.mountedRows, listDisplay: result.listDisplay });
   let revision = (await get('workspace-meta')).revision;
   result.initialRevision = revision;

@@ -61,6 +61,7 @@ function harness() {
       });
     }
   };
+  const measure = () => {};
   const component = vm.runInNewContext(compiled, {
     React: { ...React, createElement(type, ...args) {
       if (type === Row) createdRows++;
@@ -68,6 +69,7 @@ function harness() {
     } },
     useMemo, useState, useRef, useEffect,
     useCallback: (callback, dependencies) => useMemo(() => callback, dependencies),
+    useVirtualOutline: (rows) => ({ containerRef: {current:null}, visible: rows.map(row=>({row,gap:0})), trailing:0, measure }),
     OutlineNodeRow: Row, NodeMenu: Menu, flattenNodes, findNode,
     window: { addEventListener() {}, removeEventListener() {} },
     HTMLElement: class HTMLElement {},
@@ -171,9 +173,10 @@ test('every parent row callback replacement invalidates its cached closure', () 
     const replacement = (...args) => calls.push(args);
     const updated = byId(h, h.render({ ...props, [name]: replacement }));
     assert.deepEqual(changed(initial, updated), ['root', 'a', 'b', 'c'], name);
-    assert.equal(updated.get('a').props[name], replacement, name);
-    updated.get('a').props[name]('a', 'latest');
-    assert.deepEqual(calls, [['a', 'latest']], name);
+    if (name !== 'setNodeRef') assert.equal(updated.get('a').props[name], replacement, name);
+    const value = name === 'setNodeRef' ? { closest: () => null } : 'latest';
+    updated.get('a').props[name]('a', value);
+    assert.deepEqual(calls, [['a', value]], name);
   }
 });
 

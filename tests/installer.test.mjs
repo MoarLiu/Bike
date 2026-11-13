@@ -56,6 +56,7 @@ curl() {
   [ -f "$FIXTURE_DIR/$(basename "$url")" ] || return 22
   cp "$FIXTURE_DIR/$(basename "$url")" "$out"
 }
+${installSource.slice(installSource.indexOf("\nsystemd_quote() {"), installSource.indexOf("\n}", installSource.indexOf("\nsystemd_quote() {")) + 2)}
 ${installFunctions("sha256_check", "ensure_system_user")}
 `;
 
@@ -241,6 +242,7 @@ sudo_cmd() { printf '%s\\n' "$*"; }
 mktemp() { printf /dev/null; }
 success() { :; }
 die() { exit 1; }
+${installSource.slice(installSource.indexOf("\nsystemd_quote() {"), installSource.indexOf("\n}", installSource.indexOf("\nsystemd_quote() {")) + 2)}
 ${install}
 install_web_service
 `,
@@ -270,6 +272,7 @@ sudo_cmd() { :; }
 mktemp() { printf '%s' "$UNIT_OUT"; }
 success() { :; }
 die() { exit 1; }
+${installSource.slice(installSource.indexOf("\nsystemd_quote() {"), installSource.indexOf("\n}", installSource.indexOf("\nsystemd_quote() {")) + 2)}
 ${installFunctions("install_web_service", "start_web_service")}
 install_web_service
 `,
@@ -277,7 +280,7 @@ install_web_service
   assert.equal(result.status, 0, result.stderr);
   const service = readFileSync(unit, "utf8").split("[Install]")[0].split("[Service]")[1];
   assert.match(service, /^StateDirectory=bike-web$/m);
-  assert.match(service, /^ReadWritePaths=\/fixture\/bike\/data$/m);
+  assert.match(service, /^ReadWritePaths="\/fixture\/bike\/data"$/m);
   assert.match(service, /^ProtectSystem=full$/m);
 });
 
@@ -375,7 +378,12 @@ test("Legacy sync installer shim never runs an install.sh from the current direc
   const bin = path.join(root, "bin");
   mkdirSync(bin);
   // Stands in for the documented curl bootstrap; nothing touches the network.
-  writeFileSync(path.join(bin, "curl"), "#!/bin/sh\necho 'echo BOOTSTRAP \"$@\"'\n");
+  writeFileSync(path.join(bin, "curl"), `#!/bin/sh
+while [ "$#" -gt 0 ]; do
+  case "$1" in -o) out=$2; shift 2 ;; *) shift ;; esac
+done
+printf '%s\\n' 'echo BOOTSTRAP "$@"' > "$out"
+`);
   chmodSync(path.join(bin, "curl"), 0o755);
   writeFileSync(path.join(root, "install.sh"), "echo DECOY\n");
   const env = { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH}`, BIKE_RAW_BASE: "https://example.invalid/raw" };

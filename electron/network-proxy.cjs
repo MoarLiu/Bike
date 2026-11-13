@@ -3,7 +3,7 @@ const requestJson = async ({ url, method = "GET", headers = {}, body, signal, ti
   network ??= import("../shared/bike-network.mjs");
   const { withRequestBudget, readResponseText } = await network;
   return withRequestBudget({ timeoutMs, signal }, async (requestSignal) => {
-    const response = await fetch(url, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), signal: requestSignal });
+    const response = await fetch(url, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), signal: requestSignal, redirect: "error" });
     const text = await readResponseText(response, { signal: requestSignal, maxBytes });
     let data = null;
     if (text) {

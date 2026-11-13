@@ -15,7 +15,7 @@ function preview(content, onClick) {
   const names = new Set(["MarkdownPreview", "renderInlineMarkdown", "renderMarkdownPreviewList", "buildMarkdownPreviewList", "markdownCellOffset", "splitMarkdownTableRow", "splitEscapedPipe", "isTableSeparator", "isTableStart"]);
   const source = ast.statements.filter((node) => names.has(node.name?.text) || (ts.isVariableStatement(node) && node.declarationList.declarations.some((item) => names.has(item.name.getText(ast))))).map((node) => node.getText(ast)).join("\n");
   const code = ts.transpileModule(`${source}\nMarkdownPreview({ content, documentId: "source" });`, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText;
-  const result = vm.runInNewContext(code, { require: createRequire(import.meta.url), exports: {}, ...markdown, assertTreeBudget: () => {}, scanLinks: knowledge.scanLinks, useMemo: (callback) => callback(), content, openWikiLinkHandler: onClick });
+  const result = vm.runInNewContext(code, { require: createRequire(import.meta.url), exports: {}, ...markdown, ...loadTypescript("src/markdownInline.ts"), assertTreeBudget: () => {}, scanLinks: knowledge.scanLinks, useMemo: (callback) => callback(), content, openWikiLinkHandler: onClick });
   const buttons = [];
   const walk = (element) => {
     if (Array.isArray(element)) { element.forEach(walk); return; }

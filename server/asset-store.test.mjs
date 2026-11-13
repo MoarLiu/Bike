@@ -69,3 +69,22 @@ test('resuming an expired upload renews its lease before another upload performs
   assert.equal((await store.finish(id, resumed.uploadId)).complete, true);
   assert.deepEqual(await fs.readFile(path.join(directory, 'objects', id.slice(7))), bytes);
 });
+
+test('maintenance preserves referenced and young assets and defaults to a dry run', async t => {
+  const { store, directory } = await fixture(t);
+  const values = ['protected', 'old unused', 'young unused'].map(value => Buffer.from(value));
+  const assets = values.map(asset);
+  for (let index = 0; index < assets.length; index++) {
+    const { id, metadata } = assets[index], lease = await store.begin(id, metadata);
+    await store.writeChunk(id, { uploadId: lease.uploadId, offset: 0, bytes: values[index] });
+    await store.finish(id, lease.uploadId);
+    if (index < 2) await fs.utimes(path.join(directory, 'objects', id.slice(7)), new Date(0), new Date(0));
+  }
+  const options = { protectedAssets: new Set([assets[0].id]), before: Date.now() - 30 * 86400000 };
+  const preview = await store.collectUnused(options);
+  assert.deepEqual(preview.candidates.map(item => item.assetId), [assets[1].id]);
+  assert.ok(await fs.stat(path.join(directory, 'objects', assets[1].id.slice(7))));
+  await store.collectUnused({ ...options, apply: true });
+  await assert.rejects(fs.stat(path.join(directory, 'objects', assets[1].id.slice(7))), error => error.code === 'ENOENT');
+  for (const index of [0, 2]) assert.ok(await fs.stat(path.join(directory, 'objects', assets[index].id.slice(7))));
+});

@@ -8,7 +8,7 @@ const root = path.resolve(new URL("..", import.meta.url).pathname);
 const executable = process.env.BIKE_ELECTRON_EXECUTABLE;
 if (!executable) throw new Error("请设置 BIKE_ELECTRON_EXECUTABLE，指向已打包的 Bike 可执行文件");
 const temporary = await fs.mkdtemp(path.join(os.tmpdir(), "bike-update-runtime-"));
-const output = path.join(root, "output/playwright/updates-1.7.0");
+const output = path.join(root, "output/playwright/updates-2.0.1");
 let app;
 try {
   app = await _electron.launch({
@@ -32,6 +32,13 @@ try {
     const { createRequire } = process.getBuiltinModule("module");
     const localRequire = createRequire(app.getAppPath() + "/package.json");
     const { autoUpdater } = localRequire("electron-updater");
+    // Exercise the signed-install UI with controlled certificate metadata.
+    // This does not assert a real Developer ID upgrade on an ad-hoc candidate.
+    const childProcess = localRequire("node:child_process"), originalSpawn = childProcess.spawnSync;
+    childProcess.spawnSync = (command, args, options) => command === "/usr/bin/codesign" && args[0] === "-d"
+      ? { status: 0, stderr: "Authority=Developer ID Application: fixture (FIXTURE123)\n" }
+      : originalSpawn(command, args, options);
+    globalThis.fetch = async () => ({ ok: true, json: async () => [{ tag_name: "v9.0.0" }] });
     globalThis.__updateProof = { calls: [], confirmations: [], choices: [0, 0, 0, 1] };
     dialog.showMessageBox = async (...args) => {
       const options = args.at(-1);
@@ -40,14 +47,14 @@ try {
     };
     autoUpdater.checkForUpdates = async () => {
       globalThis.__updateProof.calls.push("check");
-      autoUpdater.emit("update-available", { version: "1.7.1" });
+      autoUpdater.emit("update-available", { version: "9.0.0" });
       return {};
     };
     autoUpdater.downloadUpdate = async () => {
       globalThis.__updateProof.calls.push("download");
       autoUpdater.emit("download-progress", { percent: 40 });
       await new Promise((resolve) => { globalThis.__finishUpdateDownload = resolve; });
-      autoUpdater.emit("update-downloaded", { version: "1.7.1" });
+      autoUpdater.emit("update-downloaded", { version: "9.0.0" });
       return [];
     };
     autoUpdater.quitAndInstall = () => { globalThis.__updateProof.calls.push("install"); };

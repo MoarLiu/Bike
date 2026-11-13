@@ -12,10 +12,8 @@ jobs:
     timeout-minutes: 45
     environment: macos-release
     env:
-      CSC_LINK: ${{ secrets.MAC_CERTIFICATE_P12 }}
-      CSC_KEY_PASSWORD: ${{ secrets.MAC_CERTIFICATE_PASSWORD }}
-      CSC_NAME: ${{ secrets.MAC_SIGNING_IDENTITY }}
       APPLE_KEYCHAIN_PROFILE: bike-ci-notary
+      BIKE_EXPECTED_TEAM_ID: ${{ vars.MAC_TEAM_ID }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
@@ -23,6 +21,7 @@ jobs:
           node-version: 22.13.0
           cache: npm
       - run: npm ci
+      - run: npm run check
       - name: Configure notarization credentials
         env:
           NOTARY_KEY_P8: ${{ secrets.NOTARY_KEY_P8 }}
@@ -30,16 +29,46 @@ jobs:
           NOTARY_ISSUER: ${{ secrets.NOTARY_ISSUER }}
         run: |
           umask 077
-          test -n "$CSC_LINK" && test -n "$CSC_NAME" && test -n "$NOTARY_KEY_P8"
+          : "${NOTARY_KEY_P8:?Missing NOTARY_KEY_P8}"
+          : "${NOTARY_KEY_ID:?Missing NOTARY_KEY_ID}"
+          : "${NOTARY_ISSUER:?Missing NOTARY_ISSUER}"
+          : "${BIKE_EXPECTED_TEAM_ID:?Missing MAC_TEAM_ID variable}"
           printf '%s' "$NOTARY_KEY_P8" > "$RUNNER_TEMP/bike-notary.p8"
           xcrun notarytool store-credentials "$APPLE_KEYCHAIN_PROFILE" --key "$RUNNER_TEMP/bike-notary.p8" --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER"
-      - run: npm run electron:dist:signed
+      - name: Check signing prerequisites
+        env:
+          CSC_LINK: ${{ secrets.MAC_CERTIFICATE_P12 }}
+          CSC_KEY_PASSWORD: ${{ secrets.MAC_CERTIFICATE_PASSWORD }}
+          CSC_NAME: ${{ secrets.MAC_SIGNING_IDENTITY }}
+        run: npm run release:preflight:signed
+      - name: Sign and notarize checked candidate
+        env:
+          CSC_LINK: ${{ secrets.MAC_CERTIFICATE_P12 }}
+          CSC_KEY_PASSWORD: ${{ secrets.MAC_CERTIFICATE_PASSWORD }}
+          CSC_NAME: ${{ secrets.MAC_SIGNING_IDENTITY }}
+        run: node scripts/build-signed-mac.mjs
+      - name: Verify Developer ID signature, notarization and update manifest
+        run: npm run release:verify:signed -- --json
       - name: Verify packaged attachment and update flows
         env:
           BIKE_ELECTRON_EXECUTABLE: ${{ github.workspace }}/release/mac-arm64/Bike.app/Contents/MacOS/Bike
         run: |
           npm run test:attachments-runtime
           npm run test:updates-runtime
+      - name: Upload signed candidate
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: bike-signed-${{ github.run_number }}
+          path: |
+            release/Bike-*-arm64.dmg
+            release/Bike-*-arm64.zip
+            release/Bike-*-arm64.dmg.blockmap
+            release/Bike-*-arm64.zip.blockmap
+            release/Bike-*-arm64.*.sha256
+            release/latest-mac.yml
+            release/signature-verification.json
+          if-no-files-found: error
+          retention-days: 14
       - name: Remove temporary notarization key
         if: always()
         run: rm -f "$RUNNER_TEMP/bike-notary.p8"

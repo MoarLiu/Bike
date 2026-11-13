@@ -70,6 +70,10 @@ export const createAssetStore = async ({ directory, quotaBytes = 2 * 1024 * 1024
         const current = await verifyFile(target.object, assetId);
         if (current.valid && current.size === metadata.byteLength) {
           if (['mediaType', 'width', 'height'].some((key) => current.metadata[key] !== metadata[key])) throw fail('附件格式与清单不一致', 422, 'asset_metadata');
+          // Renew the grace period before a client publishes a new reference
+          // to an existing object.
+          const now = new Date();
+          await fs.utimes(target.object, now, now);
           await fs.rm(target.partial, { force: true }); await fs.rm(target.lease, { force: true });
           return { complete: true, offset: current.size, byteLength: current.size };
         }
@@ -169,5 +173,29 @@ export const createAssetStore = async ({ directory, quotaBytes = 2 * 1024 * 1024
     const size = Math.min(length, stat.size - offset);
     return { file, offset, length: size, byteLength: stat.size };
   };
-  return { begin, writeChunk, finish, reset, openChunk, quotaBytes };
+  const collectUnused = async ({ protectedAssets, before, apply = false }) => {
+    if (!(protectedAssets instanceof Set) || !Number.isFinite(before)) throw fail('附件维护参数无效');
+    const candidates = [];
+    return withWorkspaceWriteLock(path.join(root, 'quota'), async () => {
+      for (const entry of await fs.readdir(objects, { withFileTypes: true })) {
+        if (!/^[a-f0-9]{64}$/u.test(entry.name)) continue;
+        if (!entry.isFile() || entry.isSymbolicLink()) throw fail('附件对象不是普通文件，已停止维护', 500);
+        const assetId = `sha256:${entry.name}`;
+        if (protectedAssets.has(assetId)) continue;
+        const target = paths(assetId);
+        await withWorkspaceWriteLock(target.lock, async () => {
+          const stat = await fileExists(target.object);
+          if (!stat || stat.mtimeMs >= before || await fileExists(target.lease)) return;
+          candidates.push({ assetId, byteLength: stat.size });
+          if (apply) await fs.unlink(target.object);
+        });
+      }
+      if (apply && candidates.length) {
+        const folder = await fs.open(objects, 'r');
+        try { await folder.sync(); } finally { await folder.close(); }
+      }
+      return { applied: apply, candidates, byteLength: candidates.reduce((sum, item) => sum + item.byteLength, 0), protectedCount: protectedAssets.size };
+    });
+  };
+  return { begin, writeChunk, finish, reset, openChunk, quotaBytes, collectUnused };
 };

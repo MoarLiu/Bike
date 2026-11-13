@@ -1,0 +1,21 @@
+name: Release channel isolation
+on:
+  release:
+    types: [published, edited]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  stable-channel:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Assert repository Latest belongs to the desktop v channel
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          tag="$(gh api "repos/${REPOSITORY}/releases/latest" --jq .tag_name)"
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            printf 'Repository Latest must point to a stable v* desktop release, got %s\n' "$tag" >&2
+            exit 1
+          fi

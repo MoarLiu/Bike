@@ -27,7 +27,10 @@ export const conflictResolutionProposal = (workspace: Workspace, replica: Replic
       if (original.type === 'create-document' && document) {
         candidate = { ...candidate, documents: candidate.documents.map((item) => item.id === document.id ? original.document! : item) }; continue;
       }
-      if (original.type === 'field') {
+      if (original.type === 'replace-document') {
+        if (!document) throw new Error('候选文档已删除，请先恢复为副本');
+        changes.push({ ...original, before: document });
+      } else if (original.type === 'field') {
         const value = original.nodeId === null ? document as unknown as Record<string, unknown> : node?.value;
         if (!value) throw new Error('候选主题已删除，请先在编辑器中恢复为副本，再保留当前值解决冲突');
         changes.push({ ...original, before: slot(value, original.field!) });

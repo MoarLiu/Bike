@@ -9,6 +9,7 @@ import { PDFDict, PDFDocument, PDFRawStream, PDFName } from 'pdf-lib';
 import yauzl from 'yauzl';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
+const productVersion = JSON.parse(await fs.readFile(path.join(root, 'package.json'), 'utf8')).version;
 const desktop = path.join(root, 'desktop-mygo');
 const value = name => process.argv.find(argument => argument.startsWith(name + '='))?.slice(name.length + 1);
 const build = process.env.BIKE_MYGO_BUILD ?? '1';
@@ -19,7 +20,7 @@ const bundle = path.join(bundleDirectory, 'Bike MyGO UI Acceptance.app');
 const binary = path.join(bundle, 'Contents/MacOS/bike-mygo-ui-acceptance');
 const go = process.env.BIKE_MYGO_GO ?? 'go';
 const staged = path.join(desktop, 'internal/frontend/dist');
-const manifestPath = path.join(root, `release/mygo/2.0.0/build-${build}-${channel}/build-manifest.json`);
+const manifestPath = path.join(root, `release/mygo/${productVersion}/build-${build}-${channel}/build-manifest.json`);
 const run = (executable, arguments_, options = {}) => {
   const result = spawnSync(executable, arguments_, { encoding: 'utf8', cwd: root, maxBuffer: 8 * 1024 * 1024, ...options });
   assert.equal(result.status, 0, `${executable} exited ${result.status}\n${result.stdout}\n${result.stderr}\n${result.error ?? ''}`);
@@ -71,9 +72,9 @@ const helperReceipt = path.join(bundleDirectory, 'helper-build.json');
 if (!process.argv.includes('--reuse-helper')) {
   await fs.mkdir(path.dirname(binary), { recursive: true });
   run(go, ['build', '-mod=readonly', '-trimpath', '-tags', 'mygo_noinspector,mygo_frontend',
-    '-ldflags', '-s -w -X github.com/egoist/mygo.production=1 -X github.com/egoist/mygo.packageIdentifier=com.bike.mygo.ui-acceptance -X github.com/egoist/mygo.packageVersion=2.0.0',
+    '-ldflags', `-s -w -X github.com/egoist/mygo.production=1 -X github.com/egoist/mygo.packageIdentifier=com.bike.mygo.ui-acceptance -X github.com/egoist/mygo.packageVersion=${productVersion}`,
     '-o', binary, './cmd/bike-mygo-ui-acceptance'], { cwd: desktop, env });
-  const plist = `<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict><key>CFBundleName</key><string>Bike MyGO UI Acceptance</string><key>CFBundleIdentifier</key><string>com.bike.mygo.ui-acceptance</string><key>CFBundleExecutable</key><string>bike-mygo-ui-acceptance</string><key>CFBundlePackageType</key><string>APPL</string><key>CFBundleShortVersionString</key><string>2.0.0</string><key>CFBundleVersion</key><string>${build}</string><key>LSMinimumSystemVersion</key><string>12.0</string><key>NSPrincipalClass</key><string>NSApplication</string></dict></plist>\n`;
+  const plist = `<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict><key>CFBundleName</key><string>Bike MyGO UI Acceptance</string><key>CFBundleIdentifier</key><string>com.bike.mygo.ui-acceptance</string><key>CFBundleExecutable</key><string>bike-mygo-ui-acceptance</string><key>CFBundlePackageType</key><string>APPL</string><key>CFBundleShortVersionString</key><string>${productVersion}</string><key>CFBundleVersion</key><string>${build}</string><key>LSMinimumSystemVersion</key><string>12.0</string><key>NSPrincipalClass</key><string>NSApplication</string></dict></plist>\n`;
   await fs.writeFile(path.join(bundle, 'Contents/Info.plist'), plist);
   run('/usr/bin/codesign', ['--force', '--sign', '-', bundle]);
   run('/usr/bin/codesign', ['--verify', '--strict', bundle]);

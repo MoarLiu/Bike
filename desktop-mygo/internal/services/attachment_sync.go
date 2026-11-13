@@ -265,6 +265,9 @@ func (syncer *AssetSync) Run(ctx context.Context, config map[string]any, assets 
 		return nil, fmt.Errorf("附件同步仍在进行")
 	}
 	defer syncer.runMu.Unlock()
+	if err := CleanupTransferFiles(syncer.Directory); err != nil {
+		return nil, err
+	}
 	if strings.TrimSpace(text(config, "token")) == "" {
 		return nil, fmt.Errorf("请先保存同步服务地址和设备密钥")
 	}

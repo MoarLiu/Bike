@@ -11,7 +11,7 @@ func TestPreviewIsolation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Identifier != "com.bike.mygo.preview" || info.Profile != "Bike-MyGO-preview" || info.TagPrefix != "mygo-v" || info.Version != "2.0.0" {
+	if info.Identifier != "com.bike.mygo.preview" || info.Profile != "Bike-MyGO-preview" || info.TagPrefix != "mygo-v" || info.Version != "2.0.1" {
 		t.Fatalf("identity drift: %+v", info)
 	}
 	if info.TargetMinimumSystemVersion != "12.0" || info.MinimumSystemVersion != "12.0" || info.GoExperiment != "jsonv2" || info.MyGOCompatibilityPatch != "go126-jsonv2-compatibility-1" {

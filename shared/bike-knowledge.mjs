@@ -2045,7 +2045,7 @@ export const renameNavigationFilter = (state, id, name) => ({
 export const pruneNavigation = (state, { liveIds, trashIds }) => {
   const live = new Set(liveIds);
   const known = new Set([...liveIds, ...trashIds]);
-  return {
+  const result = {
     ...state,
     favorites: state.favorites.filter((id) => known.has(id)),
     recent: state.recent.filter((item) => live.has(item.documentId)),
@@ -2054,6 +2054,7 @@ export const pruneNavigation = (state, { liveIds, trashIds }) => {
       broken: filter.documentIds.some((id) => !live.has(id)),
     })),
   };
+  return JSON.stringify(result) === JSON.stringify(state) ? state : result;
 };
 
 export const resetRecentOpens = (state) => ({ ...state, recent: [] });

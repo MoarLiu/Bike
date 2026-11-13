@@ -103,8 +103,8 @@ func Run(ctx context.Context, options Options) (result *Result, err error) {
 		return nil, fmt.Errorf("--electron-app must identify the original com.bike.app application")
 	}
 	version, err := command(ctx, "/usr/bin/plutil", "-extract", "CFBundleShortVersionString", "raw", "-o", "-", plist)
-	if err != nil || version != "2.0.0" {
-		return nil, fmt.Errorf("source exporter requires the installed Electron Bike 2.0.0 application")
+	if err != nil || (version != "2.0.0" && version != "2.0.1") {
+		return nil, fmt.Errorf("source exporter requires the installed Electron Bike 2.0.0 or 2.0.1 application")
 	}
 	executable, err := command(ctx, "/usr/bin/plutil", "-extract", "CFBundleExecutable", "raw", "-o", "-", plist)
 	if err != nil || executable == "" || filepath.Base(executable) != executable {

@@ -116,7 +116,19 @@ const writableNodeSchema = z.object({
   isTodo: z.boolean().optional(),
   children: z.array(z.any()).optional().default([]),
 }).superRefine((value, context) => {
-  try { assertValueBudget(value, { maxDepth: 128, maxBytes: 4 * 1024 * 1024 }); }
+  try {
+    assertValueBudget(value, { maxDepth: 128, maxBytes: 4 * 1024 * 1024 });
+    const stack = [...value.children];
+    while (stack.length) {
+      const node = stack.pop();
+      if (!node || typeof node !== "object" || Array.isArray(node)) throw new Error("子主题必须是对象");
+      for (const [key, limit] of Object.entries({ text: 10_000, note: 50_000, codeBlock: 50_000, codeLanguage: 80 })) {
+        if (node[key] !== undefined && (typeof node[key] !== "string" || node[key].length > limit)) throw new Error(`子主题 ${key} 超过 ${limit} 字符或类型无效`);
+      }
+      if (node.children !== undefined && !Array.isArray(node.children)) throw new Error("子主题 children 必须是数组");
+      stack.push(...(node.children ?? []));
+    }
+  }
   catch (error) { context.addIssue({ code: "custom", message: error.message }); }
 });
 
@@ -468,22 +480,22 @@ export const createBikeMcpServer = async ({
   registerResource(
     "document",
     new ResourceTemplate("bike://document/{documentId}", {
-      list: async () => {
+      list: guarded(async () => {
         const current = await snapshot();
         return {
           resources: current.workspace.documents.map((document) =>
             documentResourceMetadata(document, "compact"),
           ),
         };
-      },
+      }),
       complete: {
-        documentId: async (value) => {
+        documentId: guarded(async (value) => {
           const current = await snapshot();
           return current.workspace.documents
             .filter((document) => document.title.includes(value) || document.id.includes(value))
             .slice(0, 20)
             .map((document) => document.id);
-        },
+        }),
       },
     }),
     {
@@ -504,22 +516,22 @@ export const createBikeMcpServer = async ({
   registerResource(
     "document-markdown",
     new ResourceTemplate("bike://document-markdown/{documentId}", {
-      list: async () => {
+      list: guarded(async () => {
         const current = await snapshot();
         return {
           resources: current.workspace.documents.map((document) =>
             documentResourceMetadata(document, "markdown"),
           ),
         };
-      },
+      }),
       complete: {
-        documentId: async (value) => {
+        documentId: guarded(async (value) => {
           const current = await snapshot();
           return current.workspace.documents
             .filter((document) => document.title.includes(value) || document.id.includes(value))
             .slice(0, 20)
             .map((document) => document.id);
-        },
+        }),
       },
     }),
     {
@@ -543,13 +555,13 @@ export const createBikeMcpServer = async ({
     new ResourceTemplate("bike://node/{documentId}/{nodeId}", {
       list: undefined,
       complete: {
-        documentId: async (value) => {
+        documentId: guarded(async (value) => {
           const current = await snapshot();
           return current.workspace.documents
             .filter((document) => document.title.includes(value) || document.id.includes(value))
             .slice(0, 20)
             .map((document) => document.id);
-        },
+        }),
       },
     }),
     {

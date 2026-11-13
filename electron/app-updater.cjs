@@ -1,19 +1,21 @@
 const crypto = require("node:crypto");
+const { fetchLatestRelease } = require("./update-checker.cjs");
 
 const UPDATE_FEED = Object.freeze({ provider: "github", owner: "MoarLiu", repo: "Bike" });
 const updateError = (error) => {
   if (error.code === "ERR_UPDATE_SAVE") return error.message;
   if (error.code === "ERR_UPDATER_ZIP_FILE_NOT_FOUND") return "发布版本缺少 macOS ZIP 更新包，请等待发布者补齐";
-  if (error.code === "ERR_UPDATER_INVALID_SIGNATURE") return "更新签名校验失败，请稍后重试";
+  if (error.code === "ERR_UPDATER_INVALID_SIGNATURE" || /signature|code sign/i.test(error.message ?? "")) return "当前应用或更新包的签名不支持自动安装，请打开发布页手动下载";
   return "更新检查或下载失败，请检查网络后重试";
 };
 
-const createUpdateController = ({ updater, currentVersion, supported, onState = () => {}, prepareInstall }) => {
+const createUpdateController = ({ updater, currentVersion, supported, manualOnly = false, onState = () => {}, prepareInstall, fetchRelease = fetchLatestRelease, resolveRelease }) => {
   let state = { status: "idle", currentVersion, latestVersion: "", updateAvailable: false, progress: 0 };
   let checking;
   let downloading;
   let installing;
   let cancellationToken;
+  let selectedVersion;
   const snapshot = () => ({ ...state });
   const publish = (patch) => {
     state = { ...state, error: undefined, ...patch };
@@ -25,9 +27,11 @@ const createUpdateController = ({ updater, currentVersion, supported, onState = 
   updater.allowPrerelease = false;
   updater.allowDowngrade = false;
   updater.setFeedURL(UPDATE_FEED);
-  updater.on("update-available", (info) => publish({
-    status: "available", latestVersion: info.version, updateAvailable: true, progress: 0,
-  }));
+  updater.on("update-available", (info) => {
+    if (selectedVersion && info.version !== selectedVersion) {
+      publish({ status: "error", error: "更新清单与所选正式版本不一致，请打开发布页核对" });
+    } else publish({ status: "available", latestVersion: info.version, updateAvailable: true, progress: 0 });
+  });
   updater.on("update-not-available", () => publish({ status: "not-available", updateAvailable: false }));
   updater.on("download-progress", (info) => {
     if (state.status === "downloading") publish({ progress: Math.max(0, Math.min(100, Number(info.percent) || 0)) });
@@ -40,9 +44,28 @@ const createUpdateController = ({ updater, currentVersion, supported, onState = 
   const check = () => {
     if (!supported) return Promise.resolve(publish({ status: "unsupported", error: "应用内更新通过已安装的 macOS 桌面版使用" }));
     if (checking) return checking;
+    if (manualOnly) {
+      publish({ status: "checking" });
+      checking = Promise.resolve(fetchRelease({ currentVersion })).then(info => publish({
+        ...info, status: info.updateAvailable ? "manual" : "not-available", manualOnly: true,
+      })).catch(error => publish({ status: "error", manualOnly: true, error: updateError(error) }))
+        .finally(() => { checking = undefined; });
+      return checking;
+    }
     if (["downloading", "downloaded", "preparing", "installing"].includes(state.status)) return Promise.resolve(snapshot());
     publish({ status: "checking", latestVersion: "", updateAvailable: false, progress: 0 });
-    checking = Promise.resolve().then(() => updater.checkForUpdates()).then((result) => {
+    checking = Promise.resolve().then(async () => {
+      if (resolveRelease) {
+        const release = await resolveRelease({ currentVersion });
+        if (!/^\d+\.\d+\.\d+$/.test(release.latestVersion)) throw new Error("Invalid stable release version");
+        if (!release.updateAvailable) { publish({ status: "not-available", updateAvailable: false }); return null; }
+        selectedVersion = release.latestVersion;
+        // Pin to the already filtered v* release, independent of GitHub's
+        // repository-wide Latest pointer (MyGO/mobile have separate channels).
+        updater.setFeedURL({ provider: "generic", url: `https://github.com/MoarLiu/Bike/releases/download/v${selectedVersion}/`, useMultipleRangeRequest: false });
+      }
+      return updater.checkForUpdates();
+    }).then((result) => {
       cancellationToken = result?.cancellationToken;
       if (state.status === "checking") throw new Error("Update check did not complete");
       return snapshot();

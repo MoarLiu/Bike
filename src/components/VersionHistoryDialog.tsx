@@ -1,3 +1,4 @@
+import { Modal } from "./Modal";
 import { useEffect, useState } from "react";
 import { History, RotateCcw, Save, X } from "lucide-react";
 import type { OperationAudit, ReplicaConflict } from "../../shared/bike-replica.mjs";
@@ -7,6 +8,7 @@ import type { OutlineDocument } from "../types";
 import {
   diffDocuments,
   previewLines,
+  getHistoryWarning,
   type DocumentSnapshot,
 } from "../versionHistory";
 
@@ -66,7 +68,7 @@ export function VersionHistoryDialog({
   const titleChanged = selected && selected.document.title !== document.title;
 
   return (
-    <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="版本历史" onClick={() => !busy && onClose()}>
+    <Modal onDismiss={() => !busy && onClose()} className="modal-overlay" role="dialog" aria-modal="true" aria-label="版本历史" onClick={() => !busy && onClose()}>
       <section className="workspace-dialog history-dialog" onClick={(event) => event.stopPropagation()}>
         <header>
           <div>
@@ -77,6 +79,7 @@ export function VersionHistoryDialog({
             <X size={16} />
           </button>
         </header>
+        {getHistoryWarning(document.id) && <p role="status">{getHistoryWarning(document.id)}</p>}
 
         <nav className="workflow-actions" aria-label="历史分类">
           <button type="button" className="control-button compact" onClick={() => setTab("versions")}>版本快照</button><button type="button" className="control-button compact" onClick={() => setTab("operations")}>操作与同步历史</button>
@@ -161,6 +164,6 @@ export function VersionHistoryDialog({
           </button>
         </footer>
       </section>
-    </div>
+    </Modal>
   );
 }

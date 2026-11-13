@@ -146,6 +146,25 @@ export function createFakeIndexedDB(tasks = createTaskQueue()) {
       });
     }
 
+    openCursor() {
+      const tx = this.transaction, name = this.name;
+      let keys, root;
+      const next = index => tx._request(this, () => {
+        keys ??= [...new Set([
+          ...tx.db._data.stores.get(name).keys(),
+          ...[...tx._staged.values()].filter(item => item.storeName === name).map(item => item.key),
+        ])].sort();
+        const key = keys[index];
+        if (key === undefined) return null;
+        return { key, value: tx._read(name, key), continue() {
+          const step = next(index + 1);
+          step.onsuccess = event => { root._result = step.result; root.onsuccess?.(event); };
+        } };
+      });
+      root = next(0);
+      return root;
+    }
+
     put(value, key) {
       const tx = this.transaction;
       tx._assertActive();

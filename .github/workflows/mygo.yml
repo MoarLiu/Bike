@@ -2,7 +2,7 @@ name: MyGO candidate checks
 
 on:
   push:
-    branches: ['codex/mygo-*']
+    branches: ['main', 'codex/**']
   pull_request:
     paths:
       - 'desktop-mygo/**'
@@ -13,6 +13,8 @@ on:
       - 'electron/preload.cjs'
       - 'package*.json'
       - 'vite.config.ts'
+      - 'index.html'
+      - 'tsconfig*.json'
       - '.github/workflows/mygo.yml'
   workflow_dispatch:
 
@@ -50,12 +52,14 @@ jobs:
       - run: npm run mygo:test
       - run: npm run mygo:test:race
       - run: npm run mygo:build
+      - run: git diff --exit-code -- desktop-mygo/bindings/mygo.ts desktop-mygo/tests/fixtures
+      - run: cd desktop-mygo && go build ./cmd/...
       - run: npm run mygo:test:mcp
       - run: npm run mygo:test:runtime
       - run: npm run mygo:test:interop
       - run: npm run mygo:dist:mac
       - run: npm run mygo:verify:package
-      - run: git diff --check
+      - run: git show --format= --check HEAD && git diff --check
       - name: Retain candidate artifacts and local evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

@@ -1,5 +1,6 @@
-const DEFAULT_RELEASES_API_URL = "https://api.github.com/repos/MoarLiu/Bike/releases/latest";
+const DEFAULT_RELEASES_API_URL = "https://api.github.com/repos/MoarLiu/Bike/releases?per_page=100";
 const DEFAULT_RELEASES_PAGE_URL = "https://github.com/MoarLiu/Bike/releases";
+const { safeReleaseUrl } = require("./ipc-guard.cjs");
 
 const normalizeVersion = (value) =>
   String(value ?? "")
@@ -45,9 +46,7 @@ const resultFromRelease = ({ currentVersion, release, releasesPageUrl = DEFAULT_
     releaseName: typeof release.name === "string" && release.name.trim()
       ? release.name.trim()
       : `v${latestVersion}`,
-    releaseUrl: typeof release.html_url === "string" && release.html_url
-      ? release.html_url
-      : releasesPageUrl,
+    releaseUrl: safeReleaseUrl(release.html_url, releasesPageUrl),
     publishedAt: typeof release.published_at === "string" ? release.published_at : "",
   };
 };
@@ -78,7 +77,11 @@ const fetchLatestRelease = async ({
       }
       throw new Error(`更新检查失败：HTTP ${response.status}`);
     }
-    const release = await response.json();
+    const releases = await response.json();
+    const release = Array.isArray(releases) ? releases
+      .filter(item => !item.draft && !item.prerelease && /^v\d+\.\d+\.\d+$/.test(item.tag_name))
+      .sort((left, right) => compareVersions(right.tag_name, left.tag_name))[0] : releases;
+    if (!release || !/^v\d+\.\d+\.\d+$/.test(release.tag_name)) throw new Error("尚无可用的 Electron 正式版本");
     return resultFromRelease({ currentVersion, release, releasesPageUrl });
   } catch (error) {
     if (error?.name === "AbortError") {

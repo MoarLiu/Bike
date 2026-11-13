@@ -354,11 +354,11 @@ func sourceKey(source *object) string {
 	}
 	return source.String("kind") + ":" + source.String("nodeId") + ":" + source.String("field")
 }
-func referenceStatus(workspace, document, reference *object) string {
+func referenceStatus(workspace, document, reference *object, lookup func(*object, string) *object) string {
 	source, target := reference.Child("source"), reference.Child("target")
 	value := document.String("markdownSource")
 	if source.String("kind") != "markdown" {
-		node, _, _, _ := nodeByID(document, source.String("nodeId"))
+		node := lookup(document, source.String("nodeId"))
 		value = node.String(source.String("field"))
 	}
 	start, _ := source.Get("start").(float64)
@@ -380,9 +380,9 @@ func referenceStatus(workspace, document, reference *object) string {
 		return "missing"
 	}
 	if target.String("nodeId") != "" {
-		if _, _, _, err := nodeByID(dest, target.String("nodeId")); err != nil {
+		if lookup(dest, target.String("nodeId")) == nil {
 			if trashed != nil {
-				if _, _, _, err := nodeByID(trashed, target.String("nodeId")); err == nil {
+				if lookup(trashed, target.String("nodeId")) != nil {
 					return "deleted"
 				}
 			}
@@ -392,7 +392,11 @@ func referenceStatus(workspace, document, reference *object) string {
 	return "resolved"
 }
 func connections(workspace, document *object) []connection {
-	knowledge := anchorKnowledge(document)
+	origins := map[int]markdownOrigin{}
+	if document.Has("markdownSource") {
+		origins = markdownOrigins(document)
+	}
+	knowledge := anchorKnowledgeWithOrigins(document, origins)
 	if document.Has("knowledge") && document.Get("knowledge") != nil && !knowledgeEditable(knowledge) {
 		return []connection{}
 	}
@@ -400,6 +404,34 @@ func connections(workspace, document *object) []connection {
 	guarded := map[string]map[string]bool{}
 	visited := map[*object]bool{}
 	result := []connection{}
+	nodeMaps := map[*object]map[string]*object{}
+	lookup := func(document *object, id string) *object {
+		if document == nil {
+			return nil
+		}
+		index, ok := nodeMaps[document]
+		if !ok {
+			index = map[string]*object{}
+			stack := append([]any{}, document.Array("nodes")...)
+			for len(stack) > 0 {
+				node := asObject(stack[len(stack)-1])
+				stack = stack[:len(stack)-1]
+				index[node.String("id")] = node
+				stack = append(stack, node.Array("children")...)
+			}
+			nodeMaps[document] = index
+		}
+		return index[id]
+	}
+	statuses := map[*object]string{}
+	statusFor := func(reference *object) string {
+		if status, ok := statuses[reference]; ok {
+			return status
+		}
+		status := referenceStatus(workspace, document, reference, lookup)
+		statuses[reference] = status
+		return status
+	}
 	guard := func(key, raw string) {
 		if guarded[key] == nil {
 			guarded[key] = map[string]bool{}
@@ -411,7 +443,7 @@ func connections(workspace, document *object) []connection {
 		source := reference.Child("source")
 		key := sourceKey(source)
 		fields[key] = append(fields[key], reference)
-		if referenceStatus(workspace, document, reference) == "sourceMismatch" {
+		if statusFor(reference) == "sourceMismatch" {
 			guard(key, source.String("raw"))
 			if group := knowledge.Child("sourceGroups").Child(source.String("groupId")); group != nil {
 				for _, raw := range group.Array("candidates") {
@@ -437,7 +469,7 @@ func connections(workspace, document *object) []connection {
 					break
 				}
 			}
-			result = append(result, connection{status: referenceStatus(workspace, document, reference), raw: source.String("raw"), label: label, documentID: document.String("id"), field: field, nodeID: nodeID, target: reference.Child("target")})
+			result = append(result, connection{status: statusFor(reference), raw: source.String("raw"), label: label, documentID: document.String("id"), field: field, nodeID: nodeID, target: reference.Child("target")})
 		}
 		for index, link := range links {
 			if used[index] || guarded[key][link.raw] || skip[link.start] {
@@ -447,22 +479,15 @@ func connections(workspace, document *object) []connection {
 			result = append(result, connection{status: status, raw: link.raw, label: link.label, documentID: document.String("id"), field: field, nodeID: nodeID, resolvedDocument: documentID, resolvedNode: resolvedNode})
 		}
 	}
-	rawCounts := map[string]int{}
 	walkNodes(document.Array("nodes"), func(node *object, _ []int, _ []*object) {
 		for _, field := range []string{"text", "note"} {
-			for _, link := range scanWiki(node.String(field)) {
-				rawCounts[link.raw]++
-			}
 			consume(node.String(field), "node-field", field, node.Get("id"), nil)
 		}
 	})
 	if document.Has("markdownSource") {
 		skip := map[int]bool{}
-		for _, link := range scanWiki(document.String("markdownSource")) {
-			if rawCounts[link.raw] > 0 {
-				skip[link.start] = true
-				rawCounts[link.raw]--
-			}
+		for at := range origins {
+			skip[at] = true
 		}
 		consume(document.String("markdownSource"), "markdown", "markdown", nil, skip)
 	}
@@ -476,7 +501,7 @@ func connections(workspace, document *object) []connection {
 		if field == "" {
 			field = "markdown"
 		}
-		result = append(result, connection{status: referenceStatus(workspace, document, reference), raw: source.String("raw"), documentID: document.String("id"), field: field, nodeID: source.Get("nodeId"), target: reference.Child("target")})
+		result = append(result, connection{status: statusFor(reference), raw: source.String("raw"), documentID: document.String("id"), field: field, nodeID: source.Get("nodeId"), target: reference.Child("target")})
 	}
 	return result
 }

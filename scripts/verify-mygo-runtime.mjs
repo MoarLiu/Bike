@@ -24,7 +24,7 @@ const directory = path.join(root, 'output/mygo', `runtime-${Date.now()}`);
 await fs.mkdir(directory, { recursive: true });
 const results = [];
 const run = async (mode) => {
-  const result = spawnSync(binary, ['--mode', mode, '--output', directory], {
+  const result = spawnSync(binary, ['--mode', mode, '--output', directory, ...(mode === 'ui' && process.env.BIKE_PROBE_NATIVE_ESCAPE === '1' ? ['--native-escape'] : [])], {
     encoding: 'utf8', timeout: 55000, killSignal: 'SIGKILL', env: { ...process.env, PATH: nodeFreePath, MYGO_ENV: 'development' },
   });
   await fs.writeFile(path.join(directory, mode + '.log'), (result.stdout ?? '') + (result.stderr ?? ''));
@@ -50,6 +50,7 @@ assert.equal(ui.views.length, 4);
 assert.equal(ui.bridgeMembers, 36);
 const nativeAssertions = ['attachmentProtected', 'unsubscribe', 'backupRoundTrip', 'backupUnicode', 'savedUnicode', 'aiProxy', 'aiCancellation', 'syncProxy', 'liveSnapshot', 'liveUnicode', 'closeBarrier'];
 for (const field of nativeAssertions) assert.equal(ui[field], true, `Native runtime check missing ${field}`);
+if (process.env.BIKE_PROBE_NATIVE_ESCAPE === '1') assert.equal(ui.closeEscapeCancelled, true, 'Native return-to-window confirmation was not verified');
 assert.deepEqual(ui.liveWorkflow, { dryRun: true, pending: true, approved: true, rejected: true, status: true, pendingReplay: true, committedReplay: true, rejectedReplay: true, changedPayloadRejected: true });
 assert.equal(results[2].workspace.documents[0].nodes[0].text, 'WKWebView 原生桥编辑持久化验证');
 assert.equal(results[2].savedUnicode, true);

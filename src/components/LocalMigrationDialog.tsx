@@ -1,3 +1,4 @@
+import { Modal } from "./Modal";
 import { useState } from "react";
 import type { LocalMigrationCopy } from "../../shared/bike-local-migration.mjs";
 import type { LocalMigrationOptions } from "../localMigration";
@@ -9,7 +10,7 @@ export function LocalMigrationDialog({ copy, documentCount, onConfirm, onClose }
   const [preferences, setPreferences] = useState(false);
   const [credentials, setCredentials] = useState(false);
   const importing = Boolean(copy);
-  return <div className="modal-overlay" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+  return <Modal onDismiss={onClose} className="modal-overlay" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
     <section className="api-config-dialog" role="dialog" aria-modal="true" aria-labelledby="local-copy-title">
       <header><h3 id="local-copy-title">{importing ? "导入完整本机副本" : "导出完整本机副本"}</h3><button type="button" className="dialog-close" onClick={onClose} aria-label="关闭">×</button></header>
       <div style={{ overflow: "auto", display: "grid", gap: 16, minHeight: 0, overflowWrap: "anywhere" }}>
@@ -23,13 +24,13 @@ export function LocalMigrationDialog({ copy, documentCount, onConfirm, onClose }
       </div>
       <footer><button type="button" className="secondary" onClick={onClose}>取消</button><button type="button" className="primary" onClick={() => onConfirm({ preferences, credentials })}>{importing ? "备份当前副本并导入" : "选择完整副本保存位置"}</button></footer>
     </section>
-  </div>;
+  </Modal>;
 }
 
 export function LocalMigrationArchivesDialog({ archives, onDownload, onClose }: {
   archives: LocalMigrationCopy[]; onDownload: (copy: LocalMigrationCopy) => void; onClose: () => void;
 }) {
-  return <div className="modal-overlay"><section className="api-config-dialog" role="dialog" aria-modal="true" aria-labelledby="source-archives-title">
+  return <Modal onDismiss={onClose} className="modal-overlay"><section className="api-config-dialog" role="dialog" aria-modal="true" aria-labelledby="source-archives-title">
     <header><h3 id="source-archives-title">本机来源档案</h3><button type="button" className="dialog-close" onClick={onClose} aria-label="关闭">×</button></header>
     <div style={{ overflow: "auto", display: "grid", gap: 16, minHeight: 0, overflowWrap: "anywhere" }}><p>源设备操作以只读记录保存。历史版本可以从版本历史恢复，备用内容可以从备用副本入口恢复。</p>
       {!archives.length && <p>尚未导入完整本机副本。</p>}
@@ -38,5 +39,5 @@ export function LocalMigrationArchivesDialog({ archives, onDownload, onClose }: 
         <p>正文 SHA-256 <code>{archive.source.workspaceSha256}</code></p>
         <button type="button" onClick={() => onDownload(archive)}>下载只读源记录</button></article>)}
     </div><footer><button type="button" onClick={onClose}>关闭</button></footer>
-  </section></div>;
+  </section></Modal>;
 }

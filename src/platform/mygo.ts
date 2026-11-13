@@ -12,6 +12,11 @@ export function installMyGoBridge() {
   const imports = new Map<string, AbortController>();
   let flushRequest: string | undefined;
   const invoke = <T>(method: string, payload: unknown = {}): Promise<T> => Desktop.invoke(method, JSON.stringify(payload)) as Promise<T>;
+  const invokeNetwork = async <T>(method: string, payload: unknown): Promise<T> => {
+    const result = await invoke<Record<string, unknown> & { dataJSON?: string }>(method, payload);
+    const { dataJSON, ...rest } = result;
+    return (dataJSON === undefined ? rest : { ...rest, data: JSON.parse(dataJSON) }) as T;
+  };
   const reply = (id: string | undefined, value: unknown, error = '') => {
     if (id) void Desktop.reply(id, JSON.stringify(value ?? null), error).catch(() => {});
   };
@@ -120,9 +125,9 @@ export function installMyGoBridge() {
     onPrepareUpdate: (callback) => subscribe('prepareUpdate', (_payload, id) => {
       Promise.resolve().then(callback).then((result) => reply(id, result), (error) => reply(id, null, error instanceof Error ? error.message : String(error)));
     }),
-    invokeAiProvider: (payload) => invoke('invokeAiProvider', payload),
+    invokeAiProvider: (payload) => invokeNetwork('invokeAiProvider', payload),
     cancelAiRequest: (requestId) => invoke('cancelAiRequest', { requestId }),
-    invokeSyncRequest: (payload) => invoke('invokeSyncRequest', payload),
+    invokeSyncRequest: (payload) => invokeNetwork('invokeSyncRequest', payload),
     onEditCommand: (callback) => subscribe('editCommand', callback),
     onOpenApiConfig: (callback) => subscribe('openApiConfig', callback),
   };

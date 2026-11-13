@@ -353,6 +353,23 @@ func appendJSON(output []byte, value any, pretty, canonical bool, depth int) ([]
 			output = newline(output, depth)
 		}
 		output = append(output, ']')
+	case []string:
+		values := make([]any, len(item))
+		for index, value := range item {
+			values[index] = value
+		}
+		return appendJSON(output, values, pretty, canonical, depth)
+	case map[string]any:
+		keys := make([]string, 0, len(item))
+		for key := range item {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		value := NewObject()
+		for _, key := range keys {
+			value.Set(key, item[key])
+		}
+		return appendJSON(output, value, pretty, canonical, depth)
 	case string:
 		output = appendJSONString(output, item)
 	case float64:

@@ -3,7 +3,8 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const os = require('node:os');
 const crypto = require('node:crypto');
-const MAX_REQUEST = 4 * 1024 * 1024;
+const { createLineBuffer } = require('./line-buffer.cjs');
+const MAX_REQUEST = 80 * 1024 * 1024;
 const MAX_RESPONSE = 80 * 1024 * 1024;
 const safeToken = (actual, expected) => typeof actual === 'string' && /^[a-f0-9]{64}$/.test(actual) && crypto.timingSafeEqual(Buffer.from(actual), Buffer.from(expected));
 
@@ -46,20 +47,20 @@ const createLiveMcpService = ({ directory, handle, onRevoke = () => {} }) => {
     const activeGrant = grant;
     const instance = net.createServer((socket) => {
       if (clients.size >= 8) { socket.destroy(); return; }
-      clients.add(socket); socket.setTimeout(120_000, () => socket.destroy());
+      clients.add(socket);
       const session = { id: crypto.randomUUID(), clientName: '', connectedAt: new Date().toISOString() };
-      let buffered = Buffer.alloc(0), inFlight = 0;
+      const buffered = createLineBuffer(MAX_REQUEST);
+      let inFlight = 0;
       socket.on('error', () => {});
       socket.on('close', () => clients.delete(socket));
       socket.on('data', (chunk) => {
-        if (buffered.length + chunk.length > MAX_REQUEST) { socket.destroy(); return; }
-        buffered = Buffer.concat([buffered, chunk]);
-        let newline;
-        while ((newline = buffered.indexOf(10)) >= 0) {
-          const line = buffered.subarray(0, newline); buffered = buffered.subarray(newline + 1);
+        let lines;
+        try { lines = buffered.push(chunk); } catch { socket.destroy(); return; }
+        for (const line of lines) {
           let request;
           try { request = JSON.parse(line.toString('utf8')); } catch { socket.destroy(); return; }
-          if (!request || typeof request !== 'object' || Array.isArray(request) || !safeToken(request.token, activeSecret) || typeof request.id !== 'string' || request.id.length > 200 || !['snapshot', 'proposal', 'status'].includes(request.method) || inFlight >= 4) { socket.destroy(); return; }
+          if (!request || typeof request !== 'object' || Array.isArray(request) || !safeToken(request.token, activeSecret) || typeof request.id !== 'string' || request.id.length > 200 || !['snapshot', 'proposal', 'status'].includes(request.method)) { socket.destroy(); return; }
+          if (inFlight >= 4) { socket.write(JSON.stringify({ id: request.id, ok: false, error: 'Live 请求繁忙，请稍后重试' }) + '\n'); continue; }
           if (request.method === 'proposal' && request.payload?.dryRun === false && !activeGrant.writable) {
             socket.write(JSON.stringify({ id: request.id, ok: false, error: '当前 Live 连接只读，请在应用内明确授权写入' }) + '\n'); continue;
           }

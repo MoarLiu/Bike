@@ -77,6 +77,39 @@ test("diffDocuments counts added, removed and changed nodes", () => {
   assert.deepEqual(pure.diffDocuments(current, snapshot), { added: 1, removed: 1, changed: 1 });
 });
 
+test("snapshot retention skips oversized older entries and fills remaining space", () => {
+  const at = new Date().toISOString();
+  const snapshot = pure.createSnapshot(documentAt("newest", at), "manual", at);
+  const old = [
+    { ...snapshot, id: "large", signature: "large", size: 21 * 1024 * 1024 },
+    { ...snapshot, id: "small", signature: "small", size: 10 },
+  ];
+  assert.deepEqual(pure.appendSnapshot(old, snapshot).map(item => item.id), [snapshot.id, "small"]);
+});
+
+test("all document histories share the 128 MiB retention budget", () => {
+  const rows = Object.fromEntries(Array.from({ length: 30 }, (_, index) => [`doc-${index}`, [
+    { id: `snapshot-${index}`, createdAt: new Date(Date.UTC(2026, 0, index + 1)).toISOString(), size: 8 * 1024 * 1024 },
+  ]]));
+  const retained = pure.retainGlobalHistory(rows);
+  const snapshots = Object.values(retained).flat();
+  assert.equal(snapshots.reduce((sum, item) => sum + item.size, 0), pure.MAX_HISTORY_SIZE);
+  assert.equal(retained["doc-0"].length, 0);
+  assert.equal(retained["doc-29"].length, 1);
+});
+
+test("one broken snapshot does not block healthy history or new captures", async t => {
+  const env = installFakeBrowserStorage(t);
+  const valid = pure.createSnapshot(documentAt("valid", OLD), "manual", OLD);
+  const broken = { ...valid, document: null };
+  env.idb.seed("bike-history-db", { "document:doc": [broken, valid] }, "snapshots");
+  const history = loadTypescriptIsolated("src/versionHistory.ts");
+  assert.equal((await history.listDocumentSnapshots("doc")).length, 1);
+  assert.match(history.getHistoryWarning("doc"), /1 条损坏/);
+  assert.equal((await history.captureSnapshot(documentAt("new", OLD), "manual")).length, 2);
+  assert.ok(env.idb.read("bike-history-db", "document:doc", "snapshots").some(item => item.document === null));
+});
+
 test("previewLines limits output and records depth", () => {
   const nodes = [
     { id: "1", text: "root", children: [

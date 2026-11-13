@@ -2,7 +2,6 @@ package mcp
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"github.com/MoarLiu/Bike/desktop-mygo/internal/contracts"
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
@@ -33,7 +32,7 @@ func encodeComponent(value string) (string, error) {
 	}
 	return output.String(), nil
 }
-func listResources(ctx context.Context, store Store, static []*mcp.Resource) (*mcp.ListResourcesResult, error) {
+func listResources(ctx context.Context, store Store, static []*mcp.Resource) (*wireResult, error) {
 	snapshot, err := store.Load(ctx)
 	if err != nil {
 		return nil, err
@@ -42,7 +41,10 @@ func listResources(ctx context.Context, store Store, static []*mcp.Resource) (*m
 	if err != nil {
 		return nil, err
 	}
-	resources := append([]*mcp.Resource{}, static...)
+	resources := []any{}
+	for _, resource := range static {
+		resources = append(resources, resource)
+	}
 	for _, markdown := range []bool{false, true} {
 		for _, document := range liveDocuments(workspace) {
 			id, err := encodeComponent(document.String("id"))
@@ -58,16 +60,11 @@ func listResources(ctx context.Context, store Store, static []*mcp.Resource) (*m
 				mime = "text/markdown"
 				description = "Bike 文档的 Markdown 视图"
 			}
-			value := map[string]any{"uri": uri, "name": name, "title": title, "description": description, "mimeType": mime, "annotations": map[string]any{"audience": []string{"assistant"}, "priority": 0.8, "lastModified": document.String("updatedAt")}}
-			raw, _ := json.Marshal(value)
-			var resource mcp.Resource
-			if err := json.Unmarshal(raw, &resource); err != nil {
-				return nil, err
-			}
-			resources = append(resources, &resource)
+			resources = append(resources, ordered("uri", uri, "name", name, "title", title, "description", description, "mimeType", mime,
+				"annotations", ordered("audience", []any{"assistant"}, "priority", 0.8, "lastModified", document.String("updatedAt"))))
 		}
 	}
-	return &mcp.ListResourcesResult{Resources: resources}, nil
+	return &wireResult{Result: &mcp.ListResourcesResult{}, body: map[string]any{"resources": resources}}, nil
 }
 func readResource(ctx context.Context, store Store, uri string) (*mcp.ReadResourceResult, error) {
 	snapshot, err := store.Load(ctx)

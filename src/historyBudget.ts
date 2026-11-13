@@ -4,6 +4,7 @@ export const MAX_HISTORY_BYTES = 64 * 1024 * 1024;
 type Retained = { references: number; bytes: number; children: object[] };
 type Pool = { owner: EditHistory; objects: Map<object, Retained>; bytes: number };
 const pools = new WeakMap<EditHistory, Pool>();
+const evictions = new WeakMap<EditHistory, number>();
 
 const shallowSize = (value: object) => {
   const entries = Object.entries(value);
@@ -62,6 +63,7 @@ export const withHistoryBudget = (previous: EditHistory, next: EditHistory, budg
   }
   // Keep the nearest undo even when that single operation exceeds the budget.
   const result = past === next.past ? next : { ...next, past };
+  evictions.set(result, next.past.length - past.length);
   pool.owner = result;
   pools.set(result, pool);
   return result;
@@ -69,5 +71,5 @@ export const withHistoryBudget = (previous: EditHistory, next: EditHistory, budg
 
 export const historyMemoryUsage = (history: EditHistory) => {
   const pool = poolFor(history);
-  return { estimatedBytes: pool.bytes, retainedObjects: pool.objects.size, overBudget: pool.bytes > MAX_HISTORY_BYTES };
+  return { estimatedBytes: pool.bytes, retainedObjects: pool.objects.size, overBudget: pool.bytes > MAX_HISTORY_BYTES, evictedEntries: evictions.get(history) ?? 0 };
 };

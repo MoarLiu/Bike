@@ -19,7 +19,7 @@ const appName = product.name + (channel === 'preview' ? ' Preview' : '');
 const bundle = path.join(directory, appName + '.app');
 const binary = path.join(bundle, 'Contents/MacOS', product.executable);
 const identifier = product.identifier + (channel === 'preview' ? '.preview' : '');
-const run = (command, args, options = {}) => execFileSync(command, args, { encoding: 'utf8', env: { PATH: '/usr/bin:/bin' }, ...options }).trim();
+const run = (command, args, options = {}) => execFileSync(command, args, { encoding: 'utf8', env: { PATH: '/usr/bin:/bin' }, timeout: 120000, ...options }).trim();
 const plist = (key) => run('/usr/bin/plutil', ['-extract', key, 'raw', '-o', '-', path.join(bundle, 'Contents/Info.plist')]);
 assert.equal(plist('CFBundleIdentifier'), identifier);
 assert.equal(plist('CFBundleExecutable'), product.executable);

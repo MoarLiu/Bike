@@ -179,6 +179,12 @@ if (mode === 'ui') {
   await window.bike.stopLiveMcp();
   document.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true, data: '中' }));
   if (await window.mygo.call('Probe.CloseBarrier')) throw new Error('Close barrier accepted composition');
+  if (nativeEscape) {
+    const beforeEscape = JSON.stringify(await read());
+    if (await window.mygo.call('Probe.CloseBarrier')) throw new Error('Expected operator to return to the window');
+    if (JSON.stringify(await read()) !== beforeEscape) throw new Error('Canceling close changed saved data');
+    result.closeEscapeCancelled = true;
+  }
   document.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true, data: '中' }));
   if (!await window.mygo.call('Probe.CloseBarrier')) throw new Error('Close barrier failed after save');
   await waitFor(() => !document.querySelector('.shell').inert, 'released close test lock');

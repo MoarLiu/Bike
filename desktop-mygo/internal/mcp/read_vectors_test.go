@@ -109,7 +109,10 @@ func TestWikiScannerVectors(t *testing.T) {
 		}
 		for index, expected := range fixture.Links {
 			got := actual[index]
-			if got.start != expected.Start || got.end != expected.End || got.raw != expected.Raw || got.documentName != expected.DocumentName || got.label != expected.Label {
+			sameOptional := func(left, right *string) bool {
+				return left == nil && right == nil || left != nil && right != nil && *left == *right
+			}
+			if got.start != expected.Start || got.end != expected.End || got.raw != expected.Raw || got.documentName != expected.DocumentName || got.label != expected.Label || !sameOptional(got.nodeName, expected.NodeName) || !sameOptional(got.alias, expected.Alias) {
 				t.Fatalf("wiki mismatch %q %+v %+v", fixture.Text, got, expected)
 			}
 		}

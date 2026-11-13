@@ -125,7 +125,9 @@ const rowToDocumentSummary = (row) => ({
   deletedAt: row.deleted_at ?? null,
 });
 
-export const createSyncStore = async (databasePath, { busyTimeoutMs = 1500 } = {}) => {
+export const createSyncStore = async (databasePath, {
+  busyTimeoutMs = 1500, assetQuotaBytes = Number(process.env.BIKE_ASSET_QUOTA_BYTES || 2 * 1024 * 1024 * 1024),
+} = {}) => {
   if (!databasePath) {
     throw new Error("sync.databasePath is required");
   }
@@ -266,13 +268,15 @@ export const createSyncStore = async (databasePath, { busyTimeoutMs = 1500 } = {
     const existingIds = readNonDeletedIds();
     const existing = new Set(existingIds);
     const order = [];
+    const ordered = new Set();
     for (const id of Array.isArray(requestedOrder) ? requestedOrder : []) {
-      if (typeof id === "string" && existing.has(id) && !order.includes(id)) {
+      if (typeof id === "string" && existing.has(id) && !ordered.has(id)) {
         order.push(id);
+        ordered.add(id);
       }
     }
     for (const id of existingIds) {
-      if (!order.includes(id)) order.push(id);
+      if (!ordered.has(id)) { order.push(id); ordered.add(id); }
     }
     const active = activeDocumentId && existing.has(activeDocumentId)
       ? activeDocumentId
@@ -303,8 +307,8 @@ export const createSyncStore = async (databasePath, { busyTimeoutMs = 1500 } = {
       activeDocumentId: normalized.activeDocumentId,
       documentOrder: normalized.documentOrder,
       documents,
-      capabilities: ["attachments-v1", "node-operations-v2"],
-      ...(operationStore?.isEnabled() ? { requiredCapabilities: ["node-operations-v2"], protocol: 2 } : {}),
+      capabilities: ["attachments-v1", "node-operations-v2", "operation-ordering-v2"],
+      ...(operationStore?.isEnabled() ? { requiredCapabilities: ["node-operations-v2", "operation-ordering-v2"], protocol: 2 } : {}),
     };
   };
 
@@ -512,12 +516,43 @@ export const createSyncStore = async (databasePath, { busyTimeoutMs = 1500 } = {
       };
     });
 
-  operationStore = createOperationStore({ db, transaction, getManifest, getDocument, updatePresence: updateManifestForDocumentPresence });
+  operationStore = createOperationStore({ db, transaction, getManifest, getDocument, updatePresence: updateManifestForDocumentPresence,
+    updateOrder: (order) => {
+      const meta = readMeta();
+      const normalized = normalizeOrder(order, meta.activeDocumentId);
+      writeMeta({ ...meta, ...normalized, revision: meta.revision + 1, updatedAt: now() });
+    },
+  });
 
   const temporaryAssetDirectory = databasePath === ":memory:" ? await fs.mkdtemp(path.join(os.tmpdir(), "bike-sync-assets-")) : null;
-  const assets = await createAssetStore({ directory: temporaryAssetDirectory ?? `${databasePath}.assets` });
+  const assets = await createAssetStore({ directory: temporaryAssetDirectory ?? `${databasePath}.assets`, quotaBytes: assetQuotaBytes });
+  const collectUnusedAssets = async ({ apply = false, retentionDays = 30 } = {}) => {
+    if (!Number.isInteger(retentionDays) || retentionDays < 30) throw new Error("附件维护至少保留 30 天缓冲期");
+    const cutoff = Date.now() - retentionDays * 86400000;
+    // The maintenance CLI holds the SQLite writer lock while inspecting roots
+    // and deleting objects, so another process cannot publish a new reference.
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      const protectedAssets = new Set();
+      const visit = (value) => {
+        const stack = [value];
+        while (stack.length) {
+          const item = stack.pop();
+          if (typeof item === "string" && /^sha256:[a-f0-9]{64}$/u.test(item)) protectedAssets.add(item);
+          else if (item && typeof item === "object") for (const [key, child] of Object.entries(item)) { stack.push(key, child); }
+        }
+      };
+      for (const row of db.prepare("SELECT document_json FROM documents WHERE deleted_at IS NULL OR deleted_at >= ?").iterate(new Date(cutoff).toISOString())) visit(JSON.parse(row.document_json));
+      for (const row of db.prepare("SELECT document_json FROM replica_legacy_backup").iterate()) visit(JSON.parse(row.document_json));
+      for (const row of db.prepare("SELECT operation_json FROM replica_receipts WHERE operation_json != 'null'").iterate()) visit(JSON.parse(row.operation_json));
+      const result = await assets.collectUnused({ protectedAssets, before: cutoff, apply });
+      db.exec("COMMIT");
+      return result;
+    } catch (error) { db.exec("ROLLBACK"); throw error; }
+  };
   return {
     assets,
+    collectUnusedAssets,
     operations: operationStore,
     close: () => { db.close(); if (temporaryAssetDirectory) void fs.rm(temporaryAssetDirectory, { recursive: true, force: true }); },
     getManifest,

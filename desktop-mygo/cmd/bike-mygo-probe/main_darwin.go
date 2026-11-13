@@ -46,7 +46,7 @@ func (probe Probe) Progress() {
 }
 func (probe Probe) CloseBarrier(ctx context.Context) bool {
 	ready := probe.desktop.PrepareClose(ctx)
-	probe.desktop.Emit("updateState", map[string]any{"status": "idle", "currentVersion": "2.0.0"})
+	probe.desktop.Emit("updateState", map[string]any{"status": "idle", "currentVersion": probe.desktop.Info.Version})
 	return ready
 }
 
@@ -120,6 +120,7 @@ func (probe Probe) Downloads() ([]string, error) {
 func main() {
 	version := flag.Bool("version", false, "print test build identity")
 	mode := flag.String("mode", "", "seed, ui, verify, isolate or cleanup")
+	nativeEscape := flag.Bool("native-escape", false, "exercise the native cancel confirmation with an operator")
 	directory := flag.String("output", "", "test evidence directory")
 	flag.Parse()
 	info, err := product.Current()
@@ -185,7 +186,7 @@ func main() {
 			once.Do(func() {
 				go func() {
 					encodedMode, _ := json.Marshal(*mode)
-					code := "const mode=" + string(encodedMode) + ";" + probeJS
+					code := "const mode=" + string(encodedMode) + ";const nativeEscape=" + fmt.Sprint(*nativeEscape) + ";" + probeJS
 					// MyGO Eval first compiles its input as an expression. A statement
 					// body causes WebKit to report a Script error before the SDK retries
 					// it as statements. Keep this retry only in the diagnostic control.

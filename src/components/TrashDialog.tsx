@@ -1,3 +1,4 @@
+import { Modal } from "./Modal";
 import { ArchiveRestore, Trash2, X } from "lucide-react";
 import type { TrashEntry } from "../types";
 
@@ -23,7 +24,7 @@ export function TrashDialog({
   onClose: () => void;
 }) {
   return (
-    <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="回收站" onClick={() => !busy && onClose()}>
+    <Modal onDismiss={() => !busy && onClose()} className="modal-overlay" role="dialog" aria-modal="true" aria-label="回收站" onClick={() => !busy && onClose()}>
       <section className="workspace-dialog trash-dialog" onClick={(event) => event.stopPropagation()}>
         <header>
           <div>
@@ -72,6 +73,6 @@ export function TrashDialog({
           </button>
         </footer>
       </section>
-    </div>
+    </Modal>
   );
 }

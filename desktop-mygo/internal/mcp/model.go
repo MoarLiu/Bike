@@ -254,12 +254,8 @@ func normalizeWorkspace(workspace *object) (*object, error) {
 	return workspace, nil
 }
 func validDate(value string) bool {
-	_, err := time.Parse(time.RFC3339Nano, value)
-	if err == nil {
-		return true
-	}
-	_, err = time.Parse("2006-01-02", value)
-	return err == nil
+	_, ok := parseDocumentDate(value)
+	return ok
 }
 func asObject(value any) *object { result, _ := value.(*object); return result }
 func documentByID(workspace *object, id string) (*object, error) {
@@ -284,16 +280,22 @@ func walkNodes(nodes []any, visit func(*object, []int, []*object)) {
 	walk(nodes, nil, nil)
 }
 func nodeByID(document *object, id string) (*object, []int, []*object, error) {
-	var found *object
-	var path []int
-	var ancestors []*object
-	walkNodes(document.Array("nodes"), func(node *object, at []int, parents []*object) {
-		if node.String("id") == id {
-			found, path, ancestors = node, at, parents
+	var visit func([]any, []int, []*object) (*object, []int, []*object)
+	visit = func(nodes []any, path []int, parents []*object) (*object, []int, []*object) {
+		for index, raw := range nodes {
+			node := asObject(raw)
+			at := append(path, index)
+			if node.String("id") == id {
+				return node, append([]int{}, at...), append([]*object{}, parents...)
+			}
+			if found, path, ancestors := visit(node.Array("children"), at, append(parents, node)); found != nil {
+				return found, path, ancestors
+			}
 		}
-	})
-	if found == nil {
-		return nil, nil, nil, fmt.Errorf("找不到节点：%s", id)
+		return nil, nil, nil
 	}
-	return found, path, ancestors, nil
+	if node, path, parents := visit(document.Array("nodes"), nil, nil); node != nil {
+		return node, path, parents, nil
+	}
+	return nil, nil, nil, fmt.Errorf("找不到节点：%s", id)
 }

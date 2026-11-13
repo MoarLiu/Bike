@@ -13,6 +13,7 @@ import (
 
 	"github.com/MoarLiu/Bike/desktop-mygo/internal/frontend"
 	"github.com/MoarLiu/Bike/desktop-mygo/internal/product"
+	"github.com/MoarLiu/Bike/desktop-mygo/internal/services"
 	"github.com/egoist/mygo"
 )
 
@@ -58,9 +59,13 @@ func Run(info product.Info) error {
 	if !mygo.App.RequestSingleInstanceLock() {
 		return nil
 	}
+	if err := os.Remove(filepath.Join(profile, "live-mcp.json")); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("无法清理旧 Live 授权发现文件")
+	}
 	if err := desktop.Library.RecoverUploads(); err != nil {
 		return fmt.Errorf("清理未完成附件传输失败：%w", err)
 	}
+	_ = services.CleanupOpenFiles()
 	var window *mygo.Window
 	var allowQuit, preparing atomic.Bool
 	openWindow := func() {
@@ -68,7 +73,19 @@ func Run(info product.Info) error {
 		if raw, err := os.ReadFile(filepath.Join(profile, "window.json")); err == nil {
 			var bounds mygo.Rectangle
 			if json.Unmarshal(raw, &bounds) == nil && bounds.Width >= 1366 && bounds.Width <= 16384 && bounds.Height >= 960 && bounds.Height <= 16384 {
-				options.Width, options.Height, options.X, options.Y = bounds.Width, bounds.Height, bounds.X, bounds.Y
+				visible := false
+				if bounds.X >= -32768 && bounds.X <= 32768 && bounds.Y >= -32768 && bounds.Y <= 32768 {
+					for _, display := range mygo.Screen.Displays() {
+						area := display.WorkArea
+						if bounds.X+128 > area.X && bounds.X < area.X+area.Width-64 && bounds.Y+32 > area.Y && bounds.Y < area.Y+area.Height-32 {
+							visible = true
+							break
+						}
+					}
+				}
+				if visible {
+					options.Width, options.Height, options.X, options.Y = bounds.Width, bounds.Height, bounds.X, bounds.Y
+				}
 			}
 		}
 		window = mygo.NewWindow(options)

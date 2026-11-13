@@ -68,6 +68,21 @@ test("up-to-date and development environments do not download an update", async 
   assert.equal(dev.counts().checks, 0);
 });
 
+test("ad-hoc installations use an explicit manual release path", async () => {
+  const f = fixture({ manualOnly: true, fetchRelease: async () => ({ latestVersion: "2.0.1", updateAvailable: true }) });
+  assert.equal((await f.service.check()).status, "manual");
+  await f.service.download(); await f.service.install();
+  assert.deepEqual(f.counts(), { checks: 0, downloads: 0, installs: 0, saves: 0 });
+});
+
+test("signed updates pin a filtered stable tag and reject mismatched manifests", async () => {
+  const f = fixture({ resolveRelease: async () => ({ latestVersion: "2.0.1", updateAvailable: true }) });
+  assert.equal((await f.service.check()).status, "error");
+  assert.deepEqual(f.updater.feed, { provider: "generic", url: "https://github.com/MoarLiu/Bike/releases/download/v2.0.1/", useMultipleRangeRequest: false });
+  await f.service.download();
+  assert.equal(f.counts().downloads, 0);
+});
+
 test("network and download failures can be retried and never expose local cache paths", async () => {
   const f = fixture();
   f.updater.checkForUpdates = async () => { throw new Error("/private/local-cache"); };

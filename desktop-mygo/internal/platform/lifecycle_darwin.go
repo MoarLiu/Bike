@@ -49,6 +49,9 @@ func prepareCloseWhenReady(ctx context.Context, subscribed func(context.Context)
 }
 
 func (desktop *Desktop) PrepareClose(parent context.Context) bool {
+	if desktop.current() == nil {
+		return true
+	}
 	ctx, cancel := context.WithTimeout(parent, 15*time.Second)
 	defer cancel()
 	ok, err := prepareCloseWhenReady(ctx, func(ctx context.Context) (bool, error) {
@@ -69,7 +72,13 @@ func (desktop *Desktop) PrepareClose(parent context.Context) bool {
 	}, func(ctx context.Context) (json.RawMessage, error) {
 		return desktop.Request(ctx, "prepareUpdate", nil)
 	})
+	if desktop.current() == nil {
+		return true
+	}
 	if err == nil && ok {
+		desktop.mu.Lock()
+		desktop.closeRejected = false
+		desktop.mu.Unlock()
 		os.Remove(filepath.Join(desktop.Profile, "close-recovery.json"))
 		return true
 	}
@@ -80,7 +89,23 @@ func (desktop *Desktop) PrepareClose(parent context.Context) bool {
 	receipt, _ := json.Marshal(map[string]any{"at": time.Now().UTC().Format(time.RFC3339Nano), "error": message})
 	os.WriteFile(filepath.Join(desktop.Profile, "close-recovery.json"), receipt, 0600)
 	desktop.Emit("updateState", map[string]any{"status": "idle", "currentVersion": desktop.Info.Version, "error": message})
-	return false
+	desktop.mu.Lock()
+	previouslyRejected := desktop.closeRejected
+	desktop.closeRejected = true
+	desktop.mu.Unlock()
+	// A first, responsive busy reply (for example composition in progress)
+	// preserves the ordinary retry path. A repeated close or a broken/timed-out
+	// bridge offers a native escape even when the renderer cannot recover.
+	if err == nil && !previouslyRejected {
+		desktop.Emit("updateState", map[string]any{"status": "idle", "currentVersion": desktop.Info.Version, "error": message + "；再次关闭可选择放弃未保存内容"})
+		return false
+	}
+	choice, dialogError := mygo.Dialog.Message(mygo.MessageOptions{
+		Parent: desktop.current(), Type: mygo.MessageWarning, Title: "关闭前尚未保存",
+		Message: message, Detail: "可以返回窗口继续处理，或明确放弃尚未保存的输入。最近已保存的数据仍保留，强制关闭可能丢失本次未提交内容。",
+		Buttons: []string{"返回窗口", "放弃未保存内容并关闭"}, CancelButton: 0,
+	})
+	return dialogError == nil && choice.Button == 1
 }
 
 func installMenu(desktop *Desktop) {
@@ -99,6 +124,6 @@ func installMenu(desktop *Desktop) {
 			{Label: "撤销", Accelerator: "CmdOrCtrl+Z", Click: edit("undo")}, {Label: "重做", Accelerator: "CmdOrCtrl+Shift+Z", Click: edit("redo")}, mygo.Separator(),
 			{Role: mygo.RoleCut}, {Role: mygo.RoleCopy}, {Role: mygo.RolePaste}, {Role: mygo.RoleSelectAll},
 		}},
-		{Role: mygo.RoleViewMenu}, {Role: mygo.RoleWindowMenu},
+		{Label: "视图", Submenu: []*mygo.MenuItem{{Role: mygo.RoleToggleFullScreen}}}, {Role: mygo.RoleWindowMenu},
 	}))
 }

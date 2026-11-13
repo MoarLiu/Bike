@@ -7,6 +7,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
+const productVersion = JSON.parse(await fs.readFile(path.join(root, 'package.json'), 'utf8')).version;
 const option = (name, fallback) => process.argv.find((arg) => arg.startsWith(`${name}=`))?.slice(name.length + 1) ?? fallback;
 const evidence = path.resolve(option('--output', path.join(root, 'docs/evidence-mygo-2026-11-11-integration/webkit-layout')));
 const css = option('--css', 'block');
@@ -36,7 +37,7 @@ const hashDirectory = async (directory) => {
 const frontendSHA256 = await hashDirectory(staged);
 await fs.mkdir(path.dirname(binary), { recursive: true });
 const identifier = 'com.bike.mygo.layout-acceptance';
-const flags = `-s -w -X github.com/egoist/mygo.production=1 -X github.com/egoist/mygo.packageIdentifier=${identifier} -X github.com/egoist/mygo.packageVersion=2.0.0`;
+const flags = `-s -w -X github.com/egoist/mygo.production=1 -X github.com/egoist/mygo.packageIdentifier=${identifier} -X github.com/egoist/mygo.packageVersion=${productVersion}`;
 run(go, ['build', '-mod=readonly', '-trimpath', '-tags', 'mygo_noinspector,mygo_frontend', '-ldflags', flags, '-o', binary, './cmd/bike-mygo-layout-acceptance'], { cwd: path.join(root, 'desktop-mygo') });
 const plist = `<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict><key>CFBundleIdentifier</key><string>${identifier}</string><key>CFBundleName</key><string>Bike MyGO Layout Acceptance</string><key>CFBundleExecutable</key><string>bike-mygo-layout-acceptance</string><key>CFBundlePackageType</key><string>APPL</string><key>NSPrincipalClass</key><string>NSApplication</string><key>LSMinimumSystemVersion</key><string>12.0</string></dict></plist>`;
 await fs.writeFile(path.join(app, 'Contents/Info.plist'), plist);

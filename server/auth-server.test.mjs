@@ -424,6 +424,27 @@ test("authenticated static GET and HEAD reject malformed URL encoding without a 
   assert.doesNotMatch(output.join(""), /URIError|Internal Server Error/);
 });
 
+test("cookie-authenticated mutations reject cross-origin and non-JSON requests", async t => {
+  const { baseUrl, password } = await startAuthServer(t, { syncEnabled: true });
+  const cookie = await login(baseUrl, password);
+  for (const headers of [
+    { Origin: "https://foreign.invalid", "Content-Type": "text/plain" },
+    { Origin: baseUrl, "Content-Type": "text/plain" },
+    { Origin: "https://foreign.invalid", "Content-Type": "application/json" },
+  ]) {
+    const response = await fetch(`${baseUrl}/api/v2/enable`, { method: "POST", headers: { Cookie: cookie, ...headers }, body: '{"expectedRevision":0}' });
+    assert.equal(response.status, 403);
+    await response.text();
+  }
+  const oldClient = await fetch(`${baseUrl}/api/v2/status`, { headers: { Cookie: cookie } });
+  assert.equal(oldClient.status, 426);
+  const allowed = await fetch(`${baseUrl}/api/v2/enable?bikeOrdering=2`, { method: "POST", headers: { Cookie: cookie, Origin: baseUrl, "Content-Type": "application/json" }, body: '{"expectedRevision":0}' });
+  assert.equal(allowed.status, 200, await allowed.text());
+  const logout = await fetch(`${baseUrl}/auth/logout`, { method: "POST", headers: { Cookie: cookie, Origin: "https://foreign.invalid" }, redirect: "manual" });
+  assert.equal(logout.status, 403);
+  assert.equal((await status(baseUrl, cookie)).status, 200);
+});
+
 test("forged or foreign device cookies are treated as untrusted", async (t) => {
   const { baseUrl, password } = await startAuthServer(t);
   const { session, device } = await loginCookies(baseUrl, password, {
@@ -590,7 +611,7 @@ test("sync API stores documents and rejects stale revisions", async (t) => {
     activeDocumentId: null,
     documentOrder: [],
     documents: [],
-    capabilities: ["attachments-v1", "node-operations-v2"],
+    capabilities: ["attachments-v1", "node-operations-v2", "operation-ordering-v2"],
   });
 
   const createdResponse = await jsonRequest(baseUrl, "/api/documents/doc-a", {

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -62,6 +63,7 @@ type Desktop struct {
 	imports         map[string]context.CancelFunc
 	assetSync       context.CancelFunc
 	openDirectories []string
+	closeRejected   bool
 }
 
 func NewDesktop(info product.Info, profile, cloud string) *Desktop {
@@ -261,6 +263,16 @@ func desktopJSONField(value map[string]any, key string) map[string]any {
 	return value
 }
 
+func quarantineAttachment(ctx context.Context, filename string) error {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	value := fmt.Sprintf("0083;%x;Bike MyGO;", time.Now().Unix())
+	if err := exec.CommandContext(ctx, "/usr/bin/xattr", "-w", "com.apple.quarantine", value, filename).Run(); err != nil {
+		return fmt.Errorf("附件已写入，但来源安全标记失败，已停止自动打开")
+	}
+	return nil
+}
+
 func (desktop *Desktop) Invoke(ctx context.Context, method, payload string) (result map[string]any, err error) {
 	if err := desktop.trusted(ctx); err != nil {
 		return nil, err
@@ -271,6 +283,20 @@ func (desktop *Desktop) Invoke(ctx context.Context, method, payload string) (res
 	var request map[string]any
 	if err := json.Unmarshal([]byte(payload), &request); err != nil {
 		return nil, err
+	}
+	if request == nil {
+		return nil, fmt.Errorf("桌面请求必须是对象")
+	}
+	if method == "invokeAiProvider" || method == "invokeSyncRequest" {
+		var raw struct {
+			Body json.RawMessage `json:"body"`
+		}
+		if err := json.Unmarshal([]byte(payload), &raw); err != nil {
+			return nil, err
+		}
+		if raw.Body != nil {
+			request["body"] = raw.Body
+		}
 	}
 	defer func() {
 		if err != nil {
@@ -292,7 +318,8 @@ func (desktop *Desktop) Invoke(ctx context.Context, method, payload string) (res
 		if err != nil {
 			return nil, err
 		}
-		return desktop.Network.AI(ctx, request, saved)
+		result, err := desktop.Network.AI(ctx, request, saved)
+		return desktopJSONField(result, "data"), err
 	case "cancelAiRequest":
 		desktop.Network.Cancel(desktopText(request, "requestId"))
 		return nil, nil
@@ -301,7 +328,8 @@ func (desktop *Desktop) Invoke(ctx context.Context, method, payload string) (res
 		if err != nil {
 			return nil, err
 		}
-		return desktop.Network.Sync(ctx, request, saved)
+		result, err := desktop.Network.Sync(ctx, request, saved)
+		return desktopJSONField(result, "data"), err
 	case "getLiveMcpState":
 		return desktop.Live.State(), nil
 	case "startLiveMcp":
@@ -351,11 +379,21 @@ func (desktop *Desktop) Invoke(ctx context.Context, method, payload string) (res
 		return desktop.Library.Preview(desktopText(request, "assetId"), request["thumbnail"] != false)
 	case "beginAttachmentUpload":
 		desktop.mu.Lock()
-		defer desktop.mu.Unlock()
-		if !desktop.uploadsReady {
+		ready := desktop.uploadsReady
+		desktop.mu.Unlock()
+		if !ready {
 			return nil, fmt.Errorf("附件传输页面已关闭，请重新打开后重试")
 		}
-		return nil, desktop.Library.BeginUpload(ctx, desktopText(request, "uploadId"), desktopText(request, "name"), desktopNumber(request, "byteLength"))
+		id := desktopText(request, "uploadId")
+		err := desktop.Library.BeginUpload(ctx, id, desktopText(request, "name"), desktopNumber(request, "byteLength"))
+		desktop.mu.Lock()
+		ready = desktop.uploadsReady
+		desktop.mu.Unlock()
+		if !ready {
+			desktop.Library.CancelUpload(id)
+			return nil, fmt.Errorf("附件传输页面已关闭")
+		}
+		return nil, err
 	case "writeAttachmentChunk":
 		return nil, desktop.Library.UploadChunk(desktopText(request, "uploadId"), desktopNumber(request, "offset"), desktopText(request, "data"))
 	case "finishAttachmentUpload":
@@ -381,7 +419,10 @@ func (desktop *Desktop) Invoke(ctx context.Context, method, payload string) (res
 		if filename == "" {
 			return map[string]any{"cancelled": true}, nil
 		}
-		return map[string]any{"path": filename}, desktop.Library.CopyTo(ctx, desktopText(request, "assetId"), filename)
+		if err := desktop.Library.CopyTo(ctx, desktopText(request, "assetId"), filename); err != nil {
+			return nil, err
+		}
+		return map[string]any{"path": filename}, quarantineAttachment(ctx, filename)
 	case "openAttachment":
 		name := filepath.Base(desktopText(request, "name"))
 		if name == "." || name == "" || strings.ContainsRune(name, 0) {
@@ -393,6 +434,10 @@ func (desktop *Desktop) Invoke(ctx context.Context, method, payload string) (res
 		}
 		filename := filepath.Join(directory, name)
 		if err := desktop.Library.CopyTo(ctx, desktopText(request, "assetId"), filename); err != nil {
+			os.RemoveAll(directory)
+			return nil, err
+		}
+		if err := quarantineAttachment(ctx, filename); err != nil {
 			os.RemoveAll(directory)
 			return nil, err
 		}

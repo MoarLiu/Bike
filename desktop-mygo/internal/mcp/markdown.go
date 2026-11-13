@@ -113,7 +113,12 @@ func markdownCode(value, language, indent string) []string {
 	}
 	fence := strings.Repeat("`", max(3, longest+1))
 	language = contracts.TrimJS(language)
-	language = regexp.MustCompile("[`~\\s].*$").ReplaceAllString(language, "")
+	for index, unit := range contracts.UTF16(language) {
+		if unit == '`' || unit == '~' || contracts.JSWhitespace(unit) {
+			language = contracts.SliceUTF16(language, 0, index)
+			break
+		}
+	}
 	lines := []string{indent + fence + language}
 	for _, line := range strings.Split(value, "\n") {
 		lines = append(lines, indent+line)
@@ -168,7 +173,11 @@ func renderedMarkdown(document *object) string {
 	if source, ok := document.Get("markdownSource").(string); ok {
 		return normalizedLines(strings.TrimPrefix(source, "\ufeff"))
 	}
-	lines := []string{"# " + inlineMarkdown(textOr(document.Get("title"), "未命名文档")), ""}
+	title := document.String("title")
+	if title == "" {
+		title = "未命名文档"
+	}
+	lines := []string{"# " + inlineMarkdown(title), ""}
 	items := document.Child("attachments").Child("items")
 	var render func([]any, int, bool)
 	render = func(nodes []any, depth int, inside bool) {
@@ -347,8 +356,8 @@ func stripMetadata(source string) (string, error) {
 			return source, fmt.Errorf("Bike 元数据封装无效或重复")
 		}
 	}
-	matches := find(`<!--[[:space:]]*bike:document:v([0-9]+)[[:space:]]+([A-Za-z0-9_-]+)[[:space:]]*-->`)
-	loose := find(`<!--[[:space:]]*bike:document:v[0-9]+[^>]*-->`)
+	matches := find(`<!--` + jsSpaceClass + `*bike:document:v([0-9]+)` + jsSpaceClass + `+([A-Za-z0-9_-]+)` + jsSpaceClass + `*-->`)
+	loose := find(`<!--` + jsSpaceClass + `*bike:document:v[0-9]+[^>]*-->`)
 	if len(matches) == 0 && len(loose) == 0 {
 		if len(starts) > 0 {
 			return source, fmt.Errorf("Bike 元数据字段无效")
@@ -369,7 +378,7 @@ func stripMetadata(source string) (string, error) {
 	}
 	parsed, err := contracts.ParseJSON(encoded)
 	payload := asObject(parsed)
-	if err != nil || payload == nil || !isString(payload.Get("documentId")) || payload.Array("nodes") == nil || !isString(payload.Get("digest")) || metadataDepth(payload) > 8 {
+	if err != nil || payload == nil || payload.Get("v") != map[string]float64{"1": 1, "2": 2}[version] || !isString(payload.Get("documentId")) || payload.Array("nodes") == nil || !isString(payload.Get("digest")) || metadataDepth(payload) > 8 || !validMetadataPayload(payload) {
 		return source, fmt.Errorf("Bike 元数据字段无效")
 	}
 	if len(starts) > 0 {

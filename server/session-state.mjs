@@ -68,6 +68,8 @@ export const saveSessionRevokedBefore = async (statePath, sessionRevokedBefore) 
     await handle.close();
     handle = undefined;
     await rename(tempPath, statePath);
+    const directoryHandle = await open(directory, "r");
+    try { await directoryHandle.sync(); } finally { await directoryHandle.close(); }
   } catch (error) {
     await handle?.close().catch(() => {});
     await rm(tempPath, { force: true }).catch(() => {});

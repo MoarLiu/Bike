@@ -71,7 +71,8 @@ var syncRoutes = []struct {
 	methods string
 }{
 	{regexp.MustCompile(`^/api/v2/(status|checkpoint|events)$`), "GET"},
-	{regexp.MustCompile(`^/api/v2/(enable|operations)$`), "POST"},
+	{regexp.MustCompile(`^/api/v2/(enable|operations|operation-chunks)$`), "POST"},
+	{regexp.MustCompile(`^/api/v2/operation-chunks/[^/]+/\d+$`), "GET"},
 	{regexp.MustCompile(`^/api/v2/receipts/[^/]+$`), "GET"},
 	{regexp.MustCompile(`^/api/sync/manifest$`), "GET PATCH"},
 	{regexp.MustCompile(`^/api/documents$`), "GET"},
@@ -101,15 +102,12 @@ func SyncURL(request map[string]any) (string, string, error) {
 	}
 	allowed := false
 	for _, route := range syncRoutes {
-		if route.path.MatchString(relative.Path) && strings.Contains(" "+route.methods+" ", " "+method+" ") {
+		if route.path.MatchString(relative.EscapedPath()) && strings.Contains(" "+route.methods+" ", " "+method+" ") {
 			allowed = true
 		}
 	}
 	if !allowed {
 		return "", "", fmt.Errorf("同步 API 路径或方法不在允许范围内")
-	}
-	if relative.RawQuery != "" && relative.Path != "/api/v2/events" && relative.Path != "/api/v2/checkpoint" {
-		return "", "", fmt.Errorf("同步分页路径无效")
 	}
 	query, err := url.ParseQuery(relative.RawQuery)
 	if err != nil {
@@ -117,6 +115,17 @@ func SyncURL(request map[string]any) (string, string, error) {
 	}
 	digits := regexp.MustCompile(`^[0-9]{1,16}$`)
 	for key, values := range query {
+		if key == "bikeOrdering" && strings.HasPrefix(relative.Path, "/api/v2/") {
+			for _, value := range values {
+				if value != "2" {
+					return "", "", fmt.Errorf("同步排序能力无效")
+				}
+			}
+			continue
+		}
+		if relative.Path != "/api/v2/events" && relative.Path != "/api/v2/checkpoint" {
+			return "", "", fmt.Errorf("同步分页路径无效")
+		}
 		if key != "after" && key != "limit" && key != "expectedCursor" {
 			return "", "", fmt.Errorf("同步分页参数无效")
 		}
@@ -130,11 +139,20 @@ func SyncURL(request map[string]any) (string, string, error) {
 }
 
 func (network *Network) JSON(ctx context.Context, rawURL, method, token string, body any, timeout time.Duration, maximum int, requireJSON bool) (map[string]any, error) {
+	return network.json(ctx, rawURL, method, token, body, timeout, maximum, requireJSON, false)
+}
+func (network *Network) json(ctx context.Context, rawURL, method, token string, body any, timeout time.Duration, maximum int, requireJSON, preserveJSON bool) (map[string]any, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	var content io.Reader
 	if body != nil {
-		encoded, err := json.Marshal(body)
+		var encoded []byte
+		var err error
+		if raw, ok := body.(json.RawMessage); ok {
+			encoded = raw
+		} else {
+			encoded, err = json.Marshal(body)
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -177,17 +195,29 @@ func (network *Network) JSON(ctx context.Context, rawURL, method, token string, 
 	}
 	var data any
 	if len(raw) > 0 {
-		if err := json.Unmarshal(raw, &data); err != nil {
+		if !json.Valid(raw) {
 			if requireJSON && response.StatusCode >= 200 && response.StatusCode < 300 {
 				return nil, fmt.Errorf("同步服务返回了无效 JSON")
 			}
-			data = map[string]any{"text": string(raw)}
+			message := []rune(string(raw))
+			if len(message) > 500 {
+				message = message[:500]
+			}
+			data = map[string]any{"message": string(message)}
+		} else if preserveJSON {
+			data = json.RawMessage(raw)
+		} else {
+			json.Unmarshal(raw, &data)
 		}
 	}
 	ok := response.StatusCode >= 200 && response.StatusCode < 300
 	result := map[string]any{"ok": ok, "status": response.StatusCode, "data": data}
 	if !ok {
-		result["error"] = providerError(data, response.StatusCode)
+		errorData := data
+		if preserveJSON && len(raw) <= 2*1024*1024 {
+			json.Unmarshal(raw, &errorData)
+		}
+		result["error"] = providerError(errorData, response.StatusCode)
 	}
 	if !requireJSON && ok && strings.HasPrefix(strings.ToLower(response.Header.Get("Content-Type")), "text/html") {
 		return nil, fmt.Errorf("AI 端点返回了 HTML 页面，请检查 API baseurl 和协议端点是否匹配")
@@ -210,8 +240,28 @@ func providerError(value any, status int) string {
 }
 
 func (network *Network) Cancel(id string) {
+	if id == "" || len(id) > 100 {
+		return
+	}
 	network.mu.Lock()
 	defer network.mu.Unlock()
+	for key, expiry := range network.cancelled {
+		if time.Now().After(expiry) {
+			delete(network.cancelled, key)
+		}
+	}
+	if len(network.cancelled) >= 1024 {
+		var oldest string
+		var at time.Time
+		for key, expiry := range network.cancelled {
+			if network.active[key] == nil && (oldest == "" || expiry.Before(at)) {
+				oldest, at = key, expiry
+			}
+		}
+		if oldest != "" {
+			delete(network.cancelled, oldest)
+		}
+	}
 	network.cancelled[id] = time.Now().Add(2 * time.Minute)
 	if cancel := network.active[id]; cancel != nil {
 		cancel()
@@ -253,6 +303,10 @@ func (network *Network) AI(ctx context.Context, request, saved map[string]any) (
 		network.mu.Unlock()
 		return nil, fmt.Errorf("AI 请求已在进行中")
 	}
+	if len(network.active) >= 16 {
+		network.mu.Unlock()
+		return nil, fmt.Errorf("AI 请求繁忙，请稍后重试")
+	}
 	if _, exists := network.cancelled[id]; exists {
 		network.mu.Unlock()
 		return nil, fmt.Errorf("AI 请求已取消")
@@ -265,7 +319,7 @@ func (network *Network) AI(ctx context.Context, request, saved map[string]any) (
 		delete(network.cancelled, id)
 		network.mu.Unlock()
 	}()
-	return network.JSON(ctx, base.String(), "POST", text(request, "apiKey"), request["body"], time.Duration(contracts.Limits.AITimeoutMS)*time.Millisecond, contracts.Limits.AIResponseBytes, false)
+	return network.json(ctx, base.String(), "POST", text(request, "apiKey"), request["body"], time.Duration(contracts.Limits.AITimeoutMS)*time.Millisecond, contracts.Limits.AIResponseBytes, false, true)
 }
 
 func (network *Network) Sync(ctx context.Context, request, saved map[string]any) (map[string]any, error) {
@@ -280,5 +334,5 @@ func (network *Network) Sync(ctx context.Context, request, saved map[string]any)
 	if strings.Contains(target, "/api/v2/checkpoint") {
 		budget = contracts.Limits.OperationLimits.CheckpointBytes
 	}
-	return network.JSON(ctx, target, method, text(request, "token"), request["body"], time.Duration(contracts.Limits.SyncTimeoutMS)*time.Millisecond, budget, true)
+	return network.json(ctx, target, method, text(request, "token"), request["body"], time.Duration(contracts.Limits.SyncTimeoutMS)*time.Millisecond, budget, true, true)
 }

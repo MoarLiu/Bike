@@ -91,7 +91,8 @@ export const migrateDocument = (
   validateDocumentAttachments(rawDocument as unknown as OutlineDocument);
 
   const now = new Date().toISOString();
-  const updatedAt = textOr(rawDocument.updatedAt, now);
+  const updatedAt = typeof rawDocument.updatedAt === "string" && Number.isFinite(Date.parse(rawDocument.updatedAt))
+    ? rawDocument.updatedAt : now;
   const markdownSource =
     typeof rawDocument.markdownSource === "string"
       ? rawDocument.markdownSource.replace(/\r\n?/g, "\n")

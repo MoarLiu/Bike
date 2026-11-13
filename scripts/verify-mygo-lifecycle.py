@@ -10,7 +10,8 @@ import time
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 BUILD = os.environ.get('BIKE_MYGO_BUILD', '1')
 CHANNEL = os.environ.get('BIKE_MYGO_CHANNEL', 'preview')
-CANDIDATE = ROOT / f'release/mygo/2.0.0/build-{BUILD}-{CHANNEL}'
+VERSION = json.loads((ROOT / 'package.json').read_text())['version']
+CANDIDATE = ROOT / f'release/mygo/{VERSION}/build-{BUILD}-{CHANNEL}'
 ELECTRON = pathlib.Path(os.environ.get('BIKE_ELECTRON_APP', str(ROOT / 'release/mac-arm64/Bike.app')))
 EVIDENCE = pathlib.Path(os.environ.get(
     'BIKE_MYGO_LIFECYCLE_EVIDENCE',

@@ -51,3 +51,13 @@ test("fetchLatestRelease uses the provided fetch implementation", async () => {
   assert.equal(result.latestVersion, "1.3.2");
   assert.equal(result.updateAvailable, false);
 });
+
+test("stable desktop discovery ignores newer MyGO/mobile and prerelease tags", async () => {
+  const result = await fetchLatestRelease({ currentVersion: "2.0.0", fetchImpl: async () => ({
+    ok: true, json: async () => [
+      { tag_name: "mygo-v9.0.0" }, { tag_name: "mobile-v10.0.0" },
+      { tag_name: "v2.0.2", prerelease: true }, { tag_name: "v2.0.1" }, { tag_name: "v1.9.0" },
+    ],
+  }) });
+  assert.equal(result.latestVersion, "2.0.1");
+});

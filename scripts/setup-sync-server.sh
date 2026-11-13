@@ -2,6 +2,16 @@
 
 set -Eeuo pipefail
 
+systemd_quote() {
+  local value="$1"
+  [[ "${value}" != *$'\n'* && "${value}" != *$'\r'* ]] || die "systemd 路径不能包含换行。"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  value="${value//%/%%}"
+  printf '"%s"' "${value}"
+}
+
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 NODE_SCRIPT="${PROJECT_ROOT}/scripts/setup-sync-server.mjs"
@@ -83,8 +93,10 @@ resolve_database_path() {
 
 assert_safe_writable_dir() {
   local target="$1"
+  [[ ! -L "${target}" ]] || die "SQLite 数据库目录不能是符号链接。"
+  if [[ "${target}" == "${PROJECT_ROOT}/data" || "${target}" == "${PROJECT_ROOT}/data/"* ]]; then return; fi
   case "${target}" in
-    /|/bin|/boot|/dev|/etc|/home|/lib|/lib64|/opt|/proc|/root|/run|/sbin|/sys|/tmp|/usr|/var)
+    /|/bin|/boot|/dev|/etc|/etc/*|/home|/home/*|/lib|/lib64|/opt|/proc|/root|/root/*|/run|/sbin|/sys|/tmp|/usr|/usr/local|/usr/*|/var|/var/lib|/srv|/Users|/Users/*)
       die "SQLite 数据库目录不能直接使用系统目录：${target}。请改成专用目录，例如 /var/lib/bike-sync。"
       ;;
   esac
@@ -101,8 +113,10 @@ default_service_user() {
     printf '%s' "${BIKE_SYNC_SERVICE_USER}"
     return
   fi
-  if id bikeweb >/dev/null 2>&1; then
-    printf 'bikeweb'
+  if id bike-sync >/dev/null 2>&1 || [[ "$(id -u)" == 0 ]]; then
+    printf 'bike-sync'
+  elif id bike-web >/dev/null 2>&1; then
+    printf 'bike-web'
   else
     id -un
   fi
@@ -117,12 +131,27 @@ install_service() {
   default_user="$(default_service_user)"
   read -r -p "systemd 运行用户 [${default_user}]: " service_user
   service_user="${service_user:-${default_user}}"
+  [[ "${service_user}" != root ]] || die "同步服务不能使用 root，请选择专用服务用户。"
+  if ! id "${service_user}" >/dev/null 2>&1 && [[ "${service_user}" == bike-sync && "$(id -u)" == 0 ]]; then
+    command -v useradd >/dev/null 2>&1 || die "请先创建 bike-sync 系统用户。"
+    useradd --system --user-group --no-create-home --home-dir "${PROJECT_ROOT}" --shell /usr/sbin/nologin bike-sync
+  fi
   id "${service_user}" >/dev/null 2>&1 || die "用户不存在：${service_user}"
   service_group="$(id -gn "${service_user}")"
   data_dir="${PROJECT_ROOT}/data"
   database_dir="$(resolve_database_dir)"
   database_path="$(resolve_database_path)"
   assert_safe_writable_dir "${database_dir}"
+  [[ ! -L "${data_dir}" && ! -L "${database_path}" ]] || die "数据目录与数据库文件不能是符号链接。"
+  if [[ -d "${database_dir}" && "${database_dir}" != "${data_dir}" ]]; then
+    "${NODE_BIN}" -e '
+      const fs = require("fs"), dir = process.argv[1], owner = Number(process.argv[2]);
+      const stat = fs.statSync(dir);
+      if (fs.readdirSync(dir).length && (stat.uid !== owner || (stat.mode & 0o077))) {
+        console.error("已有数据库目录必须是服务用户拥有的私有专用目录；拒绝更改其它目录的属主或权限。"); process.exit(1);
+      }
+    ' "${database_dir}" "$(id -u "${service_user}")"
+  fi
 
   sudo_cmd mkdir -p "${data_dir}"
   sudo_cmd mkdir -p "${database_dir}"
@@ -148,18 +177,18 @@ Wants=network-online.target
 Type=simple
 User=${service_user}
 Group=${service_group}
-WorkingDirectory=${PROJECT_ROOT}
+WorkingDirectory=$(systemd_quote "${PROJECT_ROOT}")
 Environment=NODE_ENV=production
-Environment=BIKE_SYNC_CONFIG=${CONFIG_PATH}
-ExecStart=${NODE_BIN} ${PROJECT_ROOT}/server/sync-server.mjs
+Environment=$(systemd_quote "BIKE_SYNC_CONFIG=${CONFIG_PATH}")
+ExecStart=$(systemd_quote "${NODE_BIN//\$/\$\$}") $(systemd_quote "${PROJECT_ROOT//\$/\$\$}/server/sync-server.mjs")
 Restart=on-failure
 RestartSec=3
 NoNewPrivileges=true
 UMask=0077
 PrivateTmp=true
 ProtectSystem=full
-ReadWritePaths=${data_dir}
-ReadWritePaths=${database_dir}
+ReadWritePaths=$(systemd_quote "${data_dir}")
+ReadWritePaths=$(systemd_quote "${database_dir}")
 
 [Install]
 WantedBy=multi-user.target
@@ -186,13 +215,20 @@ uninstall_service() {
 }
 
 install_all() {
+  if ! systemd_available && [[ "$(id -u)" == 0 ]]; then
+    die "无 systemd 时请以普通用户运行同步服务；尚未修改配置。"
+  fi
   run_node_setup configure
   if systemd_available; then
     install_service
   else
     say "当前系统没有可用 systemd，将使用脚本后台进程启动。"
   fi
-  start_service
+  if systemd_available && service_installed; then
+    restart_service
+  else
+    start_service
+  fi
   health_check || true
 }
 

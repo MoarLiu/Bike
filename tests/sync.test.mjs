@@ -122,7 +122,7 @@ test("delete checkpoints exclude earlier downloads", async (t) => {
     onCheckpoint: (state) => { checkpoint = state; },
   }), /injected failure/);
   assert.equal(checkpoint.documentRevisions.A, undefined);
-  assert.equal(checkpoint.deletedDocumentRevisions.B, 2);
+  assert.equal(checkpoint.documentRevisions.B, 2);
 });
 
 test("desktop sync preserves mobile shortcuts and document/node extensions", async (t) => {
@@ -245,7 +245,7 @@ test("a conflicting resurrect reports a conflict once and a later round resolves
   assert.equal(first.summary.conflicts.length, 1);
   assert.equal(first.state.documentRevisions.A, previous.documentRevisions.A);
   assert.equal(first.state.documentFingerprints.A, previous.documentFingerprints.A);
-  assert.equal(first.state.deletedDocumentRevisions.A, undefined);
+  assert.equal(first.state.deletedDocumentRevisions, undefined);
   assert.ok(ids(device.workspace).includes("A"));
   const second = await syncDevice(device);
   assert.deepEqual(second.summary.conflicts, []);

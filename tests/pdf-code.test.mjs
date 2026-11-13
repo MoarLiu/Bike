@@ -28,7 +28,7 @@ test("PDF export draws code language and multiline Chinese code through the norm
   const context = {
     require(name) {
       if (name === "@pdf-lib/fontkit") return { default: fontkit };
-      if (name.endsWith("?url")) return name;
+      if (name.endsWith("?url")) return { default: name.slice(0, -4) };
       if (!name.startsWith(".")) return require(name);
       const target = path.resolve(path.dirname(filename), name);
       return /\.(mjs|cjs|js)$/.test(name) ? require(target) : loadTypescript(`${target}.ts`);
@@ -36,7 +36,7 @@ test("PDF export draws code language and multiline Chinese code through the norm
     module,
     exports: module.exports,
     Blob,
-    fetch: async () => new Response(font),
+    fetch: async (url) => new Response(await fs.readFile(path.resolve(path.dirname(filename), url))),
     URL: { createObjectURL(blob) { downloaded = blob; return "blob:pdf-code-test"; }, revokeObjectURL() {} },
     document: { createElement: () => ({ click() {}, remove() {} }), body: { appendChild() {} } },
     window: { setTimeout(callback) { callback(); } },
@@ -57,7 +57,8 @@ test("PDF export draws code language and multiline Chinese code through the norm
       updatedAt: "2026-11-11T00:00:00.000Z",
       nodes: [{
         id: "code",
-        text: "代码主题🙂",
+        text: "代码主题🙂 ★ → ✓ ℃ 日本語 한국어",
+        icon: "★",
         note: "保留备注",
         checked: true,
         collapsed: false,
@@ -69,7 +70,8 @@ test("PDF export draws code language and multiline Chinese code through the norm
     };
     assert.equal(await module.exports.exportDocumentAsPdf(document), "代码导出验证.pdf");
     assert.ok(text.includes("代码（javascript）"));
-    assert.ok(text.includes("[x] 代码主题[U+1F642]"));
+    assert.ok(text.join("").includes("[x] ★ 代码主题🙂 ★ → ✓ ℃ 日本語 한국어"));
+    assert.ok(!text.join("").includes("[U+"));
     assert.ok(text.includes('const 中文 = "验证";'));
     assert.ok(text.includes("  console.log(中文);"));
     assert.ok(text.includes(""));
@@ -77,6 +79,7 @@ test("PDF export draws code language and multiline Chinese code through the norm
     const bytes = Buffer.from(await downloaded.arrayBuffer());
     assert.equal(bytes.subarray(0, 5).toString(), "%PDF-");
     assert.equal((await pdf.PDFDocument.load(bytes)).getPageCount(), 1);
+    if (process.env.BIKE_PDF_EVIDENCE) { await fs.mkdir(path.dirname(process.env.BIKE_PDF_EVIDENCE), {recursive:true}); await fs.writeFile(process.env.BIKE_PDF_EVIDENCE,bytes); }
   } finally {
     pdf.PDFPage.prototype.drawText = drawText;
   }

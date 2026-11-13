@@ -1,3 +1,8 @@
+import { useVirtualOutline } from "./virtualOutline";
+import { applyLiveCandidatePatch } from "../shared/bike-live-patch.mjs";
+import { lockWorkspaceInteraction } from "./interactionLock";
+import { markdownInlineTokens } from "./markdownInline";
+import { Modal } from "./components/Modal";
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { observeTextareaLayout, requestTextareaResize } from "./textareaLayout";
 import {
@@ -621,10 +626,13 @@ const firstNodeIdInWorkspace = (workspace: Workspace) =>
 const downloadWorkspaceBackup = async (workspace: Workspace, reason: string) => {
   if (workspace.version >= 2) {
     const bridge = (window.bike ?? window.localOutline)?.exportWorkspaceArchive;
-    if (!bridge) throw new Error("此工作区包含附件，请使用桌面版保存完整副本后再替换");
-    const result = await bridge(workspace);
-    if (!result.ok || result.cancelled) throw new Error(result.error || "完整备份已取消，工作区已保留");
-    return;
+    if (bridge) {
+      const result = await bridge(workspace);
+      if (!result.ok || result.cancelled) throw new Error(result.error || "完整备份已取消，工作区已保留");
+      return;
+    }
+    if (workspaceAttachmentAssets(workspace).length &&
+        !window.confirm("浏览器可备份全部正文和附件索引，但不包含附件文件。附件仍需从桌面版或同步服务保留。下载 JSON 副本并继续？")) throw new Error("备份已取消，原工作区已保留");
   }
   const backup = exportWorkspace(workspace);
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
@@ -708,7 +716,7 @@ const InspectorNoteField = React.memo(function InspectorNoteField({
   note: string;
   onPatch: (id: string, patch: Partial<OutlineNode>) => void;
   onDraftChange: (id: string, value: string, baseNote: string) => void;
-  onCommit: (id: string, value: string) => void;
+  onCommit: (id: string, value: string) => boolean;
   onSuggest: React.ComponentProps<typeof LinkInput>["onSuggest"];
   onBind: React.ComponentProps<typeof LinkInput>["onBind"];
   onCreate: React.ComponentProps<typeof LinkInput>["onCreate"];
@@ -738,8 +746,7 @@ const InspectorNoteField = React.memo(function InspectorNoteField({
     const latest = latestRef.current;
     if (latest.draft !== latest.note) {
       latest.onPatch(latest.nodeId, { note: latest.draft });
-      latest.onCommit(latest.nodeId, latest.draft);
-      latestRef.current = { ...latest, note: latest.draft };
+      if (latest.onCommit(latest.nodeId, latest.draft)) latestRef.current = { ...latest, note: latest.draft };
     } else {
       latest.onCommit(latest.nodeId, latest.note);
     }
@@ -1153,6 +1160,7 @@ function App() {
       if (!["preparing", "installing"].includes(state.status)) releaseUpdateLock();
       const messages: Partial<Record<BikeUpdateState["status"], string>> = {
         checking: "正在检查更新...",
+        manual: `发现新版本 ${state.latestVersion ?? ""}，请从发布页下载并替换安装`,
         downloading: `正在下载更新 ${Math.round(state.progress ?? 0)}%`,
         downloaded: "更新已下载，可通过检查更新入口重启安装",
         preparing: "正在保存工作区并准备更新...",
@@ -1360,10 +1368,6 @@ function App() {
   }, [workspace]);
 
   useEffect(() => {
-    workspaceRef.current = workspace;
-  }, [workspace]);
-
-  useEffect(() => {
     modeRef.current = mode;
   }, [mode]);
 
@@ -1482,6 +1486,13 @@ function App() {
     [activeDocument, workspace],
   );
 
+  const tagHits = useMemo(() => mode !== "markdown" && activeDocument && selectedTags.length
+    ? flattenNodes(activeDocument.nodes).filter(row => selectedTags.every(tag =>
+      [...extractTags(row.node.text), ...extractTags(row.node.note)].map(foldKey).includes(foldKey(tag)))) : [],
+    [mode, activeDocument, selectedTags]);
+  const relationTargets = useMemo(() => (knowledgeIndex?.nodes ?? []).filter(node => node.documentId === activeDocument?.id)
+    .map(node => ({ id: node.nodeId, label: node.pathLabel })), [knowledgeIndex, activeDocument?.id]);
+
   const matchingDocuments = useMemo(() => {
     if (!workspace) return [];
     // SearchResults owns indexed/debounced filtering. Do not rescan every
@@ -1501,7 +1512,10 @@ function App() {
   ) => {
     const current = workspaceRef.current;
     if (!current) return null;
-    if (cleanupBusyRef.current || updateInstallRef.current || operationCommitRef.current) return current;
+    if (cleanupBusyRef.current || updateInstallRef.current || operationCommitRef.current) {
+      showNotice("正在提交工作区，请稍后重试；输入草稿仍保留");
+      return null;
+    }
     let next = updater(current);
     if (next === current) return current;
     const version = workspaceFormatVersion(next);
@@ -1524,7 +1538,8 @@ function App() {
     if (history !== historyRef.current) {
       historyRef.current = history;
       bumpHistoryVersion((version) => version + 1);
-      if (historyMemoryUsage(history).overBudget) showNotice("本次操作超过撤销内存预算，已保留最近一次撤销；更早的记录已释放");
+      const usage = historyMemoryUsage(history);
+      if (usage.overBudget || usage.evictedEntries > 0) showNotice("撤销记录达到内存预算，较早的记录已释放；最近一次撤销仍保留，也可查看版本历史");
     }
     maybeCaptureAutoSnapshots(current, next);
     markWorkspaceOperation(next, { source: { kind: "user", label: options.label ?? "编辑" } });
@@ -1641,6 +1656,7 @@ function App() {
         return next;
       }, { label: "编辑 Markdown", group: `markdown:${draft.documentId}` });
 
+      if (!nextWorkspace || !nextDocument) return workspaceRef.current;
       markdownDraftRef.current = { ...draft, dirty: false };
       const nextNodes = nextDocument ? (nextDocument as MarkdownDocument).nodes : null;
       if (
@@ -1673,13 +1689,19 @@ function App() {
       ambiguous = renamed.ambiguous.length;
       return stampRenamedWorkspace(renamed.workspace as Workspace, renamed.updatedDocumentIds);
     }, { label: "重命名主题", group: null });
-    labelBaselineRef.current.set(nodeId, nextLabel);
+    if (result) labelBaselineRef.current.set(nodeId, nextLabel);
     if (ambiguous) showNotice(`有 ${ambiguous} 条重名链接没有自动改名`);
     return result ?? workspaceRef.current;
   });
 
   const flushFocusedStructuredInput = useEventCallback(() => {
     const element = document.activeElement;
+    if (typeof HTMLInputElement !== "undefined" && element instanceof HTMLInputElement && element.matches(".title-input, .document-heading-input")) {
+      const current = workspaceRef.current;
+      const active = current?.documents.find(item => item.id === current.activeDocumentId);
+      if (active && element.value !== active.title) return updateTitle(element.value, undefined, true) ?? current;
+      return current;
+    }
     if (!(element instanceof HTMLTextAreaElement)) return workspaceRef.current;
 
     const entry = Array.from(inputRefs.current.entries()).find(([, input]) => input === element);
@@ -1710,13 +1732,17 @@ function App() {
 
   const handleInspectorNoteCommit = useEventCallback((nodeId: string, value: string) => {
     const draft = inspectorNoteDraftRef.current;
-    if (!draft || draft.nodeId !== nodeId) return;
+    if (!draft || draft.nodeId !== nodeId) return false;
+    const current = workspaceRef.current;
+    const active = current?.documents.find(item => item.id === current.activeDocumentId);
+    if (!active || findNode(active.nodes, nodeId)?.note !== value) return false;
     inspectorNoteDraftRef.current = {
       nodeId,
       value,
       baseNote: value,
       dirty: false,
     };
+    return true;
   });
 
   const flushInspectorNoteDraft = useEventCallback(() => {
@@ -1751,6 +1777,7 @@ function App() {
           : document,
       ),
     }), { label: "编辑备注", group: `note:${draft.nodeId}` });
+    if (!nextWorkspace) return workspaceRef.current;
     inspectorNoteDraftRef.current = {
       nodeId: draft.nodeId,
       value: draft.value,
@@ -1786,11 +1813,18 @@ function App() {
     if (!saved.ok || saved.target !== "indexeddb") throw new Error("请先恢复本机主存储，再使用 2.0 操作");
     if (current.version === 3) return current;
     const bridge = window.bike ?? window.localOutline;
-    if (!bridge?.exportWorkspaceArchive) throw new Error("请在桌面版完成完整 ZIP 备份并升级工作区");
-    if (!window.confirm("启用 2.0 操作前将保存一份完整工作区 ZIP。升级后的原工作区需要 Bike 2.0，回退时请使用此备份。继续？")) return null;
-    const backup = await bridge.exportWorkspaceArchive(current);
-    if (!backup.ok || backup.cancelled) throw new Error(backup.error || "升级前备份已取消");
+    const backupKind = bridge?.exportWorkspaceArchive ? "完整工作区 ZIP"
+      : workspaceAttachmentAssets(current).length ? "正文和附件索引 JSON（附件文件请另行保留，JSON 不包含附件二进制）" : "完整正文 JSON";
+    if (!window.confirm(`启用 2.0 操作前将下载一份${backupKind}。升级后的原工作区需要 Bike 2.0，回退时请使用此备份。继续？`)) return null;
+    if (bridge?.exportWorkspaceArchive) {
+      const backup = await bridge.exportWorkspaceArchive(current);
+      if (!backup.ok || backup.cancelled) throw new Error(backup.error || "升级前备份已取消");
+    } else {
+      const backup = exportWorkspace(current);
+      downloadText(backup.filename, backup.content, backup.mime);
+    }
     if (workspaceRef.current !== current) throw new Error("备份期间工作区发生变化，请重新备份后升级");
+    const unlock = lockWorkspaceInteraction(typeof document !== "undefined" ? document.querySelector<HTMLElement>(".shell") : null);
     operationCommitRef.current = true;
     try {
       const upgraded: Workspace = { ...current, version: 3 };
@@ -1799,7 +1833,7 @@ function App() {
       replaceWorkspace(upgraded); showSaveResult(result, upgraded);
       showNotice("已备份并升级 2.0 工作区");
       return upgraded;
-    } finally { operationCommitRef.current = false; }
+    } finally { operationCommitRef.current = false; unlock(); }
   });
 
   const enqueueProposal = useEventCallback((next: WorkspaceProposal) => {
@@ -1822,6 +1856,7 @@ function App() {
     if (proposal.source.kind === "mcp" && !proposalRegistryRef.current.has(proposal.id)) { setProposalError("Live 授权已撤销，提案已失效"); return; }
     const current = flushPendingEdits() ?? workspaceRef.current;
     if (!current || current.version !== 3) { setProposalError("请先备份并升级工作区"); return; }
+    const unlock = lockWorkspaceInteraction(typeof document !== "undefined" ? document.querySelector<HTMLElement>(".shell") : null);
     operationCommitRef.current = true; setProposalBusy(true); setProposalError(null);
     try {
       const next = acceptProposalGroups(current, proposal, selectedIds);
@@ -1837,15 +1872,16 @@ function App() {
       setProposals((queue) => queue.filter((item) => item.id !== proposal.id));
       showNotice("所选修改已持久保存，等待同步的内容会在联网后传输");
     } catch (error) { setProposalError(error instanceof Error ? error.message : "提案提交失败"); }
-    finally { operationCommitRef.current = false; setProposalBusy(false); }
+    finally { operationCommitRef.current = false; unlock(); setProposalBusy(false); }
   });
 
 
   const liveReadBarrier = useEventCallback(async (grant: LiveMcpGrant) => {
     if (!ready || compositionActiveRef.current || operationCommitRef.current || storageConflictRef.current || recoveryBusyRef.current || historyBusyRef.current || syncBusyRef.current || attachmentImportRef.current)
       throw new Error("工作区忙碌或受保护，请稍后读取");
+    if (document.activeElement instanceof HTMLInputElement && document.activeElement.matches(".title-input, .document-heading-input"))
+      throw new Error("正在编辑文档标题，请等待用户完成编辑后重试读取");
     for (let attempt = 0; attempt < 3; attempt++) {
-      if (document.activeElement instanceof HTMLInputElement && document.activeElement.matches(".title-input, .document-heading-input")) document.activeElement.blur();
       const current = flushPendingEdits() ?? workspaceRef.current;
       if (!current || current.version !== 3) throw new Error("请在应用内备份并升级工作区");
       if (current.documents.some((item) => readBikeMetadata(item.markdownSource ?? "").status === "unknown-version")) throw new Error("工作区包含受保护的 Markdown 格式");
@@ -1879,11 +1915,12 @@ function App() {
     }
     const barrier = await liveReadBarrier(request.grant);
     if (grantEpoch !== liveGrantEpochRef.current) throw new Error("Live 授权已失效，请重新连接");
-    if (request.method === "snapshot") return { workspace: barrier.scoped, revision: barrier.revision, workspaceId: barrier.workspaceId, savedAt: barrier.savedAt, writable: barrier.writable };
+    if (request.method === "snapshot") return { workspace: barrier.scoped, revision: barrier.revision, workspaceId: barrier.workspaceId, savedAt: barrier.savedAt, writable: barrier.writable, capabilities: ["candidate-patch-v1"] };
     if (request.payload.clientDigest !== undefined && (typeof request.payload.clientDigest !== "string" || !/^[a-f0-9]{64}$/.test(request.payload.clientDigest))) throw new Error("Live 请求摘要格式无效");
     if (!request.payload.requestId || request.payload.workspaceId !== barrier.workspaceId || request.payload.expectedRevision !== barrier.revision) throw new Error("Live 提案读取基线已变化，请重新读取");
     const id = request.payload.requestId;
-    const candidate = request.payload.candidate as Workspace;
+    const candidate = (request.payload.candidatePatch
+      ? applyLiveCandidatePatch(barrier.scoped, request.payload.candidatePatch) : request.payload.candidate) as Workspace;
     assertWorkspaceBudget(candidate);
     if (candidate?.version !== 3 || !Array.isArray(candidate.documents) || !candidate.documents.length) throw new Error("Live 候选工作区格式无效");
     workspaceAttachmentAssets(candidate);
@@ -1893,6 +1930,7 @@ function App() {
     let merged: Workspace = { ...barrier.current,
       documents: barrier.current.documents.flatMap((document) => permitted.has(document.id) ? candidates.has(document.id) ? [candidates.get(document.id)!] : [] : [document]) };
     for (const document of candidate.documents) if (!barrier.current.documents.some((item) => item.id === document.id)) merged = { ...merged, documents: [...merged.documents, document] };
+    if (request.grant.scope === "workspace") merged = { ...merged, documents: candidate.documents };
     if (request.grant.scope !== "workspace") {
       for (const document of candidate.documents) {
         const before = barrier.current.documents.find((item) => item.id === document.id);
@@ -2100,7 +2138,7 @@ function App() {
       setMarkdownDraft(inserted.text);
     }
     showNotice(bindingError ? `文档已创建，但稳定链接未建立：${bindingError}。可以从候选中重新选择这个文档。`
-      : "已创建文档并插入链接。撤销只会移除链接，新文档会保留，也可以移入回收站。");
+      : "已创建文档并插入链接。撤销会同时撤销链接和新建文档；重做可恢复。");
   });
 
 
@@ -2164,7 +2202,11 @@ function App() {
       return;
     }
     if (result.status === "stale") {
-      showNotice("撤销涉及的内容已有后续修改，请在版本历史中比较或恢复为副本");
+      historyRef.current = direction === "undo"
+        ? { ...historyRef.current, past: historyRef.current.past.slice(0, -1) }
+        : { ...historyRef.current, future: historyRef.current.future.slice(1) };
+      bumpHistoryVersion((version) => version + 1);
+      showNotice("该撤销条目涉及后续修改，已跳过；可继续撤销其它条目，或在版本历史中恢复副本");
       return;
     }
 
@@ -2366,7 +2408,7 @@ function App() {
   });
 
   const deleteDocument = useEventCallback(() => {
-    if (syncBusyRef.current || recoveryBusyRef.current || historyBusyRef.current || storageConflictRef.current) return;
+    if (syncBusyRef.current || operationCommitRef.current || recoveryBusyRef.current || historyBusyRef.current || storageConflictRef.current) { showNotice("工作区忙碌或受保护，请稍后重试"); return; }
     const currentWorkspace = flushPendingEdits() ?? workspaceRef.current;
     const currentDocument = currentWorkspace?.documents.find(
       (document) => document.id === currentWorkspace.activeDocumentId,
@@ -2396,7 +2438,7 @@ function App() {
   });
 
   const restoreFromTrash = useEventCallback((entryId: string) => {
-    if (syncBusyRef.current || recoveryBusyRef.current || historyBusyRef.current || storageConflictRef.current) return;
+    if (syncBusyRef.current || operationCommitRef.current || recoveryBusyRef.current || historyBusyRef.current || storageConflictRef.current) { showNotice("工作区忙碌或受保护，请稍后重试"); return; }
     const current = flushPendingEdits() ?? workspaceRef.current;
     if (!current) return;
     let result;
@@ -2411,7 +2453,7 @@ function App() {
   });
 
   const deleteFromTrash = useEventCallback((entryId: string) => {
-    if (syncBusyRef.current || recoveryBusyRef.current || historyBusyRef.current || storageConflictRef.current) return;
+    if (syncBusyRef.current || operationCommitRef.current || recoveryBusyRef.current || historyBusyRef.current || storageConflictRef.current) { showNotice("工作区忙碌或受保护，请稍后重试"); return; }
     const current = workspaceRef.current;
     if (!current) return;
     if (!window.confirm("彻底删除后无法从回收站恢复。继续？")) return;
@@ -2420,7 +2462,7 @@ function App() {
   });
 
   const emptyTrashForever = useEventCallback(async () => {
-    if (syncBusyRef.current || recoveryBusyRef.current || historyBusyRef.current || storageConflictRef.current) return;
+    if (syncBusyRef.current || operationCommitRef.current || recoveryBusyRef.current || historyBusyRef.current || storageConflictRef.current) { showNotice("工作区忙碌或受保护，请稍后重试"); return; }
     const current = workspaceRef.current;
     if (!current?.trash?.length) return;
     if (!window.confirm("清空回收站会先下载一份包含回收站内容的工作区备份。继续？")) return;
@@ -2502,8 +2544,12 @@ function App() {
         showNotice("保存快照期间内容发生变化，已取消恢复，请重新查看版本历史");
         return;
       }
+      const usedIds = new Set(current.documents.filter((item) => item.id !== document.id)
+        .flatMap((item) => [item.id, ...flattenNodes(item.nodes).map(({ node }) => node.id)]));
+      const collides = flattenNodes(snapshot.document.nodes).some(({ node }) => usedIds.has(node.id));
+      if (collides && snapshot.document.knowledge && !knowledgeEditable(snapshot.document.knowledge)) throw new Error("历史主题身份冲突，无法安全重写当前版本不支持的知识数据；请先导出此历史副本");
       const restored = {
-        ...snapshot.document,
+        ...(collides ? remapCollidingIds(snapshot.document, usedIds).document : snapshot.document),
         id: document.id,
         createdAt: document.createdAt,
         updatedAt: now(),
@@ -2689,6 +2735,8 @@ function App() {
     setAiBusyKey(busyKey);
     showNotice(action === "generate" ? "AI 正在生成 Markdown 子主题..." : "AI 正在润色 Markdown 主题...");
     try {
+      const ensured = await ensureOperationWorkspace();
+      if (!ensured) return null;
       const result = await requestAiForTopic(action, {
         documentTitle: activeDocument.title,
         topicText: target.text,
@@ -2707,9 +2755,9 @@ function App() {
         latestWorkspace?.activeDocumentId !== sourceDocumentId || latestSource !== source
       ) throw new Error("AI 请求期间 Markdown 发生变化，已保留当前内容，请重新生成");
 
-      const ensured = await ensureOperationWorkspace();
-      if (!ensured) return null;
-      const bound = ensured.documents.find((item) => item.id === sourceDocumentId);
+      const current = flushPendingEdits() ?? workspaceRef.current;
+      if (!current) return null;
+      const bound = current.documents.find((item) => item.id === sourceDocumentId);
       if (!bound || getDocumentMarkdown(bound) !== source) throw new Error("Markdown 目标内容已变化，请重新生成");
       let next: string;
       if (action === "polish") {
@@ -2721,9 +2769,9 @@ function App() {
         next = insertMarkdownChildren(source, target, result.children);
       }
       const parsed = parseMarkdownIntoDocument(bound, next);
-      const candidate = { ...ensured, documents: ensured.documents.map((item) => item.id === bound.id ? parsed : item) };
+      const candidate = { ...current, documents: current.documents.map((item) => item.id === bound.id ? parsed : item) };
       const label = action === "polish" ? "AI 润色 Markdown" : "AI 生成 Markdown 子主题";
-      enqueueProposal(createWorkspaceProposal(ensured, [{ id: "markdown", label, workspace: candidate }], {
+      enqueueProposal(createWorkspaceProposal(current, [{ id: "markdown", label, workspace: candidate }], {
         id: uuid(), source: { kind: "ai", label }, label, targetDocumentIds: [bound.id],
       }));
       showNotice("Markdown 提案已生成，请预览后接受");
@@ -3056,14 +3104,18 @@ function App() {
       if (!siblings.length) return nodes;
       const shouldCollapse = siblings.some((row) => !row.node.collapsed);
       const siblingIds = new Set(siblings.map((row) => row.node.id));
-      const next = cloneNodes(nodes);
-      const apply = (items: OutlineNode[]) => {
-        items.forEach((node) => {
-          if (siblingIds.has(node.id)) node.collapsed = shouldCollapse;
-          apply(node.children);
+      const apply = (items: OutlineNode[]): OutlineNode[] => {
+        let changed = false;
+        const result = items.map((node) => {
+          const children = apply(node.children);
+          const nextCollapsed = siblingIds.has(node.id) ? shouldCollapse : node.collapsed;
+          if (children === node.children && nextCollapsed === node.collapsed) return node;
+          changed = true;
+          return { ...node, children, collapsed: nextCollapsed };
         });
+        return changed ? result : items;
       };
-      apply(next);
+      const next = apply(nodes);
       didToggle = true;
       collapsed = shouldCollapse;
       return next;
@@ -3154,11 +3206,11 @@ function App() {
     }
   });
 
-  const updateTitle = useEventCallback((title: string, options?: EditOptions) => {
+  const updateTitle = useEventCallback((title: string, options?: EditOptions, fromFlush = false): Workspace | null => {
     const nextTitle = title || "未命名文档";
-    flushPendingEdits();
+    if (!fromFlush) flushPendingEdits();
     let ambiguous = 0;
-    commitWorkspace((workspace) => {
+    const committed = commitWorkspace((workspace) => {
       const renamed = renameTarget(workspace, {
         documentId: workspace.activeDocumentId,
         previousLabel: workspace.documents.find((document) => document.id === workspace.activeDocumentId)?.title,
@@ -3179,6 +3231,7 @@ function App() {
       } as Workspace;
     }, options ?? { label: "重命名文档", group: null });
     if (ambiguous) showNotice(`有 ${ambiguous} 条重名链接没有自动改名`);
+    return committed;
   });
 
   const moveSelected = useEventCallback((direction: -1 | 1) => {
@@ -3380,7 +3433,7 @@ function App() {
     if (!current || storageConflictRef.current || recoveryBusyRef.current) return;
     try {
       const saved = await saveWorkspace(current);
-      if (!saved.ok || saved.target !== "indexeddb") throw new Error("本机主存储保存完成后才能导出完整归档");
+      if (!saved.ok || saved.target !== "indexeddb") showNotice("主存储尚未保存，将直接导出当前编辑内容和附件作为恢复归档");
       const result = await bridge.exportWorkspaceArchive(current);
       if (!result.ok) throw new Error(result.error || "工作区归档失败");
       if (!result.cancelled) showNotice(`已导出完整 ZIP，包含 ${result.attachmentCount ?? 0} 个附件`);
@@ -3653,14 +3706,16 @@ function App() {
       isWorkspacePersisted(current),
     );
     if (!next) return;
-    refreshedWorkspaceRef.current = next;
-    replaceWorkspace(next);
+    const retained = next.documents.some((item) => item.id === current.activeDocumentId)
+      ? { ...next, activeDocumentId: current.activeDocumentId } : next;
+    refreshedWorkspaceRef.current = retained;
+    replaceWorkspace(retained);
     refreshRecoverySnapshots();
     setSyncState(loadSyncState(syncConfig.serverUrl));
-    const activeDocument = next.documents.find((item) => item.id === next.activeDocumentId) ?? next.documents[0];
+    const activeDocument = retained.documents.find((item) => item.id === retained.activeDocumentId) ?? retained.documents[0];
     const activeId = activeNodeIdRef.current;
     if (!activeDocument || !activeId || !findNode(activeDocument.nodes, activeId)) {
-      setActiveNodeId(firstNodeIdInWorkspace(next));
+      setActiveNodeId(firstNodeIdInWorkspace(retained));
     }
   });
 
@@ -3841,20 +3896,46 @@ function App() {
       const initialSave = await saveWorkspace(currentWorkspace);
       if (!initialSave.ok) throw initialSave.error;
       if (currentWorkspace.version === 3) {
-        const replica = await readReplicaState();
+        let replica = await readReplicaState();
         if (!replica) throw new Error("缺少本机操作记录");
-        const result = await syncOperationWorkspace(currentWorkspace, activeSync.config, replica);
+        if (replica.initialWorkspace && !replica.syncStarted && !replica.remote) {
+          const marked = await saveWorkspaceToStorage(currentWorkspace, {
+            expectedWorkspace: currentWorkspace, replicaUpdate: { ...replica, syncStarted: true }, requireIndexedDB: true,
+          });
+          if (!marked.ok) throw marked.error;
+          replica = await readReplicaState();
+          if (!replica) throw new Error("本机同步标记未保存");
+        }
+        let result: Awaited<ReturnType<typeof syncOperationWorkspace>>;
+        try { result = await syncOperationWorkspace(currentWorkspace, activeSync.config, replica); }
+        catch (error) {
+          if ((error as { code?: string }).code !== "initial-collision" || options.silent) throw error;
+          if (!window.confirm(`${(error as Error).message}\n\n继续前会下载本机备份。是否继续比较？`)) throw new Error("已取消首次接入，本机内容保持不变");
+          await downloadWorkspaceBackup(currentWorkspace, "initial-sync-collision");
+          if (!sameWorkspaceContent(flushPendingEdits() ?? workspaceRef.current!, currentWorkspace)) {
+            retryAfterEdit = true; throw new Error("备份期间出现新编辑，请重新比较");
+          }
+          result = await syncOperationWorkspace(currentWorkspace, activeSync.config, replica, { allowInitialCollision: true });
+        }
+        if (!result.unchanged) {
         const latest = flushPendingEdits() ?? workspaceRef.current;
         if (!latest || !sameWorkspaceContent(latest, currentWorkspace)) { retryAfterEdit = true; showNotice("同步期间有新编辑，已保留内容，下一轮会继续同步"); return; }
         await captureSyncSnapshots(latest, result.workspace);
-        if (workspaceRef.current !== latest) { retryAfterEdit = true; return; }
+        const afterSnapshots = flushPendingEdits() ?? workspaceRef.current;
+        if (!afterSnapshots || !sameWorkspaceContent(afterSnapshots, latest) || storageConflictRef.current ||
+            (typeof compositionActiveRef !== "undefined" && compositionActiveRef.current)) { retryAfterEdit = true; return; }
+        const received = { ...result.workspace, activeDocumentId: afterSnapshots.activeDocumentId };
+        if (!received.documents.some((document) => document.id === received.activeDocumentId)) received.activeDocumentId = received.documents[0]?.id ?? "";
+        const shell = typeof document !== "undefined" ? document.querySelector<HTMLElement>(".shell") : null;
+        const unlock = lockWorkspaceInteraction(shell);
         operationCommitRef.current = true;
         try {
-          const saved = await saveWorkspaceToStorage(result.workspace, { expectedWorkspace: latest, replicaUpdate: result.replica, requireIndexedDB: true });
+          const saved = await saveWorkspaceToStorage(received, { expectedWorkspace: afterSnapshots, replicaUpdate: result.replica, requireIndexedDB: true });
           if (!saved.ok) throw saved.error;
-          replaceWorkspace(result.workspace); syncAppliedWorkspaceRef.current = result.workspace;
-          showSaveResult(saved, result.workspace);
-        } finally { operationCommitRef.current = false; }
+          applySyncedWorkspace(received); syncAppliedWorkspaceRef.current = workspaceRef.current;
+          showSaveResult(saved, received);
+        } finally { operationCommitRef.current = false; unlock(); }
+        }
         persistSyncState({ ...activeSync.state, lastSyncedAt: now() });
         retryAfterEdit = result.hasMore; autoSyncDirtyRef.current = result.hasMore;
         const bridge = window.bike ?? window.localOutline;
@@ -4287,11 +4368,6 @@ function App() {
     return <div className="loading">正在打开本地工作区...</div>;
   }
 
-  const tagHits = selectedTag
-    ? flattenNodes(activeDocument.nodes).filter((row) =>
-        selectedTags.every((tag) => [...extractTags(row.node.text), ...extractTags(row.node.note)].map(foldKey).includes(foldKey(tag))),
-      )
-    : [];
   const canUndo = historyRef.current.past.length > 0;
   const canRedo = historyRef.current.future.length > 0;
 
@@ -4503,7 +4579,10 @@ function App() {
           </button>
         </div>
         <div className="sidebar-utility-actions">
-          {workspace?.version === 3 && <button type="button" onClick={() => {
+          {workspace?.version === 3 && <button type="button"
+            disabled={!(window.bike ?? window.localOutline)?.exportWorkspaceArchive}
+            title={(window.bike ?? window.localOutline)?.exportWorkspaceArchive ? "导出兼容旧版本的完整附件副本" : "完整 ZIP 需要桌面版；浏览器可通过导出工作区 JSON 保留正文和附件索引"}
+            onClick={() => {
             const current = flushPendingEdits() ?? workspaceRef.current; if (!current) return;
             const compatible = { ...current, version: workspaceFormatVersion({ ...current, version: 1 }) };
             void (window.bike ?? window.localOutline)?.exportWorkspaceArchive?.(compatible).then((result) => { if (result.ok && !result.cancelled) showNotice("已导出 1.7 兼容 ZIP 副本，操作日志与本机副本身份保留在当前数据库"); });
@@ -4867,7 +4946,7 @@ function App() {
                 documentBacklinks={knowledgeIndex ? backlinksFor(knowledgeIndex, activeDocument.id) : []}
                 nodeBacklinks={knowledgeIndex && activeNode ? backlinksFor(knowledgeIndex, activeDocument.id, activeNode.id) : []}
                 relations={relationView(activeDocument)}
-                targets={(knowledgeIndex?.nodes ?? []).filter((node) => node.documentId === activeDocument.id).map((node) => ({ id: node.nodeId, label: node.pathLabel }))}
+                targets={relationTargets}
                 activeNodeId={activeNode?.id ?? null}
                 onOpen={openKnowledgeTarget}
                 onOpenNode={(id) => openKnowledgeTarget(activeDocument.id, id)}
@@ -4909,7 +4988,7 @@ function App() {
         </div>
       )}
 
-      {showKnowledgeWorkflow && <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="AI 知识操作" onClick={() => setShowKnowledgeWorkflow(false)}><section className="api-config-dialog" onClick={(event) => event.stopPropagation()}>
+      {showKnowledgeWorkflow && <Modal onDismiss={() => setShowKnowledgeWorkflow(false)} className="modal-overlay" role="dialog" aria-modal="true" aria-label="AI 知识操作" onClick={() => setShowKnowledgeWorkflow(false)}><section className="api-config-dialog" onClick={(event) => event.stopPropagation()}>
         <header><div><h3>AI 知识操作</h3><p>发送选中资料，生成结构化候选后预览。</p></div><button type="button" className="dialog-close" aria-label="关闭" onClick={() => setShowKnowledgeWorkflow(false)}><X size={16} /></button></header>
         <div className="config-body"><label className="config-field"><span>操作</span><select value={knowledgeAction} onChange={(event) => setKnowledgeAction(event.target.value as KnowledgeAction)}>{KNOWLEDGE_ACTIONS.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label>
           <label className="checkbox-field"><input type="checkbox" checked={knowledgeWholeDocument} onChange={(event) => setKnowledgeWholeDocument(event.target.checked)} />使用当前整篇文档。默认使用选中子树。</label>
@@ -4917,8 +4996,8 @@ function App() {
           {knowledgeAction.endsWith("-template") && <><label className="config-field"><span>读者</span><select value={templateAudience} onChange={(event) => setTemplateAudience(event.target.value)}><option value="mixed">产品与研发</option><option value="engineering">研发</option><option value="product">产品</option></select></label><p>落点为新文档，可在接受后撤销创建。</p></>}
           <p>范围上限为 2,000 个主题和 256 KiB 文本。缺少依据的信息需标为待确认。</p></div>
         <footer><button type="button" className="primary" onClick={() => void runKnowledgeWorkflow()} disabled={Boolean(aiBusyKey)}>生成提案</button><button className="secondary" onClick={() => setShowKnowledgeWorkflow(false)}>取消</button></footer>
-      </section></div>}
-      {showLiveMcp && <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="Live MCP 授权" onClick={() => setShowLiveMcp(false)}><section className="api-config-dialog" onClick={(event) => event.stopPropagation()}>
+      </section></Modal>}
+      {showLiveMcp && <Modal onDismiss={() => setShowLiveMcp(false)} className="modal-overlay" role="dialog" aria-modal="true" aria-label="Live MCP 授权" onClick={() => setShowLiveMcp(false)}><section className="api-config-dialog" onClick={(event) => event.stopPropagation()}>
         <header><div><h3>Live MCP 授权</h3><p>本机 stdio 客户端通过受保护的本机通道读取已提交内容。</p></div><button type="button" className="dialog-close" onClick={() => setShowLiveMcp(false)} aria-label="关闭"><X size={16} /></button></header>
         <div className="config-body"><label className="config-field"><span>读取范围</span><select value={liveScope} onChange={(event) => setLiveScope(event.target.value as "document" | "workspace")}><option value="document">当前文档</option><option value="workspace">整个工作区</option></select></label>
           <label className="checkbox-field"><input type="checkbox" checked={liveWritable} onChange={(event) => setLiveWritable(event.target.checked)} />允许提交写入提案，接受后生效</label>
@@ -4927,7 +5006,7 @@ function App() {
           <pre>{JSON.stringify({ command: liveState.command ?? "node", args: liveState.args ?? ["mcp/bike-server.mjs", "--live"], env: { BIKE_LIVE_DISCOVERY: liveState.discoveryPath ?? "启用后生成" } }, null, 2)}</pre></div>
         <footer><button type="button" className="primary" onClick={() => { void ensureOperationWorkspace().then(async (current) => { if (!current) return; const bridge = window.bike ?? window.localOutline; if (!bridge?.startLiveMcp) throw new Error("Live MCP 需要桌面版"); await bridge.startLiveMcp({ scope: liveScope, documentIds: [current.activeDocumentId], writable: liveWritable }); setLiveState(await bridge.getLiveMcpState!()); setShowLiveMcp(false); showNotice("Live MCP 已按所选范围启用"); }).catch((error) => showNotice(error instanceof Error ? error.message : "Live 启动失败")); }}>启用所选授权</button>
           <button className="secondary" onClick={() => { void (window.bike ?? window.localOutline)?.stopLiveMcp?.().then((state) => { setLiveState(state); showNotice("Live MCP 授权已撤销"); }); }}>撤销并关闭</button></footer>
-      </section></div>}
+      </section></Modal>}
       {proposal && <ProposalDialog key={proposal.id} workspace={workspace} proposal={proposal} busy={proposalBusy} error={proposalError} onAccept={acceptProposal} onReject={rejectProposal} />}
       {localCopyDialog && <LocalMigrationDialog copy={localCopyDialog.kind === "import" ? localCopyDialog.copy : undefined} documentCount={localCopyDialog.kind === "import" ? localCopyDialog.workspace.documents.length : workspace.documents.length} onClose={closeLocalCopyDialog} onConfirm={(options) => void executeLocalCopyDialog(options)} />}
       {sourceArchives && <LocalMigrationArchivesDialog archives={sourceArchives} onClose={() => setSourceArchives(null)} onDownload={(copy) => downloadText(`bike-source-${copy.id}.json`, JSON.stringify(copy, null, 2), "application/json")} />}
@@ -5000,7 +5079,7 @@ function App() {
       )}
 
       {showConfirmDelete && (
-        <div className="confirm-overlay" role="dialog" aria-modal="true" aria-label="删除文档" onClick={() => setShowConfirmDelete(false)}>
+        <Modal onDismiss={() => setShowConfirmDelete(false)} className="confirm-overlay" role="dialog" aria-modal="true" aria-label="删除文档" onClick={() => setShowConfirmDelete(false)}>
           <div className="confirm-dialog" onClick={(e) => e.stopPropagation()}>
             <h3>确认删除</h3>
             <p>确定要将文档「{activeDocument.title}」移入回收站吗？回收站会保留 30 天，可随时恢复。</p>
@@ -5009,7 +5088,7 @@ function App() {
               <button className="confirm-delete" onClick={() => { setShowConfirmDelete(false); deleteDocument(); }}>删除</button>
             </div>
           </div>
-        </div>
+        </Modal>
       )}
 
       {showTrash && (
@@ -5163,7 +5242,7 @@ function AiConfigDialog({
   };
 
   return (
-    <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="AI 配置" onClick={onClose}>
+    <Modal onDismiss={onClose} className="modal-overlay" role="dialog" aria-modal="true" aria-label="AI 配置" onClick={onClose}>
       <form
         className="api-config-dialog"
         onSubmit={(event) => {
@@ -5212,7 +5291,7 @@ function AiConfigDialog({
               onChange={(event) => updateDraft("apiKey", event.target.value)}
               placeholder="sk-..."
               spellCheck={false}
-              autoComplete="current-password"
+              autoComplete="off"
             />
             <button type="button" onClick={() => setShowKey((value) => !value)}>
               {showKey ? "隐藏" : "显示"}
@@ -5241,7 +5320,7 @@ function AiConfigDialog({
           </button>
         </footer>
       </form>
-    </div>
+    </Modal>
   );
 }
 
@@ -5265,22 +5344,24 @@ function SyncConfigDialog({
   onClose: () => void;
 }) {
   const [draft, setDraft] = useState<SyncConfig>(() => ({ ...config }));
+  const [intervalText, setIntervalText] = useState(String(config.autoSyncIntervalSeconds));
   const [showToken, setShowToken] = useState(false);
   const normalizedDraft = () => ({
     serverUrl: normalizeSyncServerUrl(draft.serverUrl),
     token: draft.token.trim(),
     autoSync: draft.autoSync === true,
-    autoSyncIntervalSeconds: normalizeAutoSyncInterval(draft.autoSyncIntervalSeconds),
+    autoSyncIntervalSeconds: normalizeAutoSyncInterval(intervalText),
   });
   const saveDraft = () => {
     const next = normalizedDraft();
     setDraft(next);
+    setIntervalText(String(next.autoSyncIntervalSeconds));
     onSave(next);
     return next;
   };
 
   return (
-    <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="文档同步" onClick={onClose}>
+    <Modal onDismiss={onClose} className="modal-overlay" role="dialog" aria-modal="true" aria-label="文档同步" onClick={onClose}>
       <form
         className="api-config-dialog sync-config-dialog"
         onSubmit={(event) => {
@@ -5328,7 +5409,7 @@ function SyncConfigDialog({
               }))}
               placeholder="Electron 填设备密钥；本机明文保存"
               spellCheck={false}
-              autoComplete="current-password"
+              autoComplete="off"
             />
             <button type="button" onClick={() => setShowToken((value) => !value)}>
               {showToken ? "隐藏" : "显示"}
@@ -5354,14 +5435,12 @@ function SyncConfigDialog({
         <label className="config-field">
           <span>同步间隔</span>
           <input
-            value={String(draft.autoSyncIntervalSeconds)}
+            value={intervalText}
             type="number"
             min={15}
             step={15}
-            onChange={(event) => setDraft((current) => ({
-              ...current,
-              autoSyncIntervalSeconds: normalizeAutoSyncInterval(event.target.value),
-            }))}
+            onChange={(event) => setIntervalText(event.target.value)}
+            onBlur={() => setIntervalText(String(normalizeAutoSyncInterval(intervalText)))}
             disabled={!draft.autoSync}
           />
         </label>
@@ -5399,7 +5478,7 @@ function SyncConfigDialog({
           </button>
         </footer>
       </form>
-    </div>
+    </Modal>
   );
 }
 
@@ -5757,12 +5836,18 @@ function MarkdownPreview({ content, documentId }: { content: string; documentId:
       const tableLines = [lines[index], lines[index + 1]];
       index += 2;
       const framed = tableLines[0].trimStart().startsWith("|");
-      while (index < lines.length && lines[index].includes("|") && lines[index].trim() && (!framed || lines[index].trimStart().startsWith("|"))) {
+      while (index < lines.length && lines[index].includes("|") && lines[index].trim() &&
+        !/^\s{0,3}(?:#{1,6}\s|>\s?|[-*+]\s|\d+[.)]\s|`{3,}|~{3,})/u.test(lines[index]) &&
+        (!framed || lines[index].trimStart().startsWith("|"))) {
         tableLines.push(lines[index]);
         index += 1;
       }
       const headers = markdownTableCells(tableLines[0]);
-      const rows = tableLines.slice(2).map(markdownTableCells);
+      const rows = tableLines.slice(2).map((line) => {
+        const cells = markdownTableCells(line).slice(0, headers.length);
+        while (cells.length < headers.length) cells.push({ text: "", offsets: [] });
+        return cells;
+      });
       blocks.push(
         <table key={`table-${index}`} className="markdown-preview-table">
           <thead>
@@ -5790,17 +5875,20 @@ function MarkdownPreview({ content, documentId }: { content: string; documentId:
       continue;
     }
 
-    const listItem = line.match(/^(\s*)(?:[-*+]|\d+[.)])\s+(?:\[( |x|X)\]\s+)?(.*)$/);
+    const listItem = line.match(/^(\s*)([-*+]|\d+[.)])\s+(?:\[( |x|X)\]\s+)?(.*)$/);
     if (listItem) {
-      const items: Array<{ indent: number; checked?: boolean; text: string; source: MarkdownRenderSource }> = [];
+      const items: Array<{ indent: number; checked?: boolean; ordered?: boolean; start?: number; text: string; source: MarkdownRenderSource }> = [];
+      const firstOrdered = /^\d/u.test(listItem[2]);
       while (index < lines.length) {
-        const item = lines[index].match(/^(\s*)(?:[-*+]|\d+[.)])\s+(?:\[( |x|X)\]\s+)?(.*)$/);
-        if (!item) break;
+        const item = lines[index].match(/^(\s*)([-*+]|\d+[.)])\s+(?:\[( |x|X)\]\s+)?(.*)$/);
+        if (!item || (items.length && item[1].length === listItem[1].length && /^\d/u.test(item[2]) !== firstOrdered)) break;
         items.push({
           indent: item[1].replace(/\t/g, "    ").length,
-          checked: item[2] ? item[2].toLowerCase() === "x" : undefined,
-          text: item[3],
-          source: sourceFor(item[3], lineOffsets[index] + lines[index].length - item[3].length),
+          ordered: /^\d/u.test(item[2]),
+          start: /^\d/u.test(item[2]) ? Number.parseInt(item[2], 10) : undefined,
+          checked: item[3] ? item[3].toLowerCase() === "x" : undefined,
+          text: item[4],
+          source: sourceFor(item[4], lineOffsets[index] + lines[index].length - item[4].length),
         });
         index += 1;
       }
@@ -5911,6 +5999,8 @@ const isTableStart = (lines: string[], index: number) =>
   Boolean(lines[index]?.includes("|") && lines[index + 1]?.includes("|") && isTableSeparator(lines[index + 1]));
 
 interface MarkdownPreviewListItem {
+  ordered?: boolean;
+  start?: number;
   text: string;
   source: LinkOrigin;
   checked?: boolean;
@@ -5918,7 +6008,7 @@ interface MarkdownPreviewListItem {
 }
 
 const buildMarkdownPreviewList = (
-  items: Array<{ indent: number; checked?: boolean; text: string; source: LinkOrigin }>,
+  items: Array<{ indent: number; checked?: boolean; ordered?: boolean; start?: number; text: string; source: LinkOrigin }>,
 ) => {
   const roots: MarkdownPreviewListItem[] = [];
   const stack: Array<{ indent: number; children: MarkdownPreviewListItem[] }> = [
@@ -5934,6 +6024,8 @@ const buildMarkdownPreviewList = (
       text: item.text,
       source: item.source,
       checked: item.checked,
+      ordered: item.ordered,
+      start: item.start,
       children: [],
     };
     stack[stack.length - 1].children.push(node);
@@ -5945,27 +6037,27 @@ const buildMarkdownPreviewList = (
 };
 
 const renderMarkdownPreviewList = (
-  items: MarkdownPreviewListItem[],
-  keyPrefix: string,
-): React.ReactNode => (
-  <ul key={keyPrefix} className="markdown-preview-list">
-    {items.map((item, itemIndex) => (
-      <li
-        key={`${keyPrefix}-${itemIndex}`}
-        className={item.checked !== undefined ? "task-item" : undefined}
-      >
+  items: MarkdownPreviewListItem[], keyPrefix: string,
+): React.ReactNode => {
+  const groups: MarkdownPreviewListItem[][] = [];
+  for (const item of items) {
+    const previous = groups[groups.length - 1];
+    if (previous && previous[0].ordered === item.ordered) previous.push(item);
+    else groups.push([item]);
+  }
+  return groups.map((group, groupIndex) => {
+    const Tag = group[0].ordered ? "ol" : "ul";
+    return <Tag key={`${keyPrefix}-${groupIndex}`} className="markdown-preview-list" start={group[0].ordered ? group[0].start : undefined}>
+      {group.map((item, itemIndex) => <li key={`${keyPrefix}-${groupIndex}-${itemIndex}`} className={item.checked !== undefined ? "task-item" : undefined}>
         <span className="markdown-preview-list-line">
-          {item.checked !== undefined && (
-            <input type="checkbox" checked={item.checked} readOnly />
-          )}
-          <span>{renderInlineMarkdown(item.text, `${keyPrefix}-${itemIndex}`, item.source)}</span>
+          {item.checked !== undefined && <input type="checkbox" checked={item.checked} readOnly />}
+          <span>{renderInlineMarkdown(item.text, `${keyPrefix}-${groupIndex}-${itemIndex}`, item.source)}</span>
         </span>
-        {item.children.length > 0 &&
-          renderMarkdownPreviewList(item.children, `${keyPrefix}-${itemIndex}-children`)}
-      </li>
-    ))}
-  </ul>
-);
+        {item.children.length > 0 && renderMarkdownPreviewList(item.children, `${keyPrefix}-${groupIndex}-${itemIndex}-children`)}
+      </li>)}
+    </Tag>;
+  });
+};
 
 type MarkdownRenderSource = LinkOrigin & { sourceOffsets?: number[]; rawDocument?: string };
 const renderInlineMarkdown = (text: string, keyPrefix: string, source: MarkdownRenderSource): React.ReactNode[] => {
@@ -5997,42 +6089,36 @@ const renderInlineMarkdown = (text: string, keyPrefix: string, source: MarkdownR
     return linked;
   }
   const nodes: React.ReactNode[] = [];
-  const tokenPattern =
-    /(!\[((?:\\.|[^\]\\])*)\]\(([^)]+)\)|\[((?:\\.|[^\]\\])+)\]\(([^)]+)\)|`([^`]+)`|\*\*([^*]+)\*\*|__([^_]+)__|~~([^~]+)~~|\*([^*]+)\*|_([^_]+)_)/g;
   let lastIndex = 0;
-  let match: RegExpExecArray | null;
+  for (const token of markdownInlineTokens(text)) {
+    const match = token.groups;
+    if (token.index > lastIndex) nodes.push(markdownPlainText(text.slice(lastIndex, token.index)));
 
-  while ((match = tokenPattern.exec(text))) {
-    let slashes = 0;
-    for (let i = match.index - 1; i >= 0 && text[i] === "\\"; i--) slashes++;
-    if (slashes % 2) continue;
-    if (match.index > lastIndex) {
-      nodes.push(markdownPlainText(text.slice(lastIndex, match.index)));
-    }
-
-    const key = `${keyPrefix}-${match.index}`;
+    const key = `${keyPrefix}-${token.index}`;
     if (match[2] !== undefined) {
-      if (/^bike-attachment:sha256:[a-f0-9]{64}$/u.test(match[3])) {
+      if (/^bike-attachment:sha256:[a-f0-9]{64}$/u.test(match[3]!)) {
         const label = markdownPlainText(match[2]);
-        nodes.push(<AttachmentItem key={key} reference={{ assetId: match[3].slice("bike-attachment:".length), name: label || "图片", alt: label }} />);
-        lastIndex = tokenPattern.lastIndex;
+        nodes.push(<AttachmentItem key={key} reference={{ assetId: match[3]!.slice("bike-attachment:".length), name: label || "图片", alt: label }} />);
+        lastIndex = token.end;
         continue;
       }
-      const source = safeMarkdownUrl(match[3], "image");
+      const source = safeMarkdownUrl(match[3]!, "image");
       nodes.push(
-        source ? (
+        source && /^https?:/u.test(source) ? (
+          <span key={key} className="markdown-image-placeholder">远程图片未自动加载：<a href={source} target="_blank" rel="noreferrer">{match[2] || "查看图片"}</a></span>
+        ) : source ? (
           <img key={key} src={source} alt={match[2]} className="markdown-preview-image" />
         ) : (
           <span key={key}>{match[2]}</span>
         ),
       );
     } else if (match[4] !== undefined) {
-      if (/^bike-attachment:sha256:[a-f0-9]{64}$/u.test(match[5])) {
-        nodes.push(<AttachmentItem key={key} reference={{ assetId: match[5].slice("bike-attachment:".length), name: markdownPlainText(match[4]) || "附件" }} />);
-        lastIndex = tokenPattern.lastIndex;
+      if (/^bike-attachment:sha256:[a-f0-9]{64}$/u.test(match[5]!)) {
+        nodes.push(<AttachmentItem key={key} reference={{ assetId: match[5]!.slice("bike-attachment:".length), name: markdownPlainText(match[4]) || "附件" }} />);
+        lastIndex = token.end;
         continue;
       }
-      const href = safeMarkdownUrl(match[5], "link");
+      const href = safeMarkdownUrl(match[5]!, "link");
       nodes.push(
         href ? (
           <a key={key} href={href} target="_blank" rel="noreferrer">
@@ -6052,7 +6138,7 @@ const renderInlineMarkdown = (text: string, keyPrefix: string, source: MarkdownR
       nodes.push(<em key={key}>{match[10] ?? match[11]}</em>);
     }
 
-    lastIndex = tokenPattern.lastIndex;
+    lastIndex = token.end;
   }
 
   if (lastIndex < text.length) {
@@ -6155,6 +6241,10 @@ const OutlineNodeRow = React.memo(function OutlineNodeRow({
   const debounceTimerRef = useRef<number | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const synchronouslyResizedTextRef = useRef<string | null>(null);
+  const attachTextarea = useCallback((element: HTMLTextAreaElement | null) => {
+    textareaRef.current = element;
+    setNodeRef(node.id, element);
+  }, [node.id, setNodeRef]);
 
   // Link suggestions read the active input's geometry in the same input event.
   const autoResize = useCallback((element: HTMLTextAreaElement | null) => {
@@ -6167,7 +6257,9 @@ const OutlineNodeRow = React.memo(function OutlineNodeRow({
   useLayoutEffect(() => {
     if (!isFocusedRef.current || localText === committedTextRef.current) {
       setLocalText(node.text);
+      baselineRef.current = node.text;
     }
+    if (localText === node.text) baselineRef.current = node.text;
     committedTextRef.current = node.text;
   }, [node.text]);
 
@@ -6247,7 +6339,6 @@ const OutlineNodeRow = React.memo(function OutlineNodeRow({
     isFocusedRef.current = false;
     setLinkChoices(null);
     onPublishLabel?.(node.id, baselineRef.current, localText);
-    baselineRef.current = localText;
   };
 
   const handleFocus = () => {
@@ -6362,10 +6453,7 @@ const OutlineNodeRow = React.memo(function OutlineNodeRow({
         )}
         {node.icon && <span className="node-icon">{node.icon}</span>}
         <textarea
-          ref={(element) => {
-            textareaRef.current = element;
-            setNodeRef(node.id, element);
-          }}
+          ref={attachTextarea}
           value={localText}
           className={classNames(
             node.checked && node.isTodo && "checked",
@@ -6461,6 +6549,12 @@ const OutlineView = React.memo(function OutlineView(props: OutlineViewProps) {
     id: string;
     zone: OutlineDropZone;
   } | null>(null);
+  const [draggedId, setDraggedId] = useState<string | null>(null);
+  const virtual = useVirtualOutline(rows, props.activeNodeId, draggedId);
+  const setVisibleNodeRef = useCallback((id: string, input: HTMLTextAreaElement | null) => {
+    props.setNodeRef(id, input);
+    virtual.measure(id, input?.closest<HTMLElement>(".outline-row") ?? null);
+  }, [props.setNodeRef, virtual.measure]);
   const draggedIdRef = useRef<string | null>(null);
   const draggedNodeRef = useRef<OutlineNode | null>(null);
 
@@ -6506,6 +6600,7 @@ const OutlineView = React.memo(function OutlineView(props: OutlineViewProps) {
 
   const handleDragStart = useEventCallback((e: React.DragEvent, id: string) => {
     draggedIdRef.current = id;
+    setDraggedId(id);
     draggedNodeRef.current = findNode(props.nodes, id);
     setDropState(null);
     e.dataTransfer.effectAllowed = "move";
@@ -6547,6 +6642,7 @@ const OutlineView = React.memo(function OutlineView(props: OutlineViewProps) {
 
   const handleDragEnd = useCallback(() => {
     draggedIdRef.current = null;
+    setDraggedId(null);
     draggedNodeRef.current = null;
     setDropState(null);
   }, []);
@@ -6565,6 +6661,7 @@ const OutlineView = React.memo(function OutlineView(props: OutlineViewProps) {
 
     props.onUpdateNodes(sourceId, targetId, dropZone);
     draggedIdRef.current = null;
+    setDraggedId(null);
     draggedNodeRef.current = null;
     setDropState(null);
   });
@@ -6577,7 +6674,7 @@ const OutlineView = React.memo(function OutlineView(props: OutlineViewProps) {
     onInsertAfter: props.onInsertAfter,
     onInsertChild: props.onInsertChild,
     onRemove: props.onRemove,
-    setNodeRef: props.setNodeRef,
+    setNodeRef: setVisibleNodeRef,
     onOpenMenu: handleOpenMenu,
     onDragStart: handleDragStart,
     onDragOver: handleDragOver,
@@ -6593,7 +6690,7 @@ const OutlineView = React.memo(function OutlineView(props: OutlineViewProps) {
     onFollowLink: props.onFollowLink,
   }), [
     props.onSelect, props.onText, props.onKeyDown, props.onPatch,
-    props.onInsertAfter, props.onInsertChild, props.onRemove, props.setNodeRef,
+    props.onInsertAfter, props.onInsertChild, props.onRemove, setVisibleNodeRef,
     handleOpenMenu, handleDragStart, handleDragOver, handleDragLeave, handleDragEnd, handleDrop,
     props.onAiAction, props.onSuggestLinks, props.onBindLink, props.onCreateLink,
     props.onPublishLabel, props.onLabelFocus, props.onFollowLink,
@@ -6607,9 +6704,7 @@ const OutlineView = React.memo(function OutlineView(props: OutlineViewProps) {
     element: React.ReactElement;
   }>(), [rowCallbacks]);
 
-  return (
-    <div className="outline-list">
-      {rows.map(({ node, depth }) => {
+  const renderRow = ({ node, depth }: (typeof rows)[number]) => {
         const isActive = props.activeNodeId === node.id;
         const dropZone = dropState?.id === node.id ? dropState.zone : null;
         const isAiBusy = props.isAiBusy(node.id);
@@ -6633,7 +6728,15 @@ const OutlineView = React.memo(function OutlineView(props: OutlineViewProps) {
         );
         rowCache.set(node, { depth, isActive, dropZone, isAiBusy, located, element });
         return element;
-      })}
+  };
+
+  return (
+    <div className="outline-list" ref={virtual.containerRef}>
+      {virtual.visible.map(({ row, gap }) => <React.Fragment key={row.node.id}>
+        {gap > 0 && <div aria-hidden="true" style={{ height: gap }} />}
+        {renderRow(row)}
+      </React.Fragment>)}
+      {virtual.trailing > 0 && <div aria-hidden="true" style={{ height: virtual.trailing }} />}
       {menuState && menuNode && (
         <NodeMenu
           node={menuNode}
@@ -6670,6 +6773,22 @@ interface NodeMenuProps {
   onExport: () => void;
 }
 
+function useViewportMenuPosition(x: number, y: number) {
+  const ref = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const place = () => {
+      const menu = ref.current;
+      if (!menu) return;
+      menu.style.left = `${Math.max(12, Math.min(x, window.innerWidth - menu.offsetWidth - 12))}px`;
+      menu.style.top = `${Math.max(12, Math.min(y, window.innerHeight - menu.offsetHeight - 12))}px`;
+    };
+    place();
+    window.addEventListener("resize", place);
+    return () => window.removeEventListener("resize", place);
+  }, [x, y]);
+  return ref;
+}
+
 function NodeMenu({
   node,
   x,
@@ -6680,16 +6799,8 @@ function NodeMenu({
   onCopyLink,
   onExport,
 }: NodeMenuProps) {
-  const timestamp = new Intl.DateTimeFormat("zh-CN", {
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(new Date());
-  const selectedWords = node.text.trim()
-    ? Array.from(node.text.trim().matchAll(/[\p{L}\p{N}_-]+/gu)).length
-    : 0;
+  const menuRef = useViewportMenuPosition(x, y);
+  const selectedWords = Array.from(node.text.trim()).length;
   const attachmentActions = useAttachmentActions();
   const nextIcon = node.icon ? undefined : "★";
   const nextTable = node.table
@@ -6701,6 +6812,7 @@ function NodeMenu({
 
   return (
     <div
+      ref={menuRef}
       className="node-menu"
       style={{ left: x, top: y } as React.CSSProperties}
       onClick={(event) => event.stopPropagation()}
@@ -6828,8 +6940,7 @@ function NodeMenu({
       </div>
 
       <div className="node-menu-footer">
-        <span>编辑于：{timestamp}</span>
-        <span>选中字数：{selectedWords}</span>
+        <span>主题字符数：{selectedWords}</span>
       </div>
 
       <button className="node-menu-close" onClick={onClose} title="关闭">
@@ -7188,6 +7299,7 @@ function MindMap({
   };
 
   const handleKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.target instanceof HTMLElement && event.target.closest("button, input, textarea, select, a, [contenteditable=true]")) return;
     if (editingNodeId) return;
     if (!renderedActiveNodeId) return;
 
@@ -7228,20 +7340,11 @@ function MindMap({
       }
     } else if (event.key === "Enter") {
       event.preventDefault();
-      if (!isRootNode(renderedActiveNodeId)) {
-        onInsertAfter(renderedActiveNodeId);
-      } else {
-        onInsertChild(rootTargetId ?? renderedActiveNodeId);
-      }
-    } else if (event.key === "Tab") {
-      event.preventDefault();
-      if (event.shiftKey) {
-        if (!isRootNode(renderedActiveNodeId)) {
-          onInsertParent(renderedActiveNodeId);
-        }
-      } else {
-        onInsertChild(isRootNode(renderedActiveNodeId) ? rootTargetId ?? renderedActiveNodeId : renderedActiveNodeId);
-      }
+      if (event.metaKey || event.ctrlKey) {
+        if (event.shiftKey) { if (!isRootNode(renderedActiveNodeId)) onInsertParent(renderedActiveNodeId); }
+        else onInsertChild(isRootNode(renderedActiveNodeId) ? rootTargetId ?? renderedActiveNodeId : renderedActiveNodeId);
+      } else if (!isRootNode(renderedActiveNodeId)) onInsertAfter(renderedActiveNodeId);
+      else onInsertChild(rootTargetId ?? renderedActiveNodeId);
     } else if (event.key === "Spacebar" || event.key === " ") {
       event.preventDefault();
       setEditingNodeId(renderedActiveNodeId);
@@ -7538,9 +7641,11 @@ function MindMapContextMenu({
   onToggleSiblingCollapse,
   onEnterTopic,
 }: MindMapContextMenuProps) {
+  const menuRef = useViewportMenuPosition(x, y);
   const hasChildren = item.node.children.length > 0;
   return (
     <div
+      ref={menuRef}
       className="mindmap-context-menu"
       style={{ left: x, top: y } as React.CSSProperties}
       onClick={(event) => event.stopPropagation()}
@@ -7553,11 +7658,11 @@ function MindMapContextMenu({
       </button>
       <button onClick={onInsertChild}>
         <span>插入下级主题</span>
-        <kbd>Tab</kbd>
+        <kbd>⌘ + Enter</kbd>
       </button>
       <button disabled={isRoot} onClick={onInsertParent}>
         <span>插入上级主题</span>
-        <kbd>⇧ + Tab</kbd>
+        <kbd>⌘ + ⇧ + Enter</kbd>
       </button>
 
       <hr />
@@ -7728,7 +7833,7 @@ function PresentationView({ title, nodes, onSelect }: PresentationViewProps) {
   // Keyboard navigation
   useEffect(() => {
     const handleGlobalKeyDown = (e: KeyboardEvent) => {
-      if (isEditableEventTarget(e.target)) return;
+      if (isEditableEventTarget(e.target) || (e.target instanceof HTMLElement && e.target.closest("[role=dialog], button, a, select"))) return;
       if (e.key === "ArrowRight" || e.key === " ") {
         e.preventDefault();
         setCurrentSlide((prev) => (prev < slides.length - 1 ? prev + 1 : 0));

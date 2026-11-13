@@ -11,6 +11,8 @@ import {
   rm,
   writeFile,
   chmod,
+  stat,
+  chown,
 } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
@@ -102,15 +104,20 @@ const normalizeConfig = (config) => {
 const loadConfig = async () => {
   try {
     return normalizeConfig(JSON.parse(await readFile(configPath, "utf8")));
-  } catch {
-    return defaultConfig();
+  } catch (error) {
+    if (error.code === "ENOENT") return defaultConfig();
+    throw new Error("现有同步配置无法读取或解析，已停止修改，请先修复或从备份恢复配置");
   }
 };
 
 const saveConfig = async (config) => {
+  const previous = await stat(configPath).catch((error) => { if (error.code === "ENOENT") return null; throw error; });
   await mkdir(path.dirname(configPath), { recursive: true, mode: 0o700 });
   await writeFile(`${configPath}.tmp`, `${JSON.stringify(normalizeConfig(config), null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
   await chmod(`${configPath}.tmp`, 0o600);
+  if (previous && typeof process.getuid === "function" && process.getuid() === 0) {
+    await chown(`${configPath}.tmp`, previous.uid, previous.gid);
+  }
   await rename(`${configPath}.tmp`, configPath);
 };
 
@@ -193,6 +200,7 @@ const configure = async () => {
   config.owner.username = await ask("用户名", config.owner.username);
   config.databasePath = await ask("SQLite 数据库路径", config.databasePath);
   config.maxBodyBytes = await askNumber("单次请求最大字节数", config.maxBodyBytes);
+  config.trustProxyHeaders = await askYesNo("是否位于可信反向代理后（仅可信代理可访问本服务时启用）", config.trustProxyHeaders === true);
   config.cors.enabled = await askYesNo("允许浏览器跨域访问同步服务", config.cors.enabled);
   if (config.cors.enabled) {
     const origins = await ask(

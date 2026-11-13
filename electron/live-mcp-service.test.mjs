@@ -7,6 +7,7 @@ import net from 'node:net';
 import { createRequire } from 'node:module';
 import { createLiveWorkspaceStore } from '../mcp/bike-live.mjs';
 import { updateNodeForMcp } from '../mcp/bike-core.mjs';
+import { applyLiveCandidatePatch } from '../shared/bike-live-patch.mjs';
 const { createLiveMcpService } = createRequire(import.meta.url)('./live-mcp-service.cjs');
 const fixture = async (t) => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'bike-live-test-'));
@@ -79,4 +80,40 @@ test('null packets and Unicode tokens cannot crash the Live listener', async (t)
   }
   const valid = await createLiveWorkspaceStore({ discoveryPath: path.join(directory, 'live-mcp.json') }); t.after(valid.close);
   assert.equal((await valid.load()).workspace.documents[0].id, 'doc');
+});
+
+test('Live can preview a small edit in a changed document larger than 4 MiB', async t => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'bike-live-large-'));
+  const workspace = { version:3, activeDocumentId:'doc', documents:[{id:'doc',title:'Large',nodes:[{id:'node',text:'before',note:'x'.repeat(5*1024*1024),children:[]}]}]};
+  let candidate;
+  const service = createLiveMcpService({ directory, handle: async request => {
+    if (request.method === 'snapshot') return { workspace, workspaceId:'local',revision:'base',writable:true,capabilities:['candidate-patch-v1'] };
+    candidate = applyLiveCandidatePatch(workspace, request.payload.candidatePatch);
+    return { status:'preview' };
+  } });
+  await service.start({ scope:'workspace',writable:true });
+  const store = await createLiveWorkspaceStore({ discoveryPath:path.join(directory,'live-mcp.json') });
+  t.after(async () => { store.close(); await service.stop(); await fs.rm(directory,{recursive:true,force:true}); });
+  const result = await updateNodeForMcp(store,{documentId:'doc',nodeId:'node',text:'after',expectedRevision:'base'});
+  assert.equal(result.status,'preview');
+  assert.equal(candidate.documents[0].nodes[0].text,'after');
+  assert.equal(candidate.documents[0].nodes[0].note.length,5*1024*1024);
+  assert.equal((await store.load()).workspace.documents[0].nodes[0].text,'before');
+});
+
+test('excess concurrency returns a request error and leaves the connection usable', async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'bike-live-busy-'));
+  let release;
+  let block = true;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const service = createLiveMcpService({ directory, handle: async () => { if (block) await gate; return { status: 'ok' }; } });
+  t.after(async () => { release(); await service.stop(); await fs.rm(directory, { recursive: true, force: true }); });
+  await service.start({ documentIds: ['doc'] });
+  const store = await createLiveWorkspaceStore({ discoveryPath: path.join(directory, 'live-mcp.json') });
+  t.after(store.close);
+  const first = Array.from({ length: 4 }, () => store.status('request'));
+  await assert.rejects(store.status('overflow'), /繁忙/);
+  block = false; release();
+  await Promise.all(first);
+  assert.equal((await store.status('later')).status, 'ok');
 });

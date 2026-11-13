@@ -4,6 +4,7 @@ import { readFile, stat, chmod } from "node:fs/promises";
 import { createServer } from "node:http";
 import path from "node:path";
 import { pipeline } from "node:stream";
+import { ensurePrivateConfig } from "./private-config.mjs";
 import { fileURLToPath } from "node:url";
 import { isPbkdf2Hash, verifyPassword } from "./password.mjs";
 import {
@@ -61,6 +62,7 @@ const securityHeaders = {
   "X-Content-Type-Options": "nosniff",
   "X-Frame-Options": "DENY",
   "Referrer-Policy": "same-origin",
+  "Strict-Transport-Security": "max-age=31536000",
 };
 
 const contentTypes = {
@@ -74,6 +76,7 @@ const contentTypes = {
   ".png": "image/png",
   ".svg": "image/svg+xml",
   ".ttf": "font/ttf",
+  ".otf": "font/otf",
   ".txt": "text/plain; charset=utf-8",
   ".webp": "image/webp",
   ".woff": "font/woff",
@@ -84,7 +87,7 @@ const readConfig = async () => {
   let parsed;
   try {
     parsed = JSON.parse(await readFile(configPath, "utf8"));
-    await chmod(configPath, 0o600);
+    await ensurePrivateConfig(configPath);
   } catch (error) {
     throw new Error(
       `无法读取认证配置：${configPath}\n请复制 config/bike.config.example.json 为 config/bike.config.json 后再启动。\n${error instanceof Error ? error.message : String(error)}`,
@@ -397,10 +400,10 @@ const loginLimiter = createFailureLimiter(loginLimiterOptions);
 // Untrusted identities cannot fill the table used by signed device cookies.
 const trustedLoginLimiter = createFailureLimiter(loginLimiterOptions);
 
-const tooManyLoginAttempts = (response) => {
+const tooManyLoginAttempts = (response, retryAfterSeconds = 30) => {
   send(response, 429, loginPage("登录尝试过多，请稍后再试"), {
     "Content-Type": "text/html; charset=utf-8",
-    "Retry-After": "30",
+    "Retry-After": String(Math.max(1, Math.ceil(retryAfterSeconds))),
   });
 };
 
@@ -440,11 +443,22 @@ const isAuthenticated = (request, config) =>
   verifySessionToken(parseCookies(request)[cookieName], config);
 
 const apiAuthentication = async (request, config, deviceTokenGuard) => {
-  if (isAuthenticated(request, config)) return { ok: true, limited: false };
+  if (!bearerTokenFrom(request) && isAuthenticated(request, config)) return { ok: true, limited: false, cookie: true };
   return await deviceTokenGuard.authenticate(
     bearerTokenFrom(request),
     clientIp(request, config),
   );
+};
+
+const sameOriginMutation = (request, config) => {
+  if (request.headers["sec-fetch-site"] === "cross-site") return false;
+  if (!request.headers.origin) return true; // non-browser clients
+  try {
+    const origin = new URL(request.headers.origin);
+    const secure = config.auth.secureCookies || request.socket?.encrypted ||
+      (config.auth.trustProxyHeaders && request.headers["x-forwarded-proto"] === "https");
+    return origin.origin === `${secure ? "https" : "http"}://${request.headers.host}`;
+  } catch { return false; }
 };
 
 const revokeSessions = async (sessionState) => {
@@ -470,7 +484,9 @@ const prepareIndexHtml = (html, config) =>
     .replace(/\s+crossorigin(?:=(?:"[^"]*"|'[^']*'|[^\s>]+))?/g, "");
 
 const serveStatic = async (request, response, config) => {
-  const url = new URL(request.url, "http://localhost");
+  let url;
+  try { url = new URL(request.url, "http://localhost"); }
+  catch { sendJson(response, 400, { error: "invalid_url", message: "请求地址无效" }); return; }
   let rawPathname;
   try {
     rawPathname = decodeURIComponent(url.pathname);
@@ -534,7 +550,9 @@ const handleRequest = async (
   syncStore,
   { deviceTokenGuard, sessionState },
 ) => {
-  const url = new URL(request.url, "http://localhost");
+  let url;
+  try { url = new URL(request.url, "http://localhost"); }
+  catch { sendJson(response, 400, { error: "invalid_url", message: "请求地址无效" }); return; }
   const authed = isAuthenticated(request, config);
 
   if (request.method === "GET" && url.pathname === "/login") {
@@ -563,8 +581,9 @@ const handleRequest = async (
     const limiter = device ? trustedLoginLimiter : loginLimiter;
     // Refuse throttled attempts before looking at the password. Letting a
     // correct password through while throttled would turn 429 into an oracle.
-    if (limiter.check(attemptKeys).limited || !limiter.begin(attemptKeys)) {
-      tooManyLoginAttempts(response);
+    const allowance = limiter.check(attemptKeys);
+    if (allowance.limited || !limiter.begin(attemptKeys)) {
+      tooManyLoginAttempts(response, allowance.retryAfterSeconds);
       return;
     }
     let credentialsValid = false;
@@ -607,6 +626,7 @@ const handleRequest = async (
   }
 
   if (request.method === "POST" && url.pathname === "/auth/logout") {
+    if (!sameOriginMutation(request, config)) { sendJson(response, 403, { error: "origin_denied", message: "退出请求来源无效" }); return; }
     // The device cookie is kept on purpose: it is what lets this browser log
     // in again while untrusted clients are throttled.
     if (authed) await revokeSessions(sessionState);
@@ -645,6 +665,11 @@ const handleRequest = async (
         error: "unauthorized",
         message: "Unauthorized",
       });
+      return;
+    }
+    if (apiAuth.cookie && !["GET", "HEAD", "OPTIONS"].includes(request.method) &&
+        (!sameOriginMutation(request, config) || !/^application\/json(?:\s*;|$)/i.test(request.headers["content-type"] ?? ""))) {
+      sendJson(response, 403, { error: "origin_denied", message: "写入请求需要同源 JSON" });
       return;
     }
     await handleSyncApi(request, response, config, syncStore);

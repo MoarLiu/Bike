@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"syscall"
@@ -18,6 +20,28 @@ import (
 	"github.com/MoarLiu/Bike/desktop-mygo/internal/contracts"
 	"github.com/MoarLiu/Bike/desktop-mygo/internal/services"
 )
+
+func processBirth(pid int) string {
+	if runtime.GOOS == "linux" {
+		raw, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+		boot, bootErr := os.ReadFile("/proc/sys/kernel/random/boot_id")
+		if err == nil && bootErr == nil {
+			fields := strings.Fields(string(raw)[strings.LastIndex(string(raw), ")")+1:])
+			if len(fields) > 19 {
+				return "linux:" + strings.TrimSpace(string(boot)) + ":" + fields[19]
+			}
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, "/bin/ps", "-p", fmt.Sprint(pid), "-o", "lstart=")
+	command.Env = append(os.Environ(), "LC_ALL=C")
+	output, err := command.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(output))
+}
 
 func writeTime(value string) (string, error) {
 	value = contracts.TrimJS(value)
@@ -98,6 +122,8 @@ func acquireFileLock(ctx context.Context, name string) (func(), error) {
 	}
 	lockPath := filepath.Join(filepath.Dir(name), "."+filepath.Base(name)+".lock")
 	token := newID("lock")
+	birth, hostname := processBirth(os.Getpid()), ""
+	hostname, _ = os.Hostname()
 	started := time.Now()
 	for time.Since(started) <= 5*time.Second {
 		if err := ctx.Err(); err != nil {
@@ -105,7 +131,7 @@ func acquireFileLock(ctx context.Context, name string) (func(), error) {
 		}
 		file, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY|syscall.O_NOFOLLOW, 0600)
 		if err == nil {
-			value, _ := json.Marshal(map[string]any{"pid": os.Getpid(), "ownerToken": token, "createdAt": time.Now().UTC().Format(time.RFC3339Nano), "workspacePath": filepath.Base(name)})
+			value, _ := json.Marshal(map[string]any{"pid": os.Getpid(), "ownerToken": token, "processBirth": birth, "hostname": hostname, "createdAt": time.Now().UTC().Format(time.RFC3339Nano), "workspacePath": filepath.Base(name)})
 			_, writeErr := file.Write(value)
 			if writeErr == nil {
 				writeErr = file.Sync()
@@ -136,7 +162,7 @@ func acquireFileLock(ctx context.Context, name string) (func(), error) {
 		if readErr != nil && !os.IsNotExist(readErr) {
 			return nil, readErr
 		}
-		if readErr == nil && time.Since(info.ModTime()) >= 10*time.Minute {
+		if readErr == nil {
 			var lock map[string]any
 			_ = json.Unmarshal(raw, &lock)
 			if _, validOwner := lock["ownerToken"].(string); !validOwner {
@@ -145,11 +171,19 @@ func acquireFileLock(ctx context.Context, name string) (func(), error) {
 			// Malformed stale files have no live owner, matching the JS recovery path.
 			pid, _ := lock["pid"].(float64)
 			alive := false
-			if pid > 0 && pid <= 2147483647 && pid == float64(int(pid)) {
+			validPID := pid > 0 && pid <= 2147483647 && pid == float64(int(pid))
+			sameHost := lock["hostname"] == nil || lock["hostname"] == "" || lock["hostname"] == hostname
+			if validPID {
 				probe := syscall.Kill(int(pid), 0)
-				alive = probe != syscall.ESRCH
+				alive = !sameHost || probe != syscall.ESRCH
+				if prior, ok := lock["processBirth"].(string); alive && sameHost && ok && prior != "" {
+					current := processBirth(int(pid))
+					if current != "" && prior != current {
+						alive = false
+					}
+				}
 			}
-			if !alive {
+			if validPID && !alive || !validPID && time.Since(info.ModTime()) >= 10*time.Minute {
 				removeMatchingLock(lockPath, raw)
 			}
 		}
@@ -206,6 +240,11 @@ func previewWrite(snapshot Snapshot, operation string, args *object, at string) 
 	result := ordered("operation", operation, "dryRun", args.Get("dryRun") != false, "applied", false, "mode", snapshot.Mode, "workspaceRevision", snapshot.Revision, "nextWorkspaceRevision", hashRaw(raw), "reason", reason)
 	for _, key := range preview.Keys {
 		result.Set(key, preview.Get(key))
+	}
+	if workspace.Get("version") == float64(3) {
+		result.Set("mode", "readonly")
+		result.Delete("confirmationArgs")
+		result.Set("writeUnavailable", "2.0 工作区仅支持 Live 确认写入，File 模式只读")
 	}
 	if _, err := toolResult(result); err != nil {
 		return nil, nil, err

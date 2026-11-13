@@ -134,11 +134,13 @@ try {
   checks.push('actual UI undo compensates its own field while preserving a later remote edit');
 
   report('Checking AI proposal partial acceptance and rejection');
-  await a.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].webContents.send('open-api-config'));
+  await a.app.evaluate(({ app, BrowserWindow }) => { app.focus({ steal: true }); const window = BrowserWindow.getAllWindows()[0]; window.show(); window.focus(); window.webContents.send('open-api-config'); });
   const aiConfigDialog = a.page.getByRole('dialog', { name: 'AI 配置', exact: true });
   await aiConfigDialog.getByLabel('API baseurl').fill(`http://127.0.0.1:${provider.address().port}/v1`);
+  await aiConfigDialog.locator('.api-key-input button').click();
   await aiConfigDialog.locator('.api-key-input input').fill('runtime-provider-fixture');
   await aiConfigDialog.getByLabel('大模型', { exact: true }).fill('deterministic-fixture');
+  assert.equal(await aiConfigDialog.locator('.api-key-input input').inputValue(), 'runtime-provider-fixture');
   await aiConfigDialog.locator('.config-error').waitFor({ state: 'hidden' });
   await aiConfigDialog.getByRole('button', { name: '保存', exact: true }).click();
   await aiConfigDialog.waitFor({ state: 'hidden' });
@@ -231,7 +233,9 @@ try {
   assert.match(concurrent.find((result) => !result.ok).error, /相同请求身份携带了不同内容/);
   await dialog.getByRole('button', { name: '拒绝提案' }).click();
   const queuedIndex = concurrent.findIndex((result) => result.ok);
-  assert.equal((await directRequest('proposal', duplicates[queuedIndex])).result.status, 'rejected');
+  const rejectedRetry = await directRequest('proposal', duplicates[queuedIndex]);
+  assert.equal(rejectedRetry.ok, true, JSON.stringify({ response: rejectedRetry, focus: await a.page.evaluate(() => ({tag:document.activeElement?.tagName, className:document.activeElement?.className, value:document.activeElement?.value})) }));
+  assert.equal(rejectedRetry.result.status, 'rejected');
   assert.equal((await directRequest('proposal', duplicates[1 - queuedIndex])).ok, false);
   assert.equal(await dialog.count(), 0);
   assert.equal((await readStored(a.page)).documents[0].nodes[0].text, 'MCP approved');
@@ -239,6 +243,11 @@ try {
 
   report('Checking title and note read barriers, IME protection and competing MCP clients');
   await a.page.locator('.title-input').fill('Live title without blur');
+  const editingTitle = await client.callTool({ name: 'get_document', arguments: { documentId: 'doc', format: 'json' } });
+  assert.equal(editingTitle.isError, true);
+  assert.match(JSON.stringify(editingTitle), /正在编辑文档标题/);
+  assert.equal(await a.page.locator('.title-input').evaluate(element => document.activeElement === element), true);
+  await a.page.locator('.title-input').press('Tab');
   const titled = parse(await client.callTool({ name: 'get_document', arguments: { documentId: 'doc', format: 'json' } }));
   assert.ok(JSON.stringify(titled).includes('Live title without blur'));
   assert.equal((await readStored(a.page)).documents[0].title, 'Live title without blur');
@@ -271,7 +280,7 @@ try {
   assert.equal(parse(await otherClient.callTool({ name: 'get_proposal_status', arguments: { requestId: secondPending.requestId } })).status, 'stale');
   assert.equal((await readStored(a.page)).documents[0].nodes[0].text, 'First MCP client');
   await dialog.getByRole('button', { name: '拒绝提案' }).click();
-  checks.push('focused title and note drafts persist before Live reads, composition blocks the barrier, competing MCP approvals invalidate the later proposal');
+  checks.push('Live reads preserve title focus and wait for user completion; note drafts persist, composition blocks the barrier, competing approvals invalidate the later proposal');
 
   report('Checking Markdown read barrier and revoked-session protection');
   await a.page.locator('.segmented').getByRole('button', { name: 'Markdown', exact: true }).click();

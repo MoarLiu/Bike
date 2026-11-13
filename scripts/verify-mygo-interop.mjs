@@ -397,7 +397,7 @@ try {
   const { syncOperationWorkspace } = loadTypescript('src/operationSync.ts');
   const { migrateWorkspace: migrateBrowserWorkspace } = loadTypescript('src/migrations.ts');
   const operationWorkspace = migrateBrowserWorkspace(workspace);
-  const network = (pathname, method = 'GET', body) => runGo({ action: 'network', config, request: { ...config, pathname, method, body } });
+  const network = (pathname, method = 'GET', body) => runGo({ action: 'network', config, request: { ...config, pathname: pathname.startsWith('/api/v2/') ? pathname + (pathname.includes('?') ? '&' : '?') + 'bikeOrdering=2' : pathname, method, body } });
   const manifest = await network('/api/sync/manifest');
   assert.equal((await network('/api/v2/enable', 'POST', { expectedRevision: manifest.data.workspaceRevision })).ok, true);
   const unauthorized = await runGo({ action: 'network', config: { ...config, token: 'wrong' }, request: { ...config, token: 'wrong', pathname: '/api/v2/status', method: 'GET' } });

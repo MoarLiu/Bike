@@ -103,7 +103,17 @@ test("hub gate: the actual knowledge panel renders a bounded first page without 
   const compiled = ts.transpileModule(readFileSync(path.join(root, "src/components/KnowledgePanel.tsx"), "utf8"), {
     fileName: "KnowledgePanel.tsx", compilerOptions: { jsx: ts.JsxEmit.ReactJSX, module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
   }).outputText;
-  vm.runInThisContext(`(function(require,module,exports){${compiled}\n})`)(require, module, module.exports);
+  vm.runInThisContext(`(function(require,module,exports){${compiled}\n})`)((name) => {
+    if (name === "./NodeTargetSelect") {
+      const child = { exports: {} };
+      const source = ts.transpileModule(readFileSync(path.join(root, "src/components/NodeTargetSelect.tsx"), "utf8"), {
+        compilerOptions: { jsx: ts.JsxEmit.ReactJSX, module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+      }).outputText;
+      vm.runInThisContext(`(function(require,module,exports){${source}\n})`)(require, child, child.exports);
+      return child.exports;
+    }
+    return require(name);
+  }, module, module.exports);
   const html = renderToStaticMarkup(React.createElement(module.exports.KnowledgePanel, {
     locked: false, activeNodeId: "n", connections: [], nodeBacklinks: [], relations: [], targets: [],
     documentBacklinks: Array.from({ length: 20000 }, (_,i) => ({ documentId: "source", documentTitle: "Source", nodeId: `n-${i}`, field: "text", raw: "[[D]]", pathLabel: `Topic ${i}`, status: "resolved" })),

@@ -54,6 +54,7 @@ const createBackupService = ({
   readPending = async () => null,
   writePending = async () => {},
   prepareAssets = async () => {},
+  maintainAssets = async () => {},
 }) => {
   let settings = defaultSettings();
   let pending = null;
@@ -132,6 +133,8 @@ const createBackupService = ({
         .slice(maxStamped)
         .map((backup) => fs.rm(backup.filePath, { force: true })),
     );
+    // Retention failure must never invalidate a successfully written backup.
+    await maintainAssets(directory).catch(() => {});
   };
 
   const floorTicket = () => Math.max(

@@ -6,10 +6,27 @@ Bike 是一个本地优先的大纲、思维导图和 Markdown 写作工具。�
 
 | 平台 | 版本 | 状态 | 位置 |
 | --- | --- | --- | --- |
-| Electron macOS Apple Silicon / Web / Sync Server | `2.0.0` | 正式版，macOS 使用 ad-hoc 签名，真实接入与实机验证由用户后续补测 | 根目录 |
-| MyGO macOS Apple Silicon | `2.0.0` | Go + WKWebView，ad-hoc 签名，DMG 手动安装 | [发布说明](docs/release-mygo-2.0.0.md) |
+| Electron macOS Apple Silicon / Web / Sync Server | `2.0.1` | 本地发布候选，尚未发布 | [更新说明](docs/release-2.0.1.md) |
+| MyGO macOS Apple Silicon | `2.0.1` | preview 已验收，stable 待确认提交后构建 | [更新说明](docs/release-mygo-2.0.1.md) |
 
 MyGO 版作为同版本的独立客户端新增，保留现有 Electron 和 Web。应用身份、数据目录、MCP、备份和更新渠道分别隔离，具体范围与阶段验收见开发计划。
+
+## 2.0.1 候选
+
+- 修复 version 3 保存、默认字段、草稿竞态与文档顺序；大批修改先原子保存，再按完整提交分片同步。请先备份并关闭旧客户端，把 Sync Server 升级到 2.0.1，再更新使用同一空间的客户端。旧客户端的节点同步会被明确拒绝，避免用旧算法解释新操作。
+- 首次连接遇到同 ID、不同内容的文档时先停止，手动确认并下载本机备份后才进入冲突比较。
+- Live MCP 支持断线后重连、并发忙碌响应和变化文档提案；MyGO 附件自动分批，网络 JSON 保留原始 UTF-16 文本。
+- 20,000 行大纲采用按可见区域渲染；菜单夹取视口、弹窗管理焦点，修复 Markdown 预览和 PDF/SVG 字形与控制字符。
+- 浏览器支持升级前 JSON 备份；含附件时 JSON 只保存引用，附件原件仍需通过桌面 ZIP 保留。浏览器写文件夹备份使用独立文件名，不覆盖桌面 iCloud 主文件。
+- 历史快照增加全局 128 MiB 预算；云端保留备份仍引用的附件，未引用对象先隔离 30 天。Sync Server 附件配额可通过 `BIKE_ASSET_QUOTA_BYTES` 配置（默认 2 GiB）。
+- ad-hoc Electron 安装通过发布页手动升级；正式签名更新固定到 `v*` 发行渠道。签名检查增加期望 Team ID、真实 blockmap 和产物版本核验。
+
+服务端附件维护先备份数据库并停止服务。默认命令只报告候选；确认清单后加 `--apply` 才删除满 30 天且无保留引用的对象：
+
+```bash
+npm run maintain:assets -- --database=/path/to/bike-sync.sqlite
+npm run maintain:assets -- --database=/path/to/bike-sync.sqlite --apply
+```
 
 ## 2.0.0
 
@@ -26,7 +43,7 @@ MyGO 版作为同版本的独立客户端新增，保留现有 Electron 和 Web�
 - 首次引入附件时升级到工作区 version 2，并保留可下载的升级前副本。完整迁移和备份使用“工作区 ZIP”，单独 JSON 保存结构及引用。
 - Markdown/HTML 携图 ZIP、PDF 内嵌图片、脑图 SVG/PNG，以及 30 天附件隔离清理已接入。清理扫描包含回收站、版本历史、撤销和备用副本。
 - 同步交换附件元数据，另一设备通过 ZIP 补齐原文件。先升级 Sync Server，含附件文档会拒绝旧客户端覆盖写入。
-- 本版按确认的发布范围继续采用 ad-hoc 签名，首次安装可能触发 macOS 安全提示。Developer ID 签名公证流程已准备，凭据与真实验收后续完成。
+- 本版按确认的发布范围继续采用 ad-hoc 签名，首次安装可能触发 macOS 安全提示。Developer ID 签名公证流程已准备，凭据与真实验收后续完成；补齐步骤见 [签名与公证 Runbook](docs/signing-runbook.md)。
 - 检查更新已接入应用内下载、进度和保存后重启安装流程。原生自动替换需要兼容签名，本版 ad-hoc 制品通过 DMG 手动升级。配置与验证边界见 [应用内更新](docs/updates.md)。
 
 功能、升级规则和验证范围见 [1.7.0 更新说明](docs/release-1.7.0.md)，实现与环境记录见 [实施记录](docs/implementation-1.7.0.md)。
@@ -178,13 +195,13 @@ Codex/Claude Desktop 可按 stdio MCP server 配置本地命令，例如：
 推荐使用 curl 打开部署菜单：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/MoarLiu/Bike/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/MoarLiu/Bike/v2.0.1/scripts/install.sh -o bike-install.sh && bash bike-install.sh
 ```
 
 直接安装 Bike Web 版：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/MoarLiu/Bike/main/scripts/install.sh | bash -s -- install-web
+curl -fsSL https://raw.githubusercontent.com/MoarLiu/Bike/v2.0.1/scripts/install.sh -o bike-install.sh && bash bike-install.sh install-web
 ```
 
 脚本会下载 GitHub Release 里的 Web/Sync Server 部署包，校验 SHA-256，解压到 `/opt/bike`，引导配置 Web 监听地址、端口、登录用户名和登录密码，并在 systemd 环境下安装和启动 `bike-web.service`。后续管理可以执行：
@@ -239,20 +256,20 @@ npm run start:web
 在服务器上可以直接用 curl 打开管理菜单：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/MoarLiu/Bike/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/MoarLiu/Bike/v2.0.1/scripts/install.sh -o bike-install.sh && bash bike-install.sh
 ```
 
 直接安装同步服务：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/MoarLiu/Bike/main/scripts/install.sh | bash -s -- install-sync
+curl -fsSL https://raw.githubusercontent.com/MoarLiu/Bike/v2.0.1/scripts/install.sh -o bike-install.sh && bash bike-install.sh install-sync
 ```
 
 安装指定版本或目录：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/MoarLiu/Bike/main/scripts/install.sh \
-  | BIKE_VERSION=v1.6.0 BIKE_INSTALL_DIR=/opt/bike-sync-server bash -s -- install-sync
+curl -fsSL https://raw.githubusercontent.com/MoarLiu/Bike/v2.0.1/scripts/install.sh -o bike-install.sh && \
+  BIKE_VERSION=v2.0.1 BIKE_INSTALL_DIR=/opt/bike-sync-server bash bike-install.sh install-sync
 ```
 
 已经 clone 仓库时，也可以在项目目录里运行：

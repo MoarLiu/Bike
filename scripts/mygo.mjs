@@ -41,9 +41,10 @@ if (command === 'package') {
   // The SDK and protocol packages are platform-independent. Race requires cgo.
   run(go, ['test', './internal/...'], { env: { ...process.env, GOTOOLCHAIN: 'local', GOEXPERIMENT: product.goExperiment, CGO_ENABLED: '0' } });
 } else if (command === 'test:race') {
-  run(go, ['test', '-race', './internal/mcp', './internal/contracts', './internal/product', './internal/services', './internal/sourceexport'], { env: { ...process.env, GOTOOLCHAIN: 'local', GOEXPERIMENT: product.goExperiment, CGO_ENABLED: '1' } });
+  run(go, ['test', '-race', './internal/...'], { env: { ...process.env, GOTOOLCHAIN: 'local', GOEXPERIMENT: product.goExperiment, CGO_ENABLED: '1' } });
 } else if (command === 'build' || command === 'dev' || command === 'probe') {
   assert.equal(process.platform, 'darwin', 'MyGO bundle builds currently require macOS');
+  if (channel === 'stable') assert.equal(run('git', ['status', '--porcelain'], { cwd: root, stdio: 'pipe', encoding: 'utf8' }), '', 'Stable candidates require a clean, committed source tree');
   const generatorDirectory = await fs.mkdtemp(path.join(os.tmpdir(), 'bike-mygo-bindings-'));
   try {
     const generator = path.join(generatorDirectory, 'generate');
@@ -128,6 +129,7 @@ if (command === 'package') {
     run('/usr/bin/codesign', ['--verify', '--strict', bundle]);
     assert.equal(await buildSourceFingerprint(), sourceFingerprint, 'Build inputs changed during compilation. Retry after the concurrent edits finish.');
     const dirty = Boolean(run('git', ['status', '--porcelain'], { cwd: root, stdio: 'pipe', encoding: 'utf8' }));
+    if (channel === 'stable') assert.equal(dirty, false, 'Stable candidates require a clean, committed source tree');
     const data = await fs.readFile(binary);
     const manifest = { ...actual, bundleIdentifier, stage: 'local-candidate', sourceFingerprint, sourceFingerprintScope: 'build-input-files-v2', dirty,
       compiler: product.go, goExperiment: product.goExperiment, frameworkSource: { module: frameworkSource.module, version: frameworkSource.version, sum: frameworkSource.sum, zipSHA256: frameworkSource.zipSHA256, patch: frameworkSource.patch }, cgo: false, os: 'darwin', arch: 'arm64', inspector: false,
@@ -194,6 +196,7 @@ async function copyFrontendNotices(contents) {
     for (const child of Object.keys(dependency.dependencies ?? {}).sort()) await visit(child, directory);
   };
   for (const name of ['react', 'react-dom', 'lucide-react', 'mygo-runtime', 'pdf-lib', '@pdf-lib/fontkit']) await visit(name);
+  await fs.cp(path.join(root, 'public/licenses/fonts'), path.join(contents, 'Resources/third-party/fonts/supplementary'), { recursive: true });
   const font = await fs.readFile(path.join(root, 'src/assets/NotoSansSC-ChineseSimplified.ttf'));
   const fontNotice = path.join(contents, 'Resources/third-party/fonts/NotoSansSC');
   await fs.mkdir(fontNotice, { recursive: true });
@@ -213,6 +216,7 @@ async function packageCandidate() {
   assert.equal(manifest.build, build);
   assert.equal(manifest.channel, channel);
   assert.equal(manifest.stage, 'local-candidate', 'Rebuild the app with the current packaging metadata');
+  if (channel === 'stable') assert.equal(manifest.dirty, false, 'Stable packages require committed source');
   assert.equal(await frontendHash(bundle), manifest.bundleContentSHA256, 'Bundle changed after build');
   run('/usr/bin/codesign', ['--verify', '--strict', bundle]);
   const stem = `bike-mygo-${product.version}${channel === 'preview' ? `-preview-build${build}` : ''}`;
@@ -262,7 +266,7 @@ async function buildSourceFingerprint() {
     'scripts/mygo.mjs', 'scripts/mygo-contracts.mjs', 'scripts/prepare-mygo-source.mjs', 'scripts/build-mygo-source-exporter.mjs']);
   const hash = crypto.createHash('sha256');
   for (const file of [...new Set(listed.split('\0').filter(Boolean))].sort()) {
-    if (!inputs.has(file) && !/^(src|shared|desktop-mygo)\//.test(file) && !/^docs\/evidence-mygo-2026-11-11-package\/notices\//.test(file)) continue;
+    if (!inputs.has(file) && !/^(src|shared|desktop-mygo|public|mcp|electron)\//.test(file)) continue;
     if (/^desktop-mygo\/(?:\.cache|internal\/frontend\/dist|internal\/sourceexport\/(?:generated|testdata)|tests)\//.test(file) || /_test\.go$/.test(file)) continue;
     if (file.startsWith('desktop-mygo/cmd/') && !/^desktop-mygo\/cmd\/bike-mygo(?:-probe)?\//.test(file)) continue;
     let bytes;

@@ -24,6 +24,12 @@ function fixture() {
   let pendingDraft;
   const bindings = {
     sameWorkspaceContent,
+    lockWorkspaceInteraction: (shell) => {
+      if (!shell) return () => {};
+      const previous = shell.inert;
+      shell.inert = true;
+      return () => { shell.inert = previous; };
+    },
     syncBusyRef: { current: false },
     storageConflictRef: { current: false },
     recoveryBusyRef: { current: false },
@@ -70,6 +76,44 @@ function fixture() {
     }),
   };
 }
+
+test("v3 flushes drafts created during snapshot capture before applying downloads", async () => {
+  const f = fixture();
+  f.initial.version = 3;
+  const edited = { ...f.initial, documents: [{ ...f.initial.documents[0], title: "typed during snapshot" }] };
+  const received = f.result().workspace;
+  let remoteSaves = 0;
+  Object.assign(f.bindings, {
+    readReplicaState: async () => ({}),
+    syncOperationWorkspace: async () => ({ workspace: received, replica: {}, summary: {}, hasMore: false }),
+    captureSyncSnapshots: async () => { f.setDraft(edited); },
+    saveWorkspaceToStorage: async () => { remoteSaves++; return { ok: true, target: "indexeddb" }; },
+  });
+  await f.callback()();
+  assert.equal(f.bindings.workspaceRef.current, edited);
+  assert.equal(remoteSaves, 0);
+  assert.equal(f.retries(), 1);
+});
+
+test("v3 protects interaction while writing the downloaded state and retains active selection", async () => {
+  const f = fixture();
+  f.initial.version = 3;
+  const shell = { inert: false };
+  const received = f.result().workspace;
+  let protectedAtSave = false;
+  Object.assign(f.bindings, {
+    document: { querySelector: () => shell },
+    readReplicaState: async () => ({}),
+    syncOperationWorkspace: async () => ({ workspace: received, replica: {}, summary: {}, hasMore: false }),
+    saveWorkspaceToStorage: async () => { protectedAtSave = shell.inert; return { ok: true, target: "indexeddb" }; },
+    showSaveResult: () => {}, syncAppliedWorkspaceRef: { current: null },
+    now: () => "2026-11-13T00:00:00.000Z", workspaceAttachmentAssets: () => [],
+  });
+  await f.callback()();
+  assert.equal(protectedAtSave, true);
+  assert.equal(shell.inert, false);
+  assert.equal(f.bindings.workspaceRef.current.documents[0].title, "downloaded");
+});
 
 test("sync retains edits made while a request is pending and keeps upload checkpoints", async () => {
   const f = fixture();

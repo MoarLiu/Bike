@@ -1,5 +1,6 @@
 import type { BackupResult, Workspace } from "./types";
 import { exportWorkspace } from "./exporters";
+import { uuid } from "./id";
 
 export const saveICloudBackup = async (
   workspace: Workspace,
@@ -33,12 +34,15 @@ export const saveICloudBackup = async (
 
   const directory = await picker({ mode: "readwrite" });
   const backup = exportWorkspace(workspace);
-  const file = await directory.getFileHandle(backup.filename, { create: true });
+  // The browser cannot coordinate a cloud file's compare-and-swap with native
+  // writers. Save a unique snapshot instead of replacing their authoritative file.
+  const filename = `bike-browser-backup-${new Date().toISOString().replace(/[:.]/g, "-")}-${uuid()}.json`;
+  const file = await directory.getFileHandle(filename, { create: true });
   const writable = await file.createWritable();
   await writable.write(backup.content);
   await writable.close();
   return {
     ok: true,
-    path: `所选 iCloud Drive 文件夹/${backup.filename}`,
+    path: `所选 iCloud Drive 文件夹/${filename}`,
   };
 };

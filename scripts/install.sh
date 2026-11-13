@@ -2,10 +2,20 @@
 
 set -Eeuo pipefail
 
+systemd_quote() {
+  local value="$1"
+  [[ "${value}" != *$'\n'* && "${value}" != *$'\r'* ]] || die "systemd 路径不能包含换行。"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  value="${value//%/%%}"
+  printf '"%s"' "${value}"
+}
+
+
 REPO="${BIKE_REPO:-MoarLiu/Bike}"
 GITHUB_BASE="${BIKE_GITHUB_BASE:-https://github.com}"
 GITHUB_API="${BIKE_GITHUB_API:-https://api.github.com}"
-RAW_BASE="${BIKE_RAW_BASE:-https://raw.githubusercontent.com/${REPO}/main}"
+RAW_BASE="${BIKE_RAW_BASE:-https://raw.githubusercontent.com/${REPO}/${BIKE_BOOTSTRAP_REF:-v2.0.1}}"
 VERSION="${BIKE_VERSION:-latest}"
 INSTALL_DIR="${BIKE_INSTALL_DIR:-/opt/bike}"
 WEB_SERVICE_NAME="${BIKE_WEB_SERVICE_NAME:-bike-web}"
@@ -49,9 +59,9 @@ usage() {
 Bike 部署管理脚本
 
 用法：
-  curl -fsSL ${RAW_BASE}/scripts/install.sh | bash
-  curl -fsSL ${RAW_BASE}/scripts/install.sh | bash -s -- install-web
-  curl -fsSL ${RAW_BASE}/scripts/install.sh | bash -s -- install-sync
+  curl -fsSL ${RAW_BASE}/scripts/install.sh -o bike-install.sh && bash bike-install.sh
+  curl -fsSL ${RAW_BASE}/scripts/install.sh -o bike-install.sh && bash bike-install.sh install-web
+  curl -fsSL ${RAW_BASE}/scripts/install.sh -o bike-install.sh && bash bike-install.sh install-sync
 
 命令：
   install-web   下载/安装 Bike Web 版并进入引导配置
@@ -77,13 +87,13 @@ Bike 部署管理脚本
   menu          打开管理菜单
 
 环境变量：
-  BIKE_VERSION=v1.4.4                 安装指定版本；默认 latest
+  BIKE_VERSION=v2.0.1                 安装指定版本；默认 latest
   BIKE_INSTALL_DIR=/opt/bike
   BIKE_WEB_SERVICE_NAME=bike-web
   BIKE_WEB_SERVICE_USER=bike-web
   BIKE_SYNC_SERVICE_NAME=bike-sync-server
   BIKE_SYNC_SERVICE_USER=bike-sync
-  BIKE_RAW_BASE=https://raw.githubusercontent.com/MoarLiu/Bike/main
+  BIKE_RAW_BASE=https://raw.githubusercontent.com/MoarLiu/Bike/v2.0.1
   BIKE_NODE_VERSION=v22.x.y           指定内置 Node.js 版本；默认自动选择 Node 22 最新版
 EOF
 }
@@ -291,9 +301,16 @@ installed() {
 }
 
 latest_tag() {
-  curl -fsSL "${GITHUB_API}/repos/${REPO}/releases/latest" \
-    | sed -n 's/[[:space:]]*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' \
-    | head -n 1
+  curl -fsSL "${GITHUB_API}/repos/${REPO}/releases?per_page=100" | "${NODE_BIN}" -e '
+    let raw = "";
+    process.stdin.on("data", chunk => raw += chunk);
+    process.stdin.on("end", () => {
+      const releases = JSON.parse(raw).filter(item => !item.draft && !item.prerelease && /^v[0-9]+\.[0-9]+\.[0-9]+$/.test(item.tag_name));
+      releases.sort((a, b) => { const av = a.tag_name.slice(1).split(".").map(Number), bv = b.tag_name.slice(1).split(".").map(Number); return bv[0]-av[0] || bv[1]-av[1] || bv[2]-av[2]; });
+      if (!releases.length) process.exit(1);
+      process.stdout.write(releases[0].tag_name);
+    });
+  '
 }
 
 sha256_check() {
@@ -343,9 +360,11 @@ ensure_sync_service_user() {
 resolve_release_tag() {
   local tag="${VERSION}"
   if [[ "${tag}" == "latest" ]]; then
+    ensure_node >&2
     tag="$(latest_tag)"
   fi
   [[ -n "${tag}" ]] || die "无法获取最新 Release 版本。"
+  [[ "${tag}" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || die "不是 Electron/Web 发布版本：${tag}"
   [[ "${tag}" == v* ]] || tag="v${tag}"
   printf '%s' "${tag}"
 }
@@ -440,10 +459,20 @@ install_or_update_files() {
   success "Bike Web/Sync 部署包 ${tag} 文件已准备完成。"
 }
 
+repair_sync_config_owner() {
+  local config="${INSTALL_DIR}/config/bike-sync.config.json"
+  [[ ! -L "${config}" ]] || die "同步配置不能是符号链接。"
+  if [[ -f "${config}" ]] && id "${SYNC_SERVICE_USER}" >/dev/null 2>&1; then
+    sudo_cmd chown "${SYNC_SERVICE_USER}:$(id -gn "${SYNC_SERVICE_USER}")" "${config}"
+    sudo_cmd chmod 0600 "${config}"
+  fi
+}
+
 run_setup() {
   local action="$1"
   installed || die "未找到安装目录：${INSTALL_DIR}。请先执行 install。"
   ensure_node
+  repair_sync_config_owner
   if tty_available; then
     sudo_cmd env \
       BIKE_SYNC_CONFIG="${INSTALL_DIR}/config/bike-sync.config.json" \
@@ -459,6 +488,7 @@ run_setup() {
       NODE_BIN="${NODE_BIN}" \
       bash "${INSTALL_DIR}/scripts/setup-sync-server.sh" "${action}"
   fi
+  repair_sync_config_owner
 }
 
 web_config_path() {
@@ -604,17 +634,17 @@ Wants=network-online.target
 Type=simple
 User=${service_user}
 Group=${service_group}
-WorkingDirectory=${INSTALL_DIR}
+WorkingDirectory=$(systemd_quote "${INSTALL_DIR}")
 Environment=NODE_ENV=production
-Environment=BIKE_CONFIG=${config_path}
-ExecStart=${NODE_BIN} ${INSTALL_DIR}/server/auth-server.mjs
+Environment=$(systemd_quote "BIKE_CONFIG=${config_path}")
+ExecStart=$(systemd_quote "${NODE_BIN//\$/\$\$}") $(systemd_quote "${INSTALL_DIR//\$/\$\$}/server/auth-server.mjs")
 Restart=on-failure
 RestartSec=3
 NoNewPrivileges=true
 UMask=0077
 PrivateTmp=true
 ProtectSystem=full
-ReadWritePaths=${data_dir}
+ReadWritePaths=$(systemd_quote "${data_dir}")
 StateDirectory=${WEB_SERVICE_NAME}
 
 [Install]
@@ -689,7 +719,7 @@ install_web_action() {
   configure_web
   if systemd_available; then
     install_web_service
-    start_web_service
+    restart_web_service
   else
     success "当前系统没有 systemd，已完成文件和配置准备。可手动执行：BIKE_CONFIG=$(web_config_path) ${NODE_BIN} ${INSTALL_DIR}/server/auth-server.mjs"
   fi

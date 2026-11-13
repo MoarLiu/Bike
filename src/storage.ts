@@ -138,7 +138,8 @@ let persistedWorkspace: Workspace | null = null;
 // A receipt belongs to the exact object committed by IndexedDB. Its revision
 // orders saves across windows, unlike a renderer's private request counter.
 const savedRevisions = new WeakMap<Workspace, number>();
-export const getWorkspaceSaveRevision = (workspace: Workspace): number | undefined => savedRevisions.get(workspace);
+export const getWorkspaceSaveRevision = (workspace: Workspace): number | undefined =>
+  savedRevisions.get(workspace) ?? (isWorkspacePersisted(workspace) ? knownRevision ?? undefined : undefined);
 let ownFallback: FallbackSnapshot | null = null;
 let saveSequence = 0;
 let ownFallbackSequence = 0;
@@ -566,10 +567,11 @@ export const reloadWorkspaceIf = async (canApply: () => boolean): Promise<Worksp
   return result.workspace;
 };
 
-// True when the workspace object is exactly what this page last loaded from or
-// wrote to IndexedDB, i.e. it has no unsaved edits.
+// Selection belongs to the page. Navigation alone must not create a revision
+// or force every other window to follow the active document.
 export const isWorkspacePersisted = (workspace: Workspace | null | undefined) =>
-  Boolean(workspace) && workspace === persistedWorkspace;
+  Boolean(workspace && persistedWorkspace && workspace.version === persistedWorkspace.version &&
+    sameWorkspaceContent(workspace, persistedWorkspace) && equalStoredTrash(workspace, persistedWorkspace));
 
 const clearSavedFallbacks = (workspace: Workspace) => {
   if (ownFallback && sameWorkspace(ownFallback.workspace, workspace)) {
@@ -667,7 +669,7 @@ const writeWorkspace = async (
           try {
             const previous = previousRequest.result as Workspace | undefined;
             if (previous?.version === 3) requiresAtomic = true;
-            const inputDigest = sha256Hex(canonicalJson({ workspace, source: options.source, reason: options.reason, acceptedGroups: options.acceptedGroups, resolves: options.resolves, resolutionBaselines: options.resolutionBaselines, candidateDigest: options.candidateDigest }));
+            const inputDigest = options.requestId ? sha256Hex(canonicalJson({ workspace, source: options.source, reason: options.reason, acceptedGroups: options.acceptedGroups, resolves: options.resolves, resolutionBaselines: options.resolutionBaselines, candidateDigest: options.candidateDigest })) : "";
             const existingReplica = replicaRequest.result as ReplicaState | undefined;
             const priorReceipt = existingReplica && Object.prototype.hasOwnProperty.call(existingReplica.receipts, saveId) ? existingReplica.receipts[saveId] : undefined;
             if (priorReceipt) {
@@ -681,7 +683,7 @@ const writeWorkspace = async (
             if (options.expectedWorkspace && (!previous || previous.version !== options.expectedWorkspace.version ||
                 !sameWorkspaceContent(previous, options.expectedWorkspace) || !equalStoredTrash(previous, options.expectedWorkspace)))
               throw new Error("提交基线已变化，提案未应用，请重新比较");
-            if (!overwrite && workspace === persistedWorkspace && !options.replicaUpdate && (workspace.version !== 3 || existingReplica)) {
+            if (!overwrite && isWorkspacePersisted(workspace) && !options.requestId && !options.replicaUpdate && (workspace.version !== 3 || existingReplica)) {
               result = { status: "unchanged", revision: stored.revision }; return;
             }
             const revision = stored.revision + 1;
@@ -696,7 +698,7 @@ const writeWorkspace = async (
                 store.put({ ...options.replicaUpdate, generation: (replica.generation ?? 0) + 1 }, REPLICA_KEY);
               } else {
                 const committed = recordReplicaCommit(replica, base, workspace, {
-                  requestId: saveId, digest: inputDigest, source: options.source ?? { kind: "user", label: "编辑" },
+                  requestId: saveId, digest: inputDigest, retainReceipt: Boolean(options.requestId), source: options.source ?? { kind: "user", label: "编辑" },
                   reason: options.reason, acceptedGroups: options.acceptedGroups, clientDigest: options.clientDigest, candidateDigest: options.candidateDigest, origin: options.origin, resolves: options.resolves, resolutionBaselines: options.resolutionBaselines, at: new Date().toISOString(),
                 });
                 receipt = committed.receipt;
@@ -731,8 +733,10 @@ const writeWorkspace = async (
       return { ok: false, conflict: true, error: new Error(SUPERSEDED_MESSAGE) };
     }
     if (requiresAtomic) {
-      if (!options.expectedWorkspace && !options.replicaUpdate) writeFallback(workspace, sequence);
-      return { ok: false, error: new Error(`操作未提交，编辑副本已尝试保留：${toError(indexedDbError).message}`) };
+      const fallback = !options.expectedWorkspace && !options.replicaUpdate ? writeFallback(workspace, sequence) : null;
+      return { ok: false, error: new Error(`操作未提交：${toError(indexedDbError).message}${fallback
+        ? fallback.ok ? "；编辑副本已保留在备用存储" : `；备用副本也保存失败：${fallback.error.message}。请保持页面打开并立即导出工作区 JSON`
+        : ""}`) };
     }
     const fallback = writeFallback(workspace, sequence);
     if (fallback.ok) return fallback;

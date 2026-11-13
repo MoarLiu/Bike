@@ -19,3 +19,8 @@ desktop-mygo/internal/sourceexport/generated/
 desktop-mygo/.cache/
 output/mygo/
 docs/evidence-mygo-*/
+
+# Local review and agent working state
+.workbuddy/
+review/
+output/

@@ -1,6 +1,22 @@
 const crypto = require("node:crypto");
 const fs = require("node:fs/promises");
 const path = require("node:path");
+const os = require("node:os");
+const { spawnSync } = require("node:child_process");
+const processBirth = (pid) => {
+  if (process.platform === "linux") {
+    try {
+      const { readFileSync } = require("node:fs");
+      const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+      const started = stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/)[19];
+      const boot = readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
+      if (/^\d+$/.test(started) && boot) return `linux:${boot}:${started}`;
+    } catch { /* Fall back on hosts without procfs. */ }
+  }
+  const result = spawnSync("/bin/ps", ["-p", String(pid), "-o", "lstart="], { encoding: "utf8", timeout: 1000, env: { ...process.env, LC_ALL: "C" } });
+  return result.status === 0 ? result.stdout.trim() || null : null;
+};
+const ownBirth = processBirth(process.pid);
 
 const defaultLockOptions = {
   timeoutMs: 5000,
@@ -29,10 +45,13 @@ const readWorkspaceLock = async (lockPath) => {
     fs.readFile(lockPath, "utf8"),
     fs.stat(lockPath),
   ]);
+  const parsed = parseWorkspaceLock(raw);
   return {
     raw,
-    ownerToken: parseWorkspaceLock(raw).ownerToken,
-    pid: parseWorkspaceLock(raw).pid,
+    ownerToken: parsed.ownerToken,
+    pid: parsed.pid,
+    processBirth: parsed.processBirth,
+    hostname: parsed.hostname,
     modifiedAt: stats.mtimeMs,
   };
 };
@@ -60,7 +79,14 @@ const removeStaleLock = async (lockPath, options = {}) => {
   const { staleMs } = { ...defaultLockOptions, ...options };
   try {
     const lock = await readWorkspaceLock(lockPath);
-    if (Date.now() - lock.modifiedAt >= staleMs && !isProcessAlive(lock.pid)) {
+    const validPid = Number.isSafeInteger(lock.pid) && lock.pid > 0;
+    const sameHost = !lock.hostname || lock.hostname === os.hostname();
+    let ownerAlive = validPid && (!sameHost || isProcessAlive(lock.pid));
+    if (ownerAlive && sameHost && lock.processBirth) {
+      const birth = processBirth(lock.pid);
+      if (birth && birth !== lock.processBirth) ownerAlive = false;
+    }
+    if ((validPid && !ownerAlive) || (!validPid && Date.now() - lock.modifiedAt >= staleMs)) {
       if (lock.ownerToken) {
         await releaseWorkspaceWriteLock(lockPath, lock.ownerToken);
       } else {
@@ -81,6 +107,8 @@ const lockFileContent = (workspacePath, ownerToken) =>
   `${JSON.stringify(
     {
       pid: process.pid,
+      processBirth: ownBirth,
+      hostname: os.hostname(),
       ownerToken,
       createdAt: new Date().toISOString(),
       workspacePath: path.basename(workspacePath),
@@ -108,7 +136,7 @@ const acquireWorkspaceWriteLock = async (workspacePath, options = {}) => {
       await delay(retryMs);
     }
   }
-  throw new Error("工作区正在被另一个 Bike 写入，请稍后重试");
+  throw Object.assign(new Error("工作区正在被另一个 Bike 写入，请稍后重试"), { code: "WORKSPACE_LOCK_BUSY", statusCode: 503 });
 };
 
 const withWorkspaceWriteLock = async (workspacePath, callback, options = {}) => {

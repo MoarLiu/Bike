@@ -11,6 +11,7 @@ import { createLiveWorkspaceStore } from '../mcp/bike-live.mjs';
 import { appendChildrenForMcp } from '../mcp/bike-core.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
+const productVersion = JSON.parse(await fs.readFile(path.join(root, 'package.json'), 'utf8')).version;
 const desktop = path.join(root, 'desktop-mygo');
 const source = path.join(desktop, 'cmd/bike-mygo-performance');
 const LF = String.fromCharCode(10);
@@ -103,7 +104,7 @@ const report = { collectedAt: new Date().toISOString(), commit: run('git', ['rev
   'Concurrent agents and other applications may affect scheduling. One run per scenario, 20 searches per theme and 50 edits per view/state by default.',
   'Real IME, macOS 12/13, iCloud and real providers are outside this performance run.',
   'The native binary is a separate production-linked helper with the production frontend and desktop services. It omits the shipping window menu and close lifecycle wiring.',
-  'The supplied release/mac-arm64/Bike.app identifies as 1.7.0 and rejects v3. Its diagnostic runs are separate. The --electron-archive option measures the checksummed formal 2.0.0 artifact without changing that app.',
+  'Electron identity is recorded from the supplied app. The --electron-archive option measures a checksummed release without changing the installed app.',
   'Process startup clocks differ slightly. Go records time since main, Electron reports process.uptime through Playwright. Navigation-to-ready includes harness dispatch overhead in both engines.',
   'Large proposal and attachment peak workloads are separate acceptance items and are not covered by the default UI workload.'
 ] };
@@ -247,11 +248,11 @@ try {
     frozenNativeInputs = { frontendSHA256: frontendBefore, sourceFingerprint, candidateSourceFingerprint: candidateFingerprint };
     await fs.mkdir(path.dirname(binary), { recursive: true });
     const identifier = hasPeaks ? 'com.bike.mygo.performance.peaks' : 'com.bike.mygo.performance';
-    const flags = `-s -w -X github.com/egoist/mygo.production=1 -X github.com/egoist/mygo.packageIdentifier=${identifier} -X github.com/egoist/mygo.packageVersion=2.0.0 -X github.com/MoarLiu/Bike/desktop-mygo/internal/product.Build=${candidate?.build ?? '1'} -X github.com/MoarLiu/Bike/desktop-mygo/internal/product.Channel=${candidate?.channel ?? 'preview'} -X github.com/MoarLiu/Bike/desktop-mygo/internal/product.Commit=${report.commit}`;
+    const flags = `-s -w -X github.com/egoist/mygo.production=1 -X github.com/egoist/mygo.packageIdentifier=${identifier} -X github.com/egoist/mygo.packageVersion=${productVersion} -X github.com/MoarLiu/Bike/desktop-mygo/internal/product.Build=${candidate?.build ?? '1'} -X github.com/MoarLiu/Bike/desktop-mygo/internal/product.Channel=${candidate?.channel ?? 'preview'} -X github.com/MoarLiu/Bike/desktop-mygo/internal/product.Commit=${report.commit}`;
     run(go, ['build', '-mod=readonly', '-trimpath', '-tags', 'mygo_noinspector,mygo_frontend', '-ldflags', flags, '-o', binary, './cmd/bike-mygo-performance'], { cwd: desktop, env: environment });
     assert.equal(await hashDirectory(staged), frontendBefore, 'Staged frontend changed during compilation');
     assert.equal(await nativeSourceFingerprint(), sourceFingerprint, 'Native sources changed during compilation');
-    const plist = `<?xml version='1.0' encoding='UTF-8'?><plist version='1.0'><dict><key>CFBundleIdentifier</key><string>${identifier}</string><key>CFBundleName</key><string>Bike MyGO Performance</string><key>CFBundleExecutable</key><string>bike-mygo-performance</string><key>CFBundlePackageType</key><string>APPL</string><key>CFBundleShortVersionString</key><string>2.0.0</string><key>CFBundleVersion</key><string>1</string><key>LSMinimumSystemVersion</key><string>12.0</string><key>NSPrincipalClass</key><string>NSApplication</string><key>NSHighResolutionCapable</key><true/></dict></plist>`;
+    const plist = `<?xml version='1.0' encoding='UTF-8'?><plist version='1.0'><dict><key>CFBundleIdentifier</key><string>${identifier}</string><key>CFBundleName</key><string>Bike MyGO Performance</string><key>CFBundleExecutable</key><string>bike-mygo-performance</string><key>CFBundlePackageType</key><string>APPL</string><key>CFBundleShortVersionString</key><string>${productVersion}</string><key>CFBundleVersion</key><string>1</string><key>LSMinimumSystemVersion</key><string>12.0</string><key>NSPrincipalClass</key><string>NSApplication</string><key>NSHighResolutionCapable</key><true/></dict></plist>`;
     await fs.writeFile(path.join(path.dirname(path.dirname(binary)), 'Info.plist'), plist);
     run('/usr/bin/codesign', ['--force', '--sign', '-', path.dirname(path.dirname(path.dirname(binary)))]);
     const otool = run('/usr/bin/otool', ['-l', binary]);
@@ -459,10 +460,10 @@ if (report.frozenInputVerification && !report.frozenInputVerification.matched) f
 if (!report.runnerSourceUnchanged) failedCases.push('harness/changed-runner');
 report.failedCases = failedCases;
 report.incompleteCases = [...new Set(incompleteCases)];
-report.complete50EditComparison = edits === 50 && engines.length === 2 && cases.length === 6 && coreCases.every((name) => cases.includes(name)) && failedCases.length === 0 && incompleteCases.length === 0 && report.engines.electron?.bundleVersion === '2.0.0';
+report.complete50EditComparison = edits === 50 && engines.length === 2 && cases.length === 6 && coreCases.every((name) => cases.includes(name)) && failedCases.length === 0 && incompleteCases.length === 0 && report.engines.electron?.bundleVersion === productVersion;
 if (hasPeaks) {
   report.completePeakCases = cases.filter((name) => peakCases.has(name)).every((name) => engines.every((engine) => report.engines[engine]?.results[name]?.result?.peakAccepted && report.engines[engine]?.results[name]?.restartVerification?.result?.peakAccepted)) && !failedCases.length && !incompleteCases.length;
-  report.completePeakComparison = report.completePeakCases && engines.length === 2 && ['proposal-peak', 'attachment-peak'].every((name) => cases.includes(name)) && report.engines.electron?.bundleVersion === '2.0.0' && report.peakMethod.finalCandidateEvidence;
+  report.completePeakComparison = report.completePeakCases && engines.length === 2 && ['proposal-peak', 'attachment-peak'].every((name) => cases.includes(name)) && report.engines.electron?.bundleVersion === productVersion && report.peakMethod.finalCandidateEvidence;
   const runs = Object.values(report.engines).flatMap((engine) => Object.values(engine.results).flatMap((run) => Array.isArray(run) ? run : [run]));
   const samples = runs.flatMap((run) => [run, run.restartVerification, run.cleanupVerification].filter(Boolean).flatMap((measurement) => [...(measurement.result?.memory ?? []), ...(measurement.residentSamples ?? [])]));
   const processIds = [...new Set(samples.flatMap((sample) => sample.processes.map((process) => process.pid)))].sort((a, b) => a - b);

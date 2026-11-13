@@ -98,6 +98,7 @@ type Attachments struct {
 	pinned    map[string]bool
 	uploads   map[string]*upload
 	scans     map[string]scanTicket
+	verified  map[string]verifiedAttachment
 }
 
 var assetIDPattern = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
@@ -274,6 +275,23 @@ func (library *Attachments) openLocked(id string, expected *Metadata) (*os.File,
 	if err != nil {
 		return nil, Metadata{}, err
 	}
+	initial, err := file.Stat()
+	if err != nil {
+		file.Close()
+		return nil, Metadata{}, err
+	}
+	fingerprint := attachmentFingerprint(initial)
+	if cached, ok := library.verified[id]; ok && fingerprint != "" && fingerprint == cached.fingerprint {
+		if expected != nil && *expected != cached.metadata {
+			file.Close()
+			return nil, Metadata{}, fmt.Errorf("%w：附件文件与元数据不一致", ErrAttachmentIntegrity)
+		}
+		if restoredFrom != "" {
+			os.Remove(restoredFrom)
+		}
+		library.pinned[id] = true
+		return file, cached.metadata, nil
+	}
 	actual, metadata, err := inspectFile(file)
 	if err != nil || actual != id {
 		file.Close()
@@ -282,6 +300,17 @@ func (library *Attachments) openLocked(id string, expected *Metadata) (*os.File,
 	if expected != nil && *expected != metadata {
 		file.Close()
 		return nil, Metadata{}, fmt.Errorf("%w：附件文件与元数据不一致", ErrAttachmentIntegrity)
+	}
+	final, err := file.Stat()
+	if err != nil || fingerprint != attachmentFingerprint(final) {
+		file.Close()
+		return nil, Metadata{}, ErrAttachmentIntegrity
+	}
+	if fingerprint != "" {
+		if library.verified == nil || len(library.verified) >= 4096 {
+			library.verified = map[string]verifiedAttachment{}
+		}
+		library.verified[id] = verifiedAttachment{fingerprint, metadata}
 	}
 	if restoredFrom != "" {
 		os.Remove(restoredFrom)
@@ -481,7 +510,13 @@ func (library *Attachments) RecoverUploads() error {
 		return err
 	}
 	for _, entry := range entries {
-		if entry.Type().IsRegular() && strings.HasPrefix(entry.Name(), ".upload-") && strings.HasSuffix(entry.Name(), ".tmp") {
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		temporary := strings.HasSuffix(entry.Name(), ".tmp") && (strings.HasPrefix(entry.Name(), ".upload-") || strings.HasPrefix(entry.Name(), ".import-") && time.Since(info.ModTime()) > 24*time.Hour)
+		corrupt := strings.HasPrefix(entry.Name(), ".corrupt-") && strings.HasSuffix(entry.Name(), ".bak") && time.Since(info.ModTime()) > 30*24*time.Hour
+		if entry.Type().IsRegular() && (temporary || corrupt) {
 			if err := os.Remove(filepath.Join(library.Directory, entry.Name())); err != nil && !os.IsNotExist(err) {
 				return err
 			}
@@ -638,7 +673,10 @@ func (library *Attachments) scanLocked(protected []string) ([]Candidate, int, er
 		}
 		for _, entry := range entries {
 			id := "sha256:" + entry.Name()
-			if _, err := assetDigest(id); err != nil || !strings.HasPrefix(entry.Name(), parent.Name()) || entry.Type()&os.ModeSymlink != 0 || entry.IsDir() {
+			if _, err := assetDigest(id); err != nil {
+				continue
+			}
+			if !strings.HasPrefix(entry.Name(), parent.Name()) || entry.Type()&os.ModeSymlink != 0 || entry.IsDir() {
 				return nil, 0, fmt.Errorf("附件对象无效，已停止清理")
 			}
 			if protectedSet[id] {
@@ -725,7 +763,10 @@ func (library *Attachments) Clean(protected []string, ticket string) (map[string
 	}
 	for _, entry := range entries {
 		id := "sha256:" + entry.Name()
-		if _, err := assetDigest(id); err != nil || entry.Type()&os.ModeSymlink != 0 || entry.IsDir() {
+		if _, err := assetDigest(id); err != nil {
+			continue
+		}
+		if entry.Type()&os.ModeSymlink != 0 || entry.IsDir() {
 			return nil, fmt.Errorf("隔离区内容无效，已停止清理")
 		}
 		info, err := entry.Info()

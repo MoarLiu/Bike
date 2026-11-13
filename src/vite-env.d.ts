@@ -4,7 +4,7 @@ declare const __APP_VERSION__: string;
 declare const __RELEASE_PAGE_URL__: string;
 
 interface BikeUpdateState {
-  status: "idle" | "checking" | "available" | "not-available" | "downloading" | "downloaded" | "preparing" | "installing" | "error" | "unsupported";
+  status: "idle" | "checking" | "available" | "manual" | "not-available" | "downloading" | "downloaded" | "preparing" | "installing" | "error" | "unsupported";
   currentVersion: string;
   latestVersion?: string;
   updateAvailable?: boolean;
@@ -14,7 +14,7 @@ interface BikeUpdateState {
 
 interface LiveMcpGrant { scope: "document" | "workspace"; documentIds: string[]; writable: boolean }
 interface LiveMcpState { command?: string; args?: string[]; enabled: boolean; writable: boolean; documentIds: string[]; discoveryPath: string | null }
-interface LiveMcpRequest { method: "snapshot" | "proposal" | "status"; grant: LiveMcpGrant; session: { id: string; clientName: string; connectedAt: string }; payload: { requestId?: string; clientDigest?: string; expectedRevision?: string; workspaceId?: string; candidate?: unknown; dryRun?: boolean; operation?: string; reason?: string } }
+interface LiveMcpRequest { method: "snapshot" | "proposal" | "status"; grant: LiveMcpGrant; session: { id: string; clientName: string; connectedAt: string }; payload: { requestId?: string; clientDigest?: string; expectedRevision?: string; workspaceId?: string; candidate?: unknown; candidatePatch?: unknown; dryRun?: boolean; operation?: string; reason?: string } }
 interface BikeDesktopBridge {
   syncAttachments?: (assets: Array<{ assetId: string; metadata: import("../shared/bike-attachments.mjs").AttachmentMetadata }>) => Promise<{ ok: boolean; complete?: boolean; completed?: number; total?: number; errors?: Array<{ assetId: string; message: string }>; error?: string }>;
   cancelAttachmentSync?: () => Promise<unknown>;

@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { NodeTargetSelect } from "./NodeTargetSelect";
 import type { BacklinkSource, NodeRelation, ResolvedConnection } from "../knowledge";
 
 export function KnowledgePanel({
@@ -83,12 +84,7 @@ export function KnowledgePanel({
       </div>
       <div className="section-title">主题关系</div>
       <div className="relation-editor">
-        <select className="control-input" value={targetId} onChange={(event) => setTargetId(event.target.value)} aria-label="关系目标">
-          <option value="">选择同文档主题</option>
-          {targets.filter((item) => item.id !== activeNodeId).map((item) => (
-            <option key={item.id} value={item.id}>{item.label}</option>
-          ))}
-        </select>
+        <NodeTargetSelect label="关系目标" targets={targets} value={targetId} onChange={setTargetId} excludeId={activeNodeId} />
         <input className="control-input" value={label} onChange={(event) => setLabel(event.target.value)} aria-label="关系标签" maxLength={80} />
         <button
           type="button"
@@ -130,14 +126,8 @@ function RelationRow({ relation, targets, locked, onOpenNode, onUpdate, onRevers
   return <div className="relation-row">
     <span><button type="button" className="wiki-link-chip relation-endpoint" disabled={relation.fromMissing} onClick={() => onOpenNode(relation.fromNodeId)}>{name(relation.fromNodeId)}</button> → <button type="button" className="wiki-link-chip relation-endpoint" disabled={relation.toMissing} onClick={() => onOpenNode(relation.toNodeId)}>{name(relation.toNodeId)}</button>：{relation.label || "关联"}{relation.fromMissing || relation.toMissing ? " · 端点缺失，请重新连接" : ""}</span>
     {editing ? <div className="relation-editor">
-      <select className="control-input" aria-label="编辑关系来源" value={from} onChange={(event) => setFrom(event.target.value)}>
-        {!targets.some((item) => item.id === from) && <option value={from}>缺失主题</option>}
-        {targets.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
-      </select>
-      <select className="control-input" aria-label="编辑关系目标" value={to} onChange={(event) => setTo(event.target.value)}>
-        {!targets.some((item) => item.id === to) && <option value={to}>缺失主题</option>}
-        {targets.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
-      </select>
+      <NodeTargetSelect label="编辑关系来源" targets={targets} value={from} onChange={setFrom} />
+      <NodeTargetSelect label="编辑关系目标" targets={targets} value={to} onChange={setTo} />
       <input className="control-input" aria-label="编辑关系标签" maxLength={80} value={label} onChange={(event) => setLabel(event.target.value)} />
       <button className="control-button compact" type="button" disabled={locked} onClick={() => { if (onUpdate(relation.id, { fromNodeId: from, toNodeId: to, label })) setEditing(false); }}>保存关系</button>
       <button className="control-button compact" type="button" onClick={() => setEditing(false)}>取消</button>

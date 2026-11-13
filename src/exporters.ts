@@ -1,3 +1,5 @@
+import { xmlText } from "./xmlText";
+import { pdfFontFor, pdfFontRuns, pdfGraphemes, pdfTextWidth, setPdfFallbackFonts } from "./pdfFonts";
 import type { PDFFont, PDFPage, RGB } from "pdf-lib";
 import type { OutlineDocument, OutlineNode, Workspace } from "./types";
 import { uuid } from "./id";
@@ -11,15 +13,13 @@ import {
 } from "./markdown";
 import { finalizeMarkdownExport, readBikeMetadata, restoreMarkdownIdentity, readableRelations } from "./knowledge";
 import pdfFontUrl from "./assets/NotoSansSC-ChineseSimplified.ttf?url";
+import pdfSymbolsUrl from "./assets/NotoSansSymbols2-Regular.ttf?url";
+import pdfEmojiUrl from "./assets/NotoEmoji.ttf?url";
+import pdfCjkUrl from "./assets/NotoSansCJKsc-Regular.otf?url";
 import { assertDocumentBudget, assertTextBudget, assertWorkspaceBudget, MAX_DOCUMENT_NODES, MAX_DESKTOP_DEPTH } from "../shared/bike-limits.mjs";
 import { validateDocumentAttachments, isPreviewableImage, workspaceAttachmentAssets } from "../shared/bike-attachments.mjs";
 import { loadAttachmentImage, rasterImageBytes } from "./attachmentImages";
 
-const xmlText = (value: string) => Array.from(value).map((character) => {
-  const code = character.codePointAt(0)!;
-  return code === 9 || code === 10 || code === 13 || (code >= 0x20 && code <= 0xd7ff) ||
-    (code >= 0xe000 && code <= 0xfffd) || (code >= 0x10000 && code <= 0x10ffff) ? character : "�";
-}).join("");
 const escapeXml = (value: string) =>
   xmlText(value)
     .replace(/&/g, "&amp;")
@@ -147,8 +147,8 @@ const htmlNode = (node: OutlineNode, images = false, items: OutlineDocument["att
     const url = `attachments/${ref.assetId.slice(7)}`;
     if (!images) return `<p>附件 ${escapeXml(ref.name)}</p>`;
     return isPreviewableImage(items?.items[ref.assetId])
-      ? `<figure><img style="max-width:100%;height:auto" src="${url}" alt="${escapeXmlAttribute(ref.alt || ref.name)}"><figcaption>${escapeXml(ref.name)}</figcaption></figure>`
-      : `<p><a href="${url}" download="${escapeXmlAttribute(ref.name)}">${escapeXml(ref.name)}</a></p>`;
+      ? `<figure><img style="max-width:100%;height:auto" src="${escapeXmlAttribute(url)}" alt="${escapeXmlAttribute(ref.alt || ref.name)}"><figcaption>${escapeXml(ref.name)}</figcaption></figure>`
+      : `<p><a href="${escapeXmlAttribute(url)}" download="${escapeXmlAttribute(ref.name)}">${escapeXml(ref.name)}</a></p>`;
   }).join("");
   return `<li${checked}><span>${escapeXml(nodeText(node))}</span>${note}${code}${table}${image}${attachments}${childHtml}</li>`;
 };
@@ -303,9 +303,7 @@ export const downloadBlob = (filename: string, blob: Blob) => {
 };
 
 const pdfText = (value: string) =>
-  value.replace(/\r\n?/g, "\n").replace(/\t/g, "  ").trim();
-
-const pdfCharacterSets = new WeakMap<PDFFont, Set<number>>();
+  value.replace(/\r\n?/g, "\n").replace(/\t/g, "  ").replace(/[\u200b\ufeff]/gu, "").trim();
 
 const wrapPdfText = (
   value: string,
@@ -313,17 +311,11 @@ const wrapPdfText = (
   fontSize: number,
   maxWidth: number,
 ) => {
-  let characters = pdfCharacterSets.get(font);
-  if (!characters) {
-    characters = new Set(font.getCharacterSet());
-    pdfCharacterSets.set(font, characters);
-  }
   // Keep unsupported characters identifiable instead of emitting .notdef boxes.
-  const printable = Array.from(pdfText(value), (character) => {
-    const codePoint = character.codePointAt(0)!;
-    return character === "\n" || characters.has(codePoint)
+  const printable = pdfGraphemes(pdfText(value)).map((character) => {
+    return character === "\n" || pdfFontFor(font, character)
       ? character
-      : `[U+${codePoint.toString(16).toUpperCase().padStart(4, "0")}]`;
+      : Array.from(character, item => `[U+${item.codePointAt(0)!.toString(16).toUpperCase().padStart(4, "0")}]`).join("");
   }).join("");
   const paragraphs = printable.split("\n");
   const lines: string[] = [];
@@ -335,9 +327,9 @@ const wrapPdfText = (
     }
 
     let line = "";
-    Array.from(paragraph).forEach((char) => {
+    pdfGraphemes(paragraph).forEach((char) => {
       const next = `${line}${char}`;
-      if (line && font.widthOfTextAtSize(next, fontSize) > maxWidth) {
+      if (line && pdfTextWidth(next, font, fontSize) > maxWidth) {
         lines.push(line);
         line = char;
         return;
@@ -385,6 +377,28 @@ export const exportDocumentAsPdf = async (outlineDocument: OutlineDocument) => {
   });
   // The bundled Noto Sans SC font loses glyphs in fontkit's subset output.
   const font = await pdfDocument.embedFont(fontBytes, { subset: false });
+  const supplementary: PDFFont[] = [];
+  const visibleText = [documentTitle(outlineDocument), ...readableRelations(outlineDocument)];
+  const pendingNodes = [...outlineDocument.nodes];
+  while (pendingNodes.length) {
+    const node = pendingNodes.pop()!;
+    visibleText.push(node.text, node.note ?? "", node.icon ?? "", node.codeBlock ?? "", node.codeLanguage ?? "",
+      ...(node.table ?? []).flat(), ...(node.attachmentRefs ?? []).map(reference => reference.name));
+    pendingNodes.push(...node.children);
+  }
+  const missing = new Set(pdfGraphemes(pdfText(visibleText.join("\n"))).filter(character => character !== "\n" && !pdfFontFor(font, character)));
+  for (const [url, relevant] of [
+    [pdfSymbolsUrl, () => [...missing].some(character => Array.from(character).some(item => item.codePointAt(0)! < 0x2e80 || item.codePointAt(0)! >= 0x1f000))],
+    [pdfEmojiUrl, () => [...missing].some(character => Array.from(character).some(item => item.codePointAt(0)! >= 0x1f000))],
+    [pdfCjkUrl, () => missing.size > 0],
+  ] as const) {
+    if (!relevant()) continue;
+    const response = await fetch(url);
+    if (!response.ok) throw new Error("无法加载 PDF 补充字库，请重试导出");
+    supplementary.push(await pdfDocument.embedFont(await response.arrayBuffer(), { subset: url !== pdfCjkUrl }));
+    setPdfFallbackFonts(font, supplementary);
+    for (const character of missing) if (pdfFontFor(font, character)) missing.delete(character);
+  }
 
   const pageSize = { width: 595.28, height: 841.89 };
   const margin = { top: 56, right: 52, bottom: 54, left: 52 };
@@ -413,13 +427,11 @@ export const exportDocumentAsPdf = async (outlineDocument: OutlineDocument) => {
     lines.forEach((line) => {
       ensureSpace(options.lineHeight);
       const targetPage = options.pageRef ?? page;
-      targetPage.drawText(line, {
-        x: options.x,
-        y: y - options.fontSize,
-        size: options.fontSize,
-        font,
-        color: options.color,
-      });
+      let x = options.x;
+      for (const run of pdfFontRuns(line, font)) {
+        targetPage.drawText(run.text, { x, y: y - options.fontSize, size: options.fontSize, font: run.font, color: options.color });
+        x += run.font.widthOfTextAtSize(run.text, options.fontSize);
+      }
       y -= options.lineHeight;
     });
   };
@@ -584,7 +596,9 @@ export const importDocument = (
   const lowerFilename = filename.toLowerCase();
 
   if (lowerFilename.endsWith(".json")) {
-    const parsed = JSON.parse(content) as Workspace | OutlineDocument;
+    let parsed: Workspace | OutlineDocument;
+    try { parsed = JSON.parse(content); } catch { throw new Error("JSON 格式无效，请选择 Bike 导出的工作区或文档文件"); }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("JSON 文件不是有效的 Bike 工作区或文档");
     if ("documents" in parsed) return migrateWorkspace(parsed);
     return migrateDocument({
       ...parsed,

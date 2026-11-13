@@ -32,7 +32,14 @@ export const handleAssetApi = async (request, response, store, { headers = {} } 
     } else { sendJson(response, 405, { error: 'method_not_allowed', message: '附件方法不受支持' }, headers); return true; }
     sendJson(response, 200, result, headers);
   } catch (error) {
-    sendJson(response, error.statusCode ?? (error.code === 'ENOSPC' ? 507 : 400), { error: error.code ?? 'asset_error', message: error.message }, headers);
+    const busy = error.code === 'WORKSPACE_LOCK_BUSY' || error.code === 'EBUSY';
+    const status = busy ? 503 : error.statusCode ?? (error.code === 'ENOSPC' ? 507 : error.code === 'ENOENT' ? 404 : error.code ? 500 : 400);
+    const message = busy ? '附件正在被其它请求写入，请稍后重试'
+      : error.code === 'ENOSPC' ? '附件存储空间不足'
+        : error.code === 'ENOENT' ? '附件或上传记录不存在'
+          : error.code && !error.statusCode ? '附件存储暂时不可用，请检查服务日志' : error.message;
+    sendJson(response, status, { error: busy ? 'asset_busy' : error.code ?? 'asset_error', message },
+      { ...headers, ...(busy ? { 'Retry-After': '1' } : {}) });
   }
   return true;
 };

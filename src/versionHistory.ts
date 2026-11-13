@@ -32,6 +32,11 @@ const STORE_NAME = "snapshots";
 const MAX_SNAPSHOTS = 50;
 const MAX_AGE_MS = 60 * 24 * 60 * 60 * 1000;
 const MAX_TOTAL_SIZE = 20 * 1024 * 1024;
+export const MAX_HISTORY_SIZE = 128 * 1024 * 1024;
+const INDEX_KEY = "history-retention-index-v1";
+type HistoryIndex = Record<string, Array<{ id: string; createdAt: string; size: number }>>;
+const historyWarnings = new Map<string, string>();
+export const getHistoryWarning = (documentId: string) => historyWarnings.get(documentId) ?? "";
 const MIGRATION_KEY = "bike-full-copy-history-import";
 const migrationHistoryDigest = (rows: LocalMigrationHistory[]) => localMigrationDigest(rows.map((row) => ({
   ...row, snapshots: row.snapshots.map(({ size: _size, ...snapshot }) => snapshot),
@@ -43,10 +48,12 @@ const pendingMigrationError = () => new Error("版本历史正在安装本机副
 
 const snapshotKey = (documentId: string) => `document:${documentId}`;
 
-const readSnapshots = (value: unknown, documentId: string): DocumentSnapshot[] => {
+const readSnapshots = (value: unknown, documentId: string, tolerant = false): DocumentSnapshot[] => {
   if (value === undefined) return [];
   if (!Array.isArray(value)) throw new Error("版本历史数据损坏，已保留原始记录");
-  return value.map((raw: unknown) => {
+  let invalid = 0;
+  const snapshots = value.flatMap((raw: unknown) => {
+    try {
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
       throw new Error("版本历史数据损坏，已保留原始记录");
     }
@@ -60,13 +67,36 @@ const readSnapshots = (value: unknown, documentId: string): DocumentSnapshot[] =
       !Array.isArray(snapshot.document.nodes)
     ) throw new Error("版本历史数据损坏，已保留原始记录");
     const document = migrateDocument(snapshot.document);
-    return {
+    return [{
       ...snapshot,
       document,
       signature: documentSignature(document),
       size: new TextEncoder().encode(JSON.stringify(snapshot)).byteLength,
-    };
+    }];
+    } catch (error) {
+      if (!tolerant) throw error;
+      invalid++;
+      return [];
+    }
   });
+  if (tolerant) {
+    if (invalid) historyWarnings.set(documentId, `${invalid} 条损坏快照已隔离显示，原始记录仍保留；可继续使用其余历史`);
+    else historyWarnings.delete(documentId);
+  }
+  return snapshots;
+};
+
+export const retainGlobalHistory = (index: HistoryIndex): HistoryIndex => {
+  const entries = Object.entries(index).flatMap(([documentId, snapshots]) => snapshots.map(snapshot => ({ documentId, ...snapshot })));
+  entries.sort((left, right) => right.createdAt.localeCompare(left.createdAt) || left.id.localeCompare(right.id));
+  const retained: HistoryIndex = Object.fromEntries(Object.keys(index).map(id => [id, []]));
+  let size = 0;
+  for (const entry of entries) {
+    if (size + entry.size > MAX_HISTORY_SIZE) continue;
+    retained[entry.documentId].push({ id: entry.id, createdAt: entry.createdAt, size: entry.size });
+    size += entry.size;
+  }
+  return retained;
 };
 
 const openDb = () =>
@@ -100,7 +130,7 @@ export const listHistoryAttachmentIds = async (): Promise<string[]> => {
           const item = cursor.result;
           if (!item) return;
           if (migration.result) throw pendingMigrationError();
-          if (item.key === MIGRATION_KEY) { item.continue(); return; }
+          if (item.key === MIGRATION_KEY || item.key === INDEX_KEY) { item.continue(); return; }
           if (typeof item.key !== "string" || !item.key.startsWith("document:")) throw new Error("历史记录键无效");
           for (const snapshot of readSnapshots(item.value, item.key.slice(9))) {
             for (const asset of workspaceAttachmentAssets({ documents: [snapshot.document] })) ids.add(asset.assetId);
@@ -157,7 +187,7 @@ export const appendSnapshot = (
   const retained: DocumentSnapshot[] = [];
   let total = 0;
   for (const item of byAgeOrRecent) {
-    if (retained.length && total + item.size > MAX_TOTAL_SIZE) break;
+    if (retained.length && total + item.size > MAX_TOTAL_SIZE) continue;
     retained.push(item);
     total += item.size;
   }
@@ -176,7 +206,7 @@ export const listDocumentSnapshots = async (
       tx.oncomplete = () => {
         try {
           if (migration.result) throw pendingMigrationError();
-          resolve(readSnapshots(request.result, documentId));
+          resolve(readSnapshots(request.result, documentId, true));
         } catch (error) {
           reject(error);
         }
@@ -202,12 +232,54 @@ export const captureSnapshot = async (
       const key = snapshotKey(document.id);
       const request = store.get(key);
       const migration = store.get(MIGRATION_KEY);
+      const budget = store.get(INDEX_KEY);
       let written: DocumentSnapshot[] = [];
-      migration.onsuccess = () => {
+      budget.onsuccess = () => {
         try {
           if (migration.result) throw pendingMigrationError();
-          written = appendSnapshot(readSnapshots(request.result, document.id), snapshot);
-          store.put(written, key);
+          const previous = readSnapshots(request.result, document.id, true);
+          written = appendSnapshot(previous, snapshot);
+          const invalid = (Array.isArray(request.result) ? request.result : []).filter((item: unknown) => {
+            try { readSnapshots([item], document.id); return false; } catch { return true; }
+          });
+          const applyBudget = (index: HistoryIndex) => {
+            Object.defineProperty(index, document.id, { value: written.map(({ id, createdAt, size }) => ({ id, createdAt, size })), enumerable: true, writable: true, configurable: true });
+            const retained = retainGlobalHistory(index);
+            const allowed = new Set(retained[document.id].map(item => item.id));
+            written = written.filter(item => allowed.has(item.id));
+            store.put([...written, ...invalid], key);
+            for (const [documentId, metadata] of Object.entries(index)) {
+              if (documentId === document.id || retained[documentId].length === metadata.length) continue;
+              const read = store.get(snapshotKey(documentId));
+              const keep = new Set(retained[documentId].map(item => item.id));
+              read.onsuccess = () => {
+                try {
+                  const valid = new Set(readSnapshots(read.result, documentId, true).map(item => item.id));
+                  store.put(read.result.filter((item: DocumentSnapshot) => !item || !valid.has(item.id) || keep.has(item.id)), snapshotKey(documentId));
+                } catch (error) { tx.abort(); reject(error); }
+              };
+            }
+            store.put(retained, INDEX_KEY);
+          };
+          if (budget.result && typeof budget.result === "object" && !Array.isArray(budget.result) &&
+              Object.values(budget.result).every(rows => Array.isArray(rows) && rows.every(item =>
+                item && typeof item.id === "string" && Number.isFinite(Date.parse(item.createdAt)) && Number.isSafeInteger(item.size) && item.size >= 0))) applyBudget(budget.result);
+          else {
+            const index: HistoryIndex = Object.create(null);
+            const cursor = store.openCursor();
+            cursor.onsuccess = () => {
+              try {
+                const row = cursor.result;
+                if (!row) { applyBudget(index); return; }
+                if (typeof row.key === "string" && row.key.startsWith("document:")) {
+                  const id = row.key.slice(9);
+                  // Whole corrupt rows stay intact and do not block other documents.
+                  if (Array.isArray(row.value)) index[id] = readSnapshots(row.value, id, true).map(({ id, createdAt, size }) => ({ id, createdAt, size }));
+                }
+                row.continue();
+              } catch (error) { tx.abort(); reject(error); }
+            };
+          }
         } catch (error) {
           tx.abort();
           reject(error);
@@ -254,10 +326,11 @@ const historyTransaction = async (
           const item = cursor.result;
           if (!item) {
             rows.sort((left, right) => left.documentId.localeCompare(right.documentId));
+            if (mode === "readwrite") store.put(null, INDEX_KEY);
             action(rows, marker.result ?? null, store);
             return;
           }
-          if (item.key !== MIGRATION_KEY) {
+          if (item.key !== MIGRATION_KEY && item.key !== INDEX_KEY) {
             if (typeof item.key !== "string" || !item.key.startsWith("document:")) throw new Error("版本历史包含未知记录，原数据已保留");
             const documentId = item.key.slice(9);
             const snapshots = readSnapshots(item.value, documentId);

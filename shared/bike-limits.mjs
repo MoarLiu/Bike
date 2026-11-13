@@ -42,7 +42,7 @@ export const assertValueBudget = (value, { maxDepth = MAX_JSON_DEPTH, maxBytes =
     const item = frame.value;
     if (frame.exit) { ancestors.delete(item); continue; }
     if (++values > maxValues || frame.depth > maxDepth) throw new BikeResourceError("数据嵌套或字段数量超过处理预算，已保留原数据");
-    if (typeof item === "string") bytes += utf8ByteLength(item) + 2;
+    if (typeof item === "string") bytes += utf8ByteLength(JSON.stringify(item));
     else if (item && typeof item === "object") {
       if (ancestors.has(item)) throw new BikeResourceError("数据包含循环引用，已保留原数据");
       ancestors.add(item);
@@ -50,7 +50,7 @@ export const assertValueBudget = (value, { maxDepth = MAX_JSON_DEPTH, maxBytes =
       const entries = Array.isArray(item) ? item.map((child) => ["", child]) : Object.entries(item);
       bytes += entries.length * 2 + 2;
       for (let i = entries.length - 1; i >= 0; i--) {
-        bytes += utf8ByteLength(entries[i][0]) + 2;
+        bytes += utf8ByteLength(JSON.stringify(entries[i][0]));
         stack.push({ value: entries[i][1], depth: frame.depth + 1, exit: false });
       }
     } else bytes += 8;

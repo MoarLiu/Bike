@@ -157,7 +157,7 @@ const normalizeNode = (rawNode, usedIds, fallbackText = DEFAULT_NODE_TEXT) => {
 export const migrateDocument = (rawDocument, usedIds = new Set()) => {
   if (!isRecord(rawDocument)) throw new Error("导入文件不是有效文档");
   if (!Array.isArray(rawDocument.nodes)) throw new Error("文档缺少有效主题数组，原文件已保留");
-  assertTreeBudget(rawDocument.nodes, { maxDepth: 10_000 });
+  assertTreeBudget(rawDocument.nodes);
   validateDocumentAttachments(rawDocument);
 
   const now = new Date().toISOString();
@@ -543,7 +543,7 @@ export class WorkspaceStore {
   async readSnapshot({ useCache = true, includeRaw = false } = {}) {
     const stats = await fs.stat(this.config.workspacePath);
     if (!stats.isFile() || stats.size > MAX_DOCUMENT_BYTES) throw new Error("工作区文件无效或超过 64 MiB 读取预算，原文件已保留");
-    const cacheKey = `${stats.mtimeMs}:${stats.size}`;
+    const cacheKey = `${stats.dev}:${stats.ino}:${stats.ctimeMs}:${stats.mtimeMs}:${stats.size}`;
     if (useCache && this.cache?.cacheKey === cacheKey) {
       if (!includeRaw) return this.cache.snapshot;
       return {
@@ -669,13 +669,17 @@ export class WorkspaceStore {
       operation,
       dryRun,
       applied: false,
-      mode: this.config.mode,
+      mode: current.workspace.version === 3 ? "readonly" : this.config.mode,
       workspaceRevision: current.revision,
       nextWorkspaceRevision: nextRevision,
       reason: textOr(reason, ""),
       ...preview,
       ...(confirmationArgs ? { confirmationArgs } : {}),
     };
+    if (current.workspace.version === 3) {
+      delete baseResult.confirmationArgs;
+      baseResult.writeUnavailable = "2.0 工作区仅支持 Live 确认写入，File 模式只读";
+    }
     textToolResult(baseResult);
 
     if (dryRun) return baseResult;
@@ -1980,7 +1984,7 @@ export const getDocument = (
   { documentId, format = "compact", maxDepth = 6, metadata = false } = {},
 ) => {
   const document = documentById(snapshot, documentId);
-  if (format !== "compact") assertDocumentBudget(document);
+  if (format !== "compact") assertDocumentBudget(document, { maxNodes: snapshot.config.maxDocumentNodes });
   if (format === "json") {
     return {
       documentId: document.id,
@@ -2090,7 +2094,7 @@ export const exportDocumentForMcp = (
   { documentId, format = "json", metadata = false } = {},
 ) => {
   const document = documentById(snapshot, documentId);
-  assertDocumentBudget(document);
+  assertDocumentBudget(document, { maxNodes: snapshot.config.maxDocumentNodes });
   if (format === "markdown") {
     return {
       filename: exportFilename(document.title, metadata ? "bike.md" : "md"),

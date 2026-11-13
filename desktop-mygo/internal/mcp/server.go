@@ -31,7 +31,7 @@ type wireResult struct {
 }
 
 func (result *wireResult) MarshalJSON() ([]byte, error) {
-	return json.Marshal(result.body)
+	return contracts.Stringify(result.body, false, false)
 }
 
 var readTools = map[string]bool{"get_workspace_summary": true, "list_documents": true, "search_outline": true, "get_document": true, "get_node": true, "export_document": true}
@@ -79,6 +79,15 @@ func readTool(snapshot Snapshot, name string, args *object) (any, error) {
 	case "get_node":
 		return getNode(workspace, args, snapshot.Live)
 	case "export_document":
+		if !snapshot.Live {
+			document, err := documentByID(workspace, args.String("documentId"))
+			if err != nil {
+				return nil, err
+			}
+			if treeCount(document.Array("nodes")) > 2000 {
+				return nil, fmt.Errorf("主题数超过 2,000，请缩小读取范围")
+			}
+		}
 		return exportDocument(workspace, args)
 	default:
 		return nil, fmt.Errorf("未知读取工具")
@@ -103,6 +112,33 @@ func parsedArguments(request *mcp.CallToolRequest, _ map[string]json.RawMessage,
 	schema, _ := tool.InputSchema.(map[string]any)
 	if err := normalizeArguments(args, schema, "arguments"); err != nil {
 		return nil, &jsonrpc.Error{Code: -32602, Message: err.Error()}
+	}
+	var nodes []any
+	switch tool.Name {
+	case "create_document":
+		nodes = args.Array("initialNodes")
+	case "create_node", "append_children":
+		nodes = args.Array("children")
+	}
+	nodes = append([]any{}, nodes...)
+	for len(nodes) > 0 {
+		node := asObject(nodes[len(nodes)-1])
+		nodes = nodes[:len(nodes)-1]
+		if node == nil {
+			return nil, &jsonrpc.Error{Code: -32602, Message: "子主题必须是对象"}
+		}
+		for field, maximum := range map[string]int{"text": 10000, "note": 50000, "codeBlock": 50000, "codeLanguage": 80} {
+			if node.Has(field) {
+				value, ok := node.Get(field).(string)
+				if !ok || contracts.UTF16Length(value) > maximum {
+					return nil, &jsonrpc.Error{Code: -32602, Message: "子主题 " + field + " 类型无效或超过长度预算"}
+				}
+			}
+		}
+		if node.Has("children") && node.Array("children") == nil {
+			return nil, &jsonrpc.Error{Code: -32602, Message: "子主题 children 必须是数组"}
+		}
+		nodes = append(nodes, node.Array("children")...)
 	}
 	return args, nil
 }
@@ -209,9 +245,9 @@ func newServer(store Store, info product.Info) (*mcp.Server, error) {
 			if method == "resources/list" {
 				result, err := listResources(ctx, store, definitions.Resources)
 				if err != nil {
-					return nil, err
+					return nil, redactedToolError(store, err)
 				}
-				return &wireResult{Result: result, body: map[string]any{"resources": result.Resources}}, nil
+				return result, nil
 			}
 			result, err := next(ctx, method, request)
 			if method == "completion/complete" && err == nil {
@@ -244,7 +280,10 @@ func newServer(store Store, info product.Info) (*mcp.Server, error) {
 					return &wireResult{Result: result, body: fields}, nil
 				}
 			}
-			return result, err
+			if err != nil {
+				return result, redactedToolError(store, err)
+			}
+			return result, nil
 		}
 	})
 	for _, resource := range definitions.Resources {

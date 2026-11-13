@@ -14,9 +14,10 @@ import { createLiveWorkspaceStore } from '../mcp/bike-live.mjs';
 import { canonicalJson } from '../shared/bike-operations.mjs';
 import liveService from '../electron/live-mcp-service.cjs';
 const root = fileURLToPath(new URL('..', import.meta.url));
+const productVersion = JSON.parse(await fs.readFile(path.join(root, 'package.json'), 'utf8')).version;
 const build = process.env.BIKE_MYGO_BUILD ?? '1', channel = process.env.BIKE_MYGO_CHANNEL ?? 'preview';
 const suffix = channel === 'preview' ? ' Preview' : '';
-const binary = process.env.BIKE_MYGO_BINARY ?? path.join(root, 'release/mygo/2.0.0', `build-${build}-${channel}`, `Bike MyGO${suffix}.app/Contents/MacOS/bike-mygo`);
+const binary = process.env.BIKE_MYGO_BINARY ?? path.join(root, 'release/mygo', productVersion, `build-${build}-${channel}`, `Bike MyGO${suffix}.app/Contents/MacOS/bike-mygo`);
 const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'bike-mygo-mcp-'));
 const fixture = JSON.parse(await fs.readFile(path.join(root, 'desktop-mygo/tests/fixtures/workspace.json')));
 const report = { childPath: '/usr/bin:/bin', fileCases: [], liveCases: [] };
@@ -29,14 +30,14 @@ report.identity = JSON.parse(identity.stdout);
 async function connect(args) {
   const transport = new StdioClientTransport({ command: binary, args, env: { PATH: report.childPath, DYLD_PRINT_LIBRARIES: '1' }, stderr: 'pipe' });
   let errors = ''; transport.stderr?.on('data', (data) => { errors += data; });
-  const client = new Client({ name: 'bike-mygo-interop', version: '2.0.0' });
+  const client = new Client({ name: 'bike-mygo-interop', version: productVersion });
   try { await client.connect(transport); } catch (error) { await transport.close(); throw new Error(`${error.message} ${errors}`); }
   assert.doesNotMatch(errors, /WebKit[.]framework|Electron Framework|Chromium/i);
   return client;
 }
 async function reference(store) {
-  const server = await createBikeMcpServer({ store, version: '2.0.0' });
-  const client = new Client({ name: 'node-reference', version: '2.0.0' });
+  const server = await createBikeMcpServer({ store, version: productVersion });
+  const client = new Client({ name: 'node-reference', version: productVersion });
   const [a, b] = InMemoryTransport.createLinkedPair(); await server.connect(b); await client.connect(a);
   return { client, close: async () => { await client.close(); await server.close(); } };
 }

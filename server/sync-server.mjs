@@ -1,3 +1,4 @@
+import { ensurePrivateConfig } from "./private-config.mjs";
 import { readFile, chmod } from "node:fs/promises";
 import { createServer } from "node:http";
 import path from "node:path";
@@ -51,7 +52,7 @@ const readConfig = async () => {
   let parsed;
   try {
     parsed = JSON.parse(await readFile(configPath, "utf8"));
-    await chmod(configPath, 0o600);
+    await ensurePrivateConfig(configPath);
   } catch (error) {
     throw new Error(
       `无法读取同步服务配置：${configPath}\n请复制 config/bike-sync.config.example.json 为 config/bike-sync.config.json，或运行 npm run setup:sync。\n${error instanceof Error ? error.message : String(error)}`,
@@ -117,7 +118,9 @@ const corsHeadersFor = (request, config) => {
 };
 
 const handleRequest = async (request, response, config, syncStore, deviceTokenGuard) => {
-  const url = new URL(request.url, "http://localhost");
+  let url;
+  try { url = new URL(request.url, "http://localhost"); }
+  catch { sendJson(response, 400, { error: "invalid_url", message: "请求地址无效" }); return; }
   const corsHeaders = corsHeadersFor(request, config);
 
   if (request.method === "OPTIONS") {
@@ -137,7 +140,6 @@ const handleRequest = async (request, response, config, syncStore, deviceTokenGu
     sendJson(response, 200, {
       ok: true,
       service: "bike-sync-server",
-      owner: config.owner.username,
     }, corsHeaders);
     return;
   }

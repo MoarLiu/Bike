@@ -17,7 +17,6 @@ export type SyncState = {
   workspaceRevision: number | null;
   documentRevisions: Record<string, number>;
   documentFingerprints: Record<string, string>;
-  deletedDocumentRevisions: Record<string, number>;
   // Server document order after the last successful sync: the merge base.
   documentOrder: string[] | null;
   lastSyncedAt: string | null;
@@ -142,7 +141,6 @@ export const emptySyncState = (serverUrl: string): SyncState => ({
   workspaceRevision: null,
   documentRevisions: {},
   documentFingerprints: {},
-  deletedDocumentRevisions: {},
   documentOrder: null,
   lastSyncedAt: null,
 });
@@ -176,10 +174,6 @@ export const loadSyncState = (serverUrl: string): SyncState => {
       documentFingerprints:
         parsed.documentFingerprints && typeof parsed.documentFingerprints === "object"
           ? parsed.documentFingerprints as Record<string, string>
-          : {},
-      deletedDocumentRevisions:
-        parsed.deletedDocumentRevisions && typeof parsed.deletedDocumentRevisions === "object"
-          ? parsed.deletedDocumentRevisions as Record<string, number>
           : {},
       documentOrder: documentOrderOrNull(parsed.documentOrder),
       lastSyncedAt:
@@ -272,6 +266,11 @@ export const apiRequest = async <T>(
   pathname: string,
   options: { method?: string; body?: unknown; signal?: AbortSignal; timeoutMs?: number; maxResponseBytes?: number } = {},
 ): Promise<T> => {
+  if (pathname.startsWith("/api/v2/")) {
+    const route = new URL(pathname, "http://bike.invalid");
+    route.searchParams.set("bikeOrdering", "2");
+    pathname = route.pathname + route.search;
+  }
   return withRequestBudget({ signal: options.signal, timeoutMs: options.timeoutMs ?? SYNC_TIMEOUT_MS }, async (signal) => {
   const electronSyncBridge = window.bike?.invokeSyncRequest;
   if (electronSyncBridge) {
@@ -413,7 +412,6 @@ const cloneSyncState = (state: SyncState): SyncState => ({
   workspaceRevision: state.workspaceRevision,
   documentRevisions: { ...state.documentRevisions },
   documentFingerprints: { ...state.documentFingerprints },
-  deletedDocumentRevisions: { ...state.deletedDocumentRevisions },
   documentOrder: documentOrderOrNull(state.documentOrder),
   lastSyncedAt: state.lastSyncedAt,
 });
@@ -440,11 +438,9 @@ const recordDocumentState = (
   state.fingerprintVersion = FINGERPRINT_VERSION;
   state.documentRevisions[document.id] = revision;
   state.documentFingerprints[document.id] = documentFingerprint(document);
-  delete state.deletedDocumentRevisions[document.id];
 };
 
 const recordDeletedState = (state: SyncState, id: string, revision: number) => {
-  state.deletedDocumentRevisions[id] = revision;
   state.documentRevisions[id] = revision;
   delete state.documentFingerprints[id];
 };
@@ -576,7 +572,7 @@ export const pushWorkspaceToRemote = async (
 
   for (const document of workspace.documents) {
     const remote = remoteById.get(document.id);
-    const expectedRevision = remote && !remote.deletedAt ? remote.revision : remote?.revision ?? null;
+    const expectedRevision = remote?.revision ?? null;
     const result = await putRemoteDocument(normalizedConfig, document, expectedRevision);
     recordDocumentState(state, result.document, result.revision);
     checkpointSyncState(state, options, summary);
@@ -613,7 +609,6 @@ export const syncWorkspaceWithRemote = async (
     serverUrl: normalizedConfig.serverUrl,
     documentRevisions: { ...previousState.documentRevisions },
     documentFingerprints: { ...previousState.documentFingerprints },
-    deletedDocumentRevisions: { ...previousState.deletedDocumentRevisions },
     documentOrder: baseOrder,
   };
   // Downloads are not durable until the caller saves the returned workspace.

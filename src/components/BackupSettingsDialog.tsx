@@ -1,3 +1,4 @@
+import { Modal } from "./Modal";
 import { X } from "lucide-react";
 
 export function BackupSettingsDialog({
@@ -20,7 +21,7 @@ export function BackupSettingsDialog({
   onClose: () => void;
 }) {
   return (
-    <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="桌面备份" onClick={onClose}>
+    <Modal onDismiss={onClose} className="modal-overlay" role="dialog" aria-modal="true" aria-label="桌面备份" onClick={onClose}>
       <form className="api-config-dialog backup-settings-dialog" onClick={(event) => event.stopPropagation()} onSubmit={(event) => event.preventDefault()}>
         <header>
           <div>
@@ -48,6 +49,6 @@ export function BackupSettingsDialog({
           </>
         )}
       </form>
-    </div>
+    </Modal>
   );
 }

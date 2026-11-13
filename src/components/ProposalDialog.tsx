@@ -1,10 +1,11 @@
+import { Modal } from "./Modal";
 import { X } from 'lucide-react';
 import { useState } from 'react';
 import type { WorkspaceProposal } from '../../shared/bike-proposals.mjs';
 import { proposalFreshness } from '../../shared/bike-proposals.mjs';
 import type { Workspace } from '../types';
 
-const typeLabels: Record<string, string> = { field: '字段修改', 'create-document': '新建文档', 'delete-document': '删除文档', 'insert-node': '新增主题', 'delete-node': '删除主题', 'move-node': '移动主题' };
+const typeLabels: Record<string, string> = { field: '字段修改', 'create-document': '新建文档', 'replace-document': '替换文档内容', 'reorder-documents': '调整文档顺序', 'delete-document': '删除文档', 'insert-node': '新增主题', 'delete-node': '删除主题', 'move-node': '移动主题' };
 const showValue = (value: unknown) => value === undefined ? '无' : typeof value === 'string' ? value : JSON.stringify(value, null, 2);
 export function ProposalDialog({ workspace, proposal, busy, error, onAccept, onReject }: {
   workspace: Workspace; proposal: WorkspaceProposal; busy: boolean; error: string | null;
@@ -12,7 +13,7 @@ export function ProposalDialog({ workspace, proposal, busy, error, onAccept, onR
 }) {
   const [selected, setSelected] = useState(() => proposal.groups.map((group) => group.id));
   const freshness = proposalFreshness(workspace, proposal);
-  return <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="修改提案">
+  return <Modal onDismiss={() => !busy && onReject()} className="modal-overlay" role="dialog" aria-modal="true" aria-label="修改提案">
     <section className="workspace-dialog proposal-dialog">
       <header><div><h3>{proposal.label}</h3><p>{proposal.source.kind.toUpperCase()} · {proposal.groups.length} 个修改组 · 确认后保存到本机</p></div>
         <button type="button" className="dialog-close" onClick={onReject} disabled={busy} aria-label="关闭提案"><X size={16} /></button></header>
@@ -30,5 +31,5 @@ export function ProposalDialog({ workspace, proposal, busy, error, onAccept, onR
       <footer><button type="button" className="primary" onClick={() => onAccept(selected)} disabled={busy || freshness !== 'current' || !selected.length}>{busy ? '正在持久保存…' : '应用所选修改'}</button>
         <button className="secondary" onClick={onReject} disabled={busy}>拒绝提案</button></footer>
     </section>
-  </div>;
+  </Modal>;
 }

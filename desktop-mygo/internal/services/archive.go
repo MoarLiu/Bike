@@ -144,6 +144,9 @@ func ImportArchive(ctx context.Context, filename string, library *Attachments) (
 	if stat.Size() > archiveMaximum {
 		return nil, fmt.Errorf("归档无效或超过 512 MiB")
 	}
+	if err := preflightArchive(source, stat.Size()); err != nil {
+		return nil, err
+	}
 	archive, err := zip.NewReader(source, stat.Size())
 	if err != nil {
 		return nil, err

@@ -124,6 +124,7 @@ func summary(snapshot Snapshot) (*object, error) {
 	activeFound := false
 	nodes := 0
 	var latest time.Time
+	hasLatest := false
 	for index, entry := range documents {
 		document, ok := entry.(map[string]any)
 		if !ok {
@@ -146,8 +147,9 @@ func summary(snapshot Snapshot) (*object, error) {
 			activeFound = true
 		}
 		if text, ok := document["updatedAt"].(string); ok {
-			if at, err := time.Parse(time.RFC3339Nano, text); err == nil && at.After(latest) {
+			if at, ok := parseDocumentDate(text); ok && (!hasLatest || at.After(latest)) {
 				latest = at
+				hasLatest = true
 			}
 		}
 	}
@@ -155,7 +157,7 @@ func summary(snapshot Snapshot) (*object, error) {
 		active = documents[0].(map[string]any)["id"].(string)
 	}
 	var updatedAt any
-	if !latest.IsZero() {
+	if hasLatest && latest.UnixMilli() != 0 {
 		updatedAt = latest.UTC().Format("2006-01-02T15:04:05.000Z")
 	}
 	return ordered("version", version, "activeDocumentId", active, "documentCount", len(documents), "nodeCount", nodes,

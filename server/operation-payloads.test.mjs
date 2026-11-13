@@ -1,0 +1,24 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {createHash} from 'node:crypto';
+import {createSyncStore} from './sync-store.mjs';
+import {createWorkspaceOperation,canonicalJson,OPERATION_LIMITS} from '../shared/bike-operations.mjs';
+test('partial and corrupt transport commits never alter visible documents',async t=>{
+  const store=await createSyncStore(':memory:');t.after(()=>store.close());
+  store.operations.enable({expectedRevision:0});
+  const before={version:3,activeDocumentId:'',documents:[]};
+  const after={version:3,activeDocumentId:'large',documents:[{id:'large',title:'Large',nodes:[{id:'n',text:'x'.repeat(300000),children:[]}]}]};
+  const operation=createWorkspaceOperation(before,after,{id:'bulk',actorId:'a',commit:true});
+  const text=canonicalJson(operation),parts=Math.ceil(text.length/OPERATION_LIMITS.chunkCharacters);
+  const metadata={id:operation.id,digest:createHash('sha256').update(text).digest('hex'),bytes:Buffer.byteLength(text),parts};
+  const first={...metadata,index:0,text:text.slice(0,OPERATION_LIMITS.chunkCharacters)};
+  assert.equal(store.operations.receiveChunk(first).complete,false);
+  assert.equal(store.operations.status().cursor,0);
+  assert.equal(store.getDocument('large'),null);
+  assert.throws(()=>store.operations.receiveChunk({...first,text:'tampered'}),/不一致/);
+  for(let index=1;index<parts;index++) store.operations.receiveChunk({...metadata,index,text:text.slice(index*OPERATION_LIMITS.chunkCharacters,(index+1)*OPERATION_LIMITS.chunkCharacters)});
+  assert.equal(store.getDocument('large').document.nodes[0].text.length,300000);
+  assert.equal(store.operations.receiveChunk(first).complete,true);
+  assert.equal(store.operations.status().cursor,1);
+  assert.throws(()=>store.operations.receiveChunk({...first,id:'underdeclared',bytes:1,parts:1}),/预算/);
+});

@@ -1,0 +1,1742 @@
+[
+  {
+    "document": {
+      "id": "doc",
+      "title": "Title",
+      "createdAt": "2026-11-13T00:00:00.000Z",
+      "updatedAt": "2026-11-13T00:00:00.000Z",
+      "markdownSource": "# Title\n\n- duplicate [[Other]]\n- duplicate [[Other]]",
+      "markdownUpdatedAt": "2026-11-13T00:00:00.000Z",
+      "nodes": [
+        {
+          "id": "source-0-0",
+          "text": "duplicate [[Other]]",
+          "note": "",
+          "checked": false,
+          "collapsed": false,
+          "color": "plain",
+          "children": [],
+          "headingLevel": 0,
+          "isTodo": false
+        },
+        {
+          "id": "source-0-1",
+          "text": "duplicate [[Other]]",
+          "note": "",
+          "checked": false,
+          "collapsed": false,
+          "color": "plain",
+          "children": [],
+          "headingLevel": 0,
+          "isTodo": false
+        }
+      ],
+      "attachments": {
+        "version": 1,
+        "items": {
+          "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+            "mediaType": "application/octet-stream",
+            "byteLength": 1
+          }
+        }
+      },
+      "knowledge": {
+        "version": 1,
+        "references": [
+          {
+            "id": "ref-0",
+            "source": {
+              "kind": "markdown",
+              "start": 21,
+              "end": 30,
+              "raw": "[[Other]]"
+            },
+            "target": {
+              "documentId": "other"
+            },
+            "labelMode": "auto"
+          },
+          {
+            "id": "ref-1",
+            "source": {
+              "kind": "markdown",
+              "start": 43,
+              "end": 52,
+              "raw": "[[Other]]"
+            },
+            "target": {
+              "documentId": "other"
+            },
+            "labelMode": "auto"
+          }
+        ],
+        "relations": []
+      }
+    },
+    "workspace": {
+      "version": 3,
+      "activeDocumentId": "doc",
+      "documents": [
+        {
+          "id": "doc",
+          "title": "Title",
+          "createdAt": "2026-11-13T00:00:00.000Z",
+          "updatedAt": "2026-11-13T00:00:00.000Z",
+          "markdownSource": "# Title\n\n- duplicate [[Other]]\n- duplicate [[Other]]",
+          "markdownUpdatedAt": "2026-11-13T00:00:00.000Z",
+          "nodes": [
+            {
+              "id": "source-0-0",
+              "text": "duplicate [[Other]]",
+              "note": "",
+              "checked": false,
+              "collapsed": false,
+              "color": "plain",
+              "children": [],
+              "headingLevel": 0,
+              "isTodo": false
+            },
+            {
+              "id": "source-0-1",
+              "text": "duplicate [[Other]]",
+              "note": "",
+              "checked": false,
+              "collapsed": false,
+              "color": "plain",
+              "children": [],
+              "headingLevel": 0,
+              "isTodo": false
+            }
+          ],
+          "attachments": {
+            "version": 1,
+            "items": {
+              "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+                "mediaType": "application/octet-stream",
+                "byteLength": 1
+              }
+            }
+          },
+          "knowledge": {
+            "version": 1,
+            "references": [
+              {
+                "id": "ref-0",
+                "source": {
+                  "kind": "markdown",
+                  "start": 21,
+                  "end": 30,
+                  "raw": "[[Other]]"
+                },
+                "target": {
+                  "documentId": "other"
+                },
+                "labelMode": "auto"
+              },
+              {
+                "id": "ref-1",
+                "source": {
+                  "kind": "markdown",
+                  "start": 43,
+                  "end": 52,
+                  "raw": "[[Other]]"
+                },
+                "target": {
+                  "documentId": "other"
+                },
+                "labelMode": "auto"
+              }
+            ],
+            "relations": []
+          }
+        },
+        {
+          "id": "other",
+          "title": "Other",
+          "nodes": [
+            {
+              "id": "target",
+              "text": "Target",
+              "children": []
+            }
+          ]
+        }
+      ]
+    },
+    "expected": {
+      "version": 1,
+      "references": [
+        {
+          "id": "ref-0",
+          "source": {
+            "kind": "node-field",
+            "nodeId": "source-0-0",
+            "field": "text",
+            "start": 10,
+            "end": 19,
+            "raw": "[[Other]]"
+          },
+          "target": {
+            "documentId": "other"
+          },
+          "labelMode": "auto"
+        },
+        {
+          "id": "ref-1",
+          "source": {
+            "kind": "node-field",
+            "nodeId": "source-0-1",
+            "field": "text",
+            "start": 10,
+            "end": 19,
+            "raw": "[[Other]]"
+          },
+          "target": {
+            "documentId": "other"
+          },
+          "labelMode": "auto"
+        }
+      ],
+      "relations": []
+    },
+    "connections": {
+      "references": {
+        "items": [
+          {
+            "status": "resolved",
+            "raw": "[[Other]]",
+            "target": {
+              "documentId": "other"
+            },
+            "field": "text"
+          },
+          {
+            "status": "resolved",
+            "raw": "[[Other]]",
+            "target": {
+              "documentId": "other"
+            },
+            "field": "text"
+          }
+        ],
+        "total": 2,
+        "truncated": false
+      },
+      "incoming": {
+        "items": [],
+        "total": 0,
+        "truncated": false
+      },
+      "relations": {
+        "items": [],
+        "total": 0,
+        "truncated": false
+      },
+      "truncated": false
+    }
+  },
+  {
+    "document": {
+      "id": "doc",
+      "title": "Title [[Other]]",
+      "createdAt": "2026-11-13T00:00:00.000Z",
+      "updatedAt": "2026-11-13T00:00:00.000Z",
+      "markdownSource": "# Title [[Other]]\n\n- Same [[Other]]",
+      "markdownUpdatedAt": "2026-11-13T00:00:00.000Z",
+      "nodes": [
+        {
+          "id": "source-1-0",
+          "text": "Same [[Other]]",
+          "note": "",
+          "checked": false,
+          "collapsed": false,
+          "color": "plain",
+          "children": [],
+          "headingLevel": 0,
+          "isTodo": false
+        }
+      ],
+      "attachments": {
+        "version": 1,
+        "items": {
+          "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+            "mediaType": "application/octet-stream",
+            "byteLength": 1
+          }
+        }
+      },
+      "knowledge": {
+        "version": 1,
+        "references": [
+          {
+            "id": "ref-0",
+            "source": {
+              "kind": "markdown",
+              "start": 8,
+              "end": 17,
+              "raw": "[[Other]]"
+            },
+            "target": {
+              "documentId": "other"
+            },
+            "labelMode": "auto"
+          },
+          {
+            "id": "ref-1",
+            "source": {
+              "kind": "markdown",
+              "start": 26,
+              "end": 35,
+              "raw": "[[Other]]"
+            },
+            "target": {
+              "documentId": "other"
+            },
+            "labelMode": "auto"
+          }
+        ],
+        "relations": []
+      }
+    },
+    "workspace": {
+      "version": 3,
+      "activeDocumentId": "doc",
+      "documents": [
+        {
+          "id": "doc",
+          "title": "Title [[Other]]",
+          "createdAt": "2026-11-13T00:00:00.000Z",
+          "updatedAt": "2026-11-13T00:00:00.000Z",
+          "markdownSource": "# Title [[Other]]\n\n- Same [[Other]]",
+          "markdownUpdatedAt": "2026-11-13T00:00:00.000Z",
+          "nodes": [
+            {
+              "id": "source-1-0",
+              "text": "Same [[Other]]",
+              "note": "",
+              "checked": false,
+              "collapsed": false,
+              "color": "plain",
+              "children": [],
+              "headingLevel": 0,
+              "isTodo": false
+            }
+          ],
+          "attachments": {
+            "version": 1,
+            "items": {
+              "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+                "mediaType": "application/octet-stream",
+                "byteLength": 1
+              }
+            }
+          },
+          "knowledge": {
+            "version": 1,
+            "references": [
+              {
+                "id": "ref-0",
+                "source": {
+                  "kind": "markdown",
+                  "start": 8,
+                  "end": 17,
+                  "raw": "[[Other]]"
+                },
+                "target": {
+                  "documentId": "other"
+                },
+                "labelMode": "auto"
+              },
+              {
+                "id": "ref-1",
+                "source": {
+                  "kind": "markdown",
+                  "start": 26,
+                  "end": 35,
+                  "raw": "[[Other]]"
+                },
+                "target": {
+                  "documentId": "other"
+                },
+                "labelMode": "auto"
+              }
+            ],
+            "relations": []
+          }
+        },
+        {
+          "id": "other",
+          "title": "Other",
+          "nodes": [
+            {
+              "id": "target",
+              "text": "Target",
+              "children": []
+            }
+          ]
+        }
+      ]
+    },
+    "expected": {
+      "version": 1,
+      "references": [
+        {
+          "id": "ref-0",
+          "source": {
+            "kind": "markdown",
+            "start": 8,
+            "end": 17,
+            "raw": "[[Other]]"
+          },
+          "target": {
+            "documentId": "other"
+          },
+          "labelMode": "auto"
+        },
+        {
+          "id": "ref-1",
+          "source": {
+            "kind": "node-field",
+            "nodeId": "source-1-0",
+            "field": "text",
+            "start": 5,
+            "end": 14,
+            "raw": "[[Other]]"
+          },
+          "target": {
+            "documentId": "other"
+          },
+          "labelMode": "auto"
+        }
+      ],
+      "relations": []
+    },
+    "connections": {
+      "references": {
+        "items": [
+          {
+            "status": "resolved",
+            "raw": "[[Other]]",
+            "target": {
+              "documentId": "other"
+            },
+            "field": "text"
+          },
+          {
+            "status": "resolved",
+            "raw": "[[Other]]",
+            "target": {
+              "documentId": "other"
+            },
+            "field": "markdown"
+          }
+        ],
+        "total": 2,
+        "truncated": false
+      },
+      "incoming": {
+        "items": [],
+        "total": 0,
+        "truncated": false
+      },
+      "relations": {
+        "items": [],
+        "total": 0,
+        "truncated": false
+      },
+      "truncated": false
+    }
+  },
+  {
+    "document": {
+      "id": "doc",
+      "title": "Title",
+      "createdAt": "2026-11-13T00:00:00.000Z",
+      "updatedAt": "2026-11-13T00:00:00.000Z",
+      "markdownSource": "# Title\n\n- Root\n  [file](bike-attachment:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa)\n  > attached note [[Other]]",
+      "markdownUpdatedAt": "2026-11-13T00:00:00.000Z",
+      "nodes": [
+        {
+          "id": "source-2-0",
+          "text": "Root",
+          "note": "attached note [[Other]]",
+          "checked": false,
+          "collapsed": false,
+          "color": "plain",
+          "children": [],
+          "headingLevel": 0,
+          "isTodo": false,
+          "attachmentRefs": [
+            {
+              "assetId": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "name": "file"
+            }
+          ]
+        }
+      ],
+      "attachments": {
+        "version": 1,
+        "items": {
+          "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+            "mediaType": "application/octet-stream",
+            "byteLength": 1
+          }
+        }
+      },
+      "knowledge": {
+        "version": 1,
+        "references": [
+          {
+            "id": "ref-0",
+            "source": {
+              "kind": "markdown",
+              "start": 132,
+              "end": 141,
+              "raw": "[[Other]]"
+            },
+            "target": {
+              "documentId": "other"
+            },
+            "labelMode": "auto"
+          }
+        ],
+        "relations": []
+      }
+    },
+    "workspace": {
+      "version": 3,
+      "activeDocumentId": "doc",
+      "documents": [
+        {
+          "id": "doc",
+          "title": "Title",
+          "createdAt": "2026-11-13T00:00:00.000Z",
+          "updatedAt": "2026-11-13T00:00:00.000Z",
+          "markdownSource": "# Title\n\n- Root\n  [file](bike-attachment:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa)\n  > attached note [[Other]]",
+          "markdownUpdatedAt": "2026-11-13T00:00:00.000Z",
+          "nodes": [
+            {
+              "id": "source-2-0",
+              "text": "Root",
+              "note": "attached note [[Other]]",
+              "checked": false,
+              "collapsed": false,
+              "color": "plain",
+              "children": [],
+              "headingLevel": 0,
+              "isTodo": false,
+              "attachmentRefs": [
+                {
+                  "assetId": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "name": "file"
+                }
+              ]
+            }
+          ],
+          "attachments": {
+            "version": 1,
+            "items": {
+              "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+                "mediaType": "application/octet-stream",
+                "byteLength": 1
+              }
+            }
+          },
+          "knowledge": {
+            "version": 1,
+            "references": [
+              {
+                "id": "ref-0",
+                "source": {
+                  "kind": "markdown",
+                  "start": 132,
+                  "end": 141,
+                  "raw": "[[Other]]"
+                },
+                "target": {
+                  "documentId": "other"
+                },
+                "labelMode": "auto"
+              }
+            ],
+            "relations": []
+          }
+        },
+        {
+          "id": "other",
+          "title": "Other",
+          "nodes": [
+            {
+              "id": "target",
+              "text": "Target",
+              "children": []
+            }
+          ]
+        }
+      ]
+    },
+    "expected": {
+      "version": 1,
+      "references": [
+        {
+          "id": "ref-0",
+          "source": {
+            "kind": "node-field",
+            "nodeId": "source-2-0",
+            "field": "note",
+            "start": 14,
+            "end": 23,
+            "raw": "[[Other]]"
+          },
+          "target": {
+            "documentId": "other"
+          },
+          "labelMode": "auto"
+        }
+      ],
+      "relations": []
+    },
+    "connections": {
+      "references": {
+        "items": [
+          {
+            "status": "resolved",
+            "raw": "[[Other]]",
+            "target": {
+              "documentId": "other"
+            },
+            "field": "note"
+          }
+        ],
+        "total": 1,
+        "truncated": false
+      },
+      "incoming": {
+        "items": [],
+        "total": 0,
+        "truncated": false
+      },
+      "relations": {
+        "items": [],
+        "total": 0,
+        "truncated": false
+      },
+      "truncated": false
+    }
+  },
+  {
+    "document": {
+      "id": "doc",
+      "title": "Title",
+      "createdAt": "2026-11-13T00:00:00.000Z",
+      "updatedAt": "2026-11-13T00:00:00.000Z",
+      "markdownSource": "# Title\n\n- Root\n  > first [[Other]]\n  > next [[Other#Target]]\n- Root\n  > first [[Other]]",
+      "markdownUpdatedAt": "2026-11-13T00:00:00.000Z",
+      "nodes": [
+        {
+          "id": "source-3-0",
+          "text": "Root",
+          "note": "first [[Other]]\nnext [[Other#Target]]",
+          "checked": false,
+          "collapsed": false,
+          "color": "plain",
+          "children": [],
+          "headingLevel": 0,
+          "isTodo": false
+        },
+        {
+          "id": "source-3-1",
+          "text": "Root",
+          "note": "first [[Other]]",
+          "checked": false,
+          "collapsed": false,
+          "color": "plain",
+          "children": [],
+          "headingLevel": 0,
+          "isTodo": false
+        }
+      ],
+      "attachments": {
+        "version": 1,
+        "items": {
+          "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+            "mediaType": "application/octet-stream",
+            "byteLength": 1
+          }
+        }
+      },
+      "knowledge": {
+        "version": 1,
+        "references": [
+          {
+            "id": "ref-0",
+            "source": {
+              "kind": "markdown",
+              "start": 26,
+              "end": 35,
+              "raw": "[[Other]]"
+            },
+            "target": {
+              "documentId": "other"
+            },
+            "labelMode": "auto"
+          },
+          {
+            "id": "ref-1",
+            "source": {
+              "kind": "markdown",
+              "start": 45,
+              "end": 61,
+              "raw": "[[Other#Target]]"
+            },
+            "target": {
+              "documentId": "other"
+            },
+            "labelMode": "auto"
+          },
+          {
+            "id": "ref-2",
+            "source": {
+              "kind": "markdown",
+              "start": 79,
+              "end": 88,
+              "raw": "[[Other]]"
+            },
+            "target": {
+              "documentId": "other"
+            },
+            "labelMode": "auto"
+          }
+        ],
+        "relations": []
+      }
+    },
+    "workspace": {
+      "version": 3,
+      "activeDocumentId": "doc",
+      "documents": [
+        {
+          "id": "doc",
+          "title": "Title",
+          "createdAt": "2026-11-13T00:00:00.000Z",
+          "updatedAt": "2026-11-13T00:00:00.000Z",
+          "markdownSource": "# Title\n\n- Root\n  > first [[Other]]\n  > next [[Other#Target]]\n- Root\n  > first [[Other]]",
+          "markdownUpdatedAt": "2026-11-13T00:00:00.000Z",
+          "nodes": [
+            {
+              "id": "source-3-0",
+              "text": "Root",
+              "note": "first [[Other]]\nnext [[Other#Target]]",
+              "checked": false,
+              "collapsed": false,
+              "color": "plain",
+              "children": [],
+              "headingLevel": 0,
+              "isTodo": false
+            },
+            {
+              "id": "source-3-1",
+              "text": "Root",
+              "note": "first [[Other]]",
+              "checked": false,
+              "collapsed": false,
+              "color": "plain",
+              "children": [],
+              "headingLevel": 0,
+              "isTodo": false
+            }
+          ],
+          "attachments": {
+            "version": 1,
+            "items": {
+              "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+                "mediaType": "application/octet-stream",
+                "byteLength": 1
+              }
+            }
+          },
+          "knowledge": {
+            "version": 1,
+            "references": [
+              {
+                "id": "ref-0",
+                "source": {
+                  "kind": "markdown",
+                  "start": 26,
+                  "end": 35,
+                  "raw": "[[Other]]"
+                },
+                "target": {
+                  "documentId": "other"
+                },
+                "labelMode": "auto"
+              },
+              {
+                "id": "ref-1",
+                "source": {
+                  "kind": "markdown",
+                  "start": 45,
+                  "end": 61,
+                  "raw": "[[Other#Target]]"
+                },
+                "target": {
+                  "documentId": "other"
+                },
+                "labelMode": "auto"
+              },
+              {
+                "id": "ref-2",
+                "source": {
+                  "kind": "markdown",
+                  "start": 79,
+                  "end": 88,
+                  "raw": "[[Other]]"
+                },
+                "target": {
+                  "documentId": "other"
+                },
+                "labelMode": "auto"
+              }
+            ],
+            "relations": []
+          }
+        },
+        {
+          "id": "other",
+          "title": "Other",
+          "nodes": [
+            {
+              "id": "target",
+              "text": "Target",
+              "children": []
+            }
+          ]
+        }
+      ]
+    },
+    "expected": {
+      "version": 1,
+      "references": [
+        {
+          "id": "ref-0",
+          "source": {
+            "kind": "node-field",
+            "nodeId": "source-3-0",
+            "field": "note",
+            "start": 6,
+            "end": 15,
+            "raw": "[[Other]]"
+          },
+          "target": {
+            "documentId": "other"
+          },
+          "labelMode": "auto"
+        },
+        {
+          "id": "ref-1",
+          "source": {
+            "kind": "node-field",
+            "nodeId": "source-3-0",
+            "field": "note",
+            "start": 21,
+            "end": 37,
+            "raw": "[[Other#Target]]"
+          },
+          "target": {
+            "documentId": "other"
+          },
+          "labelMode": "auto"
+        },
+        {
+          "id": "ref-2",
+          "source": {
+            "kind": "node-field",
+            "nodeId": "source-3-1",
+            "field": "note",
+            "start": 6,
+            "end": 15,
+            "raw": "[[Other]]"
+          },
+          "target": {
+            "documentId": "other"
+          },
+          "labelMode": "auto"
+        }
+      ],
+      "relations": []
+    },
+    "connections": {
+      "references": {
+        "items": [
+          {
+            "status": "resolved",
+            "raw": "[[Other]]",
+            "target": {
+              "documentId": "other"
+            },
+            "field": "note"
+          },
+          {
+            "status": "resolved",
+            "raw": "[[Other#Target]]",
+            "target": {
+              "documentId": "other"
+            },
+            "field": "note"
+          },
+          {
+            "status": "resolved",
+            "raw": "[[Other]]",
+            "target": {
+              "documentId": "other"
+            },
+            "field": "note"
+          }
+        ],
+        "total": 3,
+        "truncated": false
+      },
+      "incoming": {
+        "items": [],
+        "total": 0,
+        "truncated": false
+      },
+      "relations": {
+        "items": [],
+        "total": 0,
+        "truncated": false
+      },
+      "truncated": false
+    }
+  },
+  {
+    "document": {
+      "id": "doc",
+      "title": "Title",
+      "createdAt": "2026-11-13T00:00:00.000Z",
+      "updatedAt": "2026-11-13T00:00:00.000Z",
+      "markdownSource": "# Title\n\n## Heading [[Other]]\n\nparagraph [[Other]]\ncontinued [[Other#Target|x]]\n\n- Nested\n  continuation [[Other]]",
+      "markdownUpdatedAt": "2026-11-13T00:00:00.000Z",
+      "nodes": [
+        {
+          "id": "source-4-0",
+          "text": "Heading [[Other]]",
+          "note": "",
+          "checked": false,
+          "collapsed": false,
+          "color": "plain",
+          "children": [
+            {
+              "id": "source-4-1",
+              "text": "paragraph [[Other]] continued [[Other#Target|x]]",
+              "note": "",
+              "checked": false,
+              "collapsed": false,
+              "color": "plain",
+              "children": [],
+              "headingLevel": 0,
+              "isTodo": false
+            },
+            {
+              "id": "source-4-2",
+              "text": "Nested",
+              "note": "continuation [[Other]]",
+              "checked": false,
+              "collapsed": false,
+              "color": "plain",
+              "children": [],
+              "headingLevel": 0,
+              "isTodo": false
+            }
+          ],
+          "headingLevel": 1,
+          "isTodo": false
+        }
+      ],
+      "attachments": {
+        "version": 1,
+        "items": {
+          "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+            "mediaType": "application/octet-stream",
+            "byteLength": 1
+          }
+        }
+      },
+      "knowledge": {
+        "version": 1,
+        "references": [
+          {
+            "id": "ref-0",
+            "source": {
+              "kind": "markdown",
+              "start": 20,
+              "end": 29,
+              "raw": "[[Other]]"
+            },
+            "target": {
+              "documentId": "other"
+            },
+            "labelMode": "auto"
+          },
+          {
+            "id": "ref-1",
+            "source": {
+              "kind": "markdown",
+              "start": 41,
+              "end": 50,
+              "raw": "[[Other]]"
+            },
+            "target": {
+              "documentId": "other"
+            },
+            "labelMode": "auto"
+          },
+          {
+            "id": "ref-2",
+            "source": {
+              "kind": "markdown",
+              "start": 61,
+              "end": 79,
+              "raw": "[[Other#Target|x]]"
+            },
+            "target": {
+              "documentId": "other"
+            },
+            "labelMode": "auto"
+          },
+          {
+            "id": "ref-3",
+            "source": {
+              "kind": "markdown",
+              "start": 105,
+              "end": 114,
+              "raw": "[[Other]]"
+            },
+            "target": {
+              "documentId": "other"
+            },
+            "labelMode": "auto"
+          }
+        ],
+        "relations": []
+      }
+    },
+    "workspace": {
+      "version": 3,
+      "activeDocumentId": "doc",
+      "documents": [
+        {
+          "id": "doc",
+          "title": "Title",
+          "createdAt": "2026-11-13T00:00:00.000Z",
+          "updatedAt": "2026-11-13T00:00:00.000Z",
+          "markdownSource": "# Title\n\n## Heading [[Other]]\n\nparagraph [[Other]]\ncontinued [[Other#Target|x]]\n\n- Nested\n  continuation [[Other]]",
+          "markdownUpdatedAt": "2026-11-13T00:00:00.000Z",
+          "nodes": [
+            {
+              "id": "source-4-0",
+              "text": "Heading [[Other]]",
+              "note": "",
+              "checked": false,
+              "collapsed": false,
+              "color": "plain",
+              "children": [
+                {
+                  "id": "source-4-1",
+                  "text": "paragraph [[Other]] continued [[Other#Target|x]]",
+                  "note": "",
+                  "checked": false,
+                  "collapsed": false,
+                  "color": "plain",
+                  "children": [],
+                  "headingLevel": 0,
+                  "isTodo": false
+                },
+                {
+                  "id": "source-4-2",
+                  "text": "Nested",
+                  "note": "continuation [[Other]]",
+                  "checked": false,
+                  "collapsed": false,
+                  "color": "plain",
+                  "children": [],
+                  "headingLevel": 0,
+                  "isTodo": false
+                }
+              ],
+              "headingLevel": 1,
+              "isTodo": false
+            }
+          ],
+          "attachments": {
+            "version": 1,
+            "items": {
+              "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+                "mediaType": "application/octet-stream",
+                "byteLength": 1
+              }
+            }
+          },
+          "knowledge": {
+            "version": 1,
+            "references": [
+              {
+                "id": "ref-0",
+                "source": {
+                  "kind": "markdown",
+                  "start": 20,
+                  "end": 29,
+                  "raw": "[[Other]]"
+                },
+                "target": {
+                  "documentId": "other"
+                },
+                "labelMode": "auto"
+              },
+              {
+                "id": "ref-1",
+                "source": {
+                  "kind": "markdown",
+                  "start": 41,
+                  "end": 50,
+                  "raw": "[[Other]]"
+                },
+                "target": {
+                  "documentId": "other"
+                },
+                "labelMode": "auto"
+              },
+              {
+                "id": "ref-2",
+                "source": {
+                  "kind": "markdown",
+                  "start": 61,
+                  "end": 79,
+                  "raw": "[[Other#Target|x]]"
+                },
+                "target": {
+                  "documentId": "other"
+                },
+                "labelMode": "auto"
+              },
+              {
+                "id": "ref-3",
+                "source": {
+                  "kind": "markdown",
+                  "start": 105,
+                  "end": 114,
+                  "raw": "[[Other]]"
+                },
+                "target": {
+                  "documentId": "other"
+                },
+                "labelMode": "auto"
+              }
+            ],
+            "relations": []
+          }
+        },
+        {
+          "id": "other",
+          "title": "Other",
+          "nodes": [
+            {
+              "id": "target",
+              "text": "Target",
+              "children": []
+            }
+          ]
+        }
+      ]
+    },
+    "expected": {
+      "version": 1,
+      "references": [
+        {
+          "id": "ref-0",
+          "source": {
+            "kind": "node-field",
+            "nodeId": "source-4-0",
+            "field": "text",
+            "start": 8,
+            "end": 17,
+            "raw": "[[Other]]"
+          },
+          "target": {
+            "documentId": "other"
+          },
+          "labelMode": "auto"
+        },
+        {
+          "id": "ref-1",
+          "source": {
+            "kind": "node-field",
+            "nodeId": "source-4-1",
+            "field": "text",
+            "start": 10,
+            "end": 19,
+            "raw": "[[Other]]"
+          },
+          "target": {
+            "documentId": "other"
+          },
+          "labelMode": "auto"
+        },
+        {
+          "id": "ref-2",
+          "source": {
+            "kind": "node-field",
+            "nodeId": "source-4-1",
+            "field": "text",
+            "start": 30,
+            "end": 48,
+            "raw": "[[Other#Target|x]]"
+          },
+          "target": {
+            "documentId": "other"
+          },
+          "labelMode": "auto"
+        },
+        {
+          "id": "ref-3",
+          "source": {
+            "kind": "node-field",
+            "nodeId": "source-4-2",
+            "field": "note",
+            "start": 13,
+            "end": 22,
+            "raw": "[[Other]]"
+          },
+          "target": {
+            "documentId": "other"
+          },
+          "labelMode": "auto"
+        }
+      ],
+      "relations": []
+    },
+    "connections": {
+      "references": {
+        "items": [
+          {
+            "status": "resolved",
+            "raw": "[[Other]]",
+            "target": {
+              "documentId": "other"
+            },
+            "field": "text"
+          },
+          {
+            "status": "resolved",
+            "raw": "[[Other]]",
+            "target": {
+              "documentId": "other"
+            },
+            "field": "text"
+          },
+          {
+            "status": "resolved",
+            "raw": "[[Other#Target|x]]",
+            "target": {
+              "documentId": "other"
+            },
+            "field": "text"
+          },
+          {
+            "status": "resolved",
+            "raw": "[[Other]]",
+            "target": {
+              "documentId": "other"
+            },
+            "field": "note"
+          }
+        ],
+        "total": 4,
+        "truncated": false
+      },
+      "incoming": {
+        "items": [],
+        "total": 0,
+        "truncated": false
+      },
+      "relations": {
+        "items": [],
+        "total": 0,
+        "truncated": false
+      },
+      "truncated": false
+    }
+  },
+  {
+    "document": {
+      "id": "doc",
+      "title": "Title",
+      "createdAt": "2026-11-13T00:00:00.000Z",
+      "updatedAt": "2026-11-13T00:00:00.000Z",
+      "markdownSource": "# Title\n\n- escaped \\*word\\* [[Other]]\n  > 🙂 [[Other]]",
+      "markdownUpdatedAt": "2026-11-13T00:00:00.000Z",
+      "nodes": [
+        {
+          "id": "source-5-0",
+          "text": "escaped *word* [[Other]]",
+          "note": "🙂 [[Other]]",
+          "checked": false,
+          "collapsed": false,
+          "color": "plain",
+          "children": [],
+          "headingLevel": 0,
+          "isTodo": false
+        }
+      ],
+      "attachments": {
+        "version": 1,
+        "items": {
+          "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+            "mediaType": "application/octet-stream",
+            "byteLength": 1
+          }
+        }
+      },
+      "knowledge": {
+        "version": 1,
+        "references": [
+          {
+            "id": "ref-0",
+            "source": {
+              "kind": "markdown",
+              "start": 28,
+              "end": 37,
+              "raw": "[[Other]]"
+            },
+            "target": {
+              "documentId": "other"
+            },
+            "labelMode": "auto"
+          },
+          {
+            "id": "ref-1",
+            "source": {
+              "kind": "markdown",
+              "start": 45,
+              "end": 54,
+              "raw": "[[Other]]"
+            },
+            "target": {
+              "documentId": "other"
+            },
+            "labelMode": "auto"
+          }
+        ],
+        "relations": []
+      }
+    },
+    "workspace": {
+      "version": 3,
+      "activeDocumentId": "doc",
+      "documents": [
+        {
+          "id": "doc",
+          "title": "Title",
+          "createdAt": "2026-11-13T00:00:00.000Z",
+          "updatedAt": "2026-11-13T00:00:00.000Z",
+          "markdownSource": "# Title\n\n- escaped \\*word\\* [[Other]]\n  > 🙂 [[Other]]",
+          "markdownUpdatedAt": "2026-11-13T00:00:00.000Z",
+          "nodes": [
+            {
+              "id": "source-5-0",
+              "text": "escaped *word* [[Other]]",
+              "note": "🙂 [[Other]]",
+              "checked": false,
+              "collapsed": false,
+              "color": "plain",
+              "children": [],
+              "headingLevel": 0,
+              "isTodo": false
+            }
+          ],
+          "attachments": {
+            "version": 1,
+            "items": {
+              "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+                "mediaType": "application/octet-stream",
+                "byteLength": 1
+              }
+            }
+          },
+          "knowledge": {
+            "version": 1,
+            "references": [
+              {
+                "id": "ref-0",
+                "source": {
+                  "kind": "markdown",
+                  "start": 28,
+                  "end": 37,
+                  "raw": "[[Other]]"
+                },
+                "target": {
+                  "documentId": "other"
+                },
+                "labelMode": "auto"
+              },
+              {
+                "id": "ref-1",
+                "source": {
+                  "kind": "markdown",
+                  "start": 45,
+                  "end": 54,
+                  "raw": "[[Other]]"
+                },
+                "target": {
+                  "documentId": "other"
+                },
+                "labelMode": "auto"
+              }
+            ],
+            "relations": []
+          }
+        },
+        {
+          "id": "other",
+          "title": "Other",
+          "nodes": [
+            {
+              "id": "target",
+              "text": "Target",
+              "children": []
+            }
+          ]
+        }
+      ]
+    },
+    "expected": {
+      "version": 1,
+      "references": [
+        {
+          "id": "ref-0",
+          "source": {
+            "kind": "node-field",
+            "nodeId": "source-5-0",
+            "field": "text",
+            "start": 15,
+            "end": 24,
+            "raw": "[[Other]]"
+          },
+          "target": {
+            "documentId": "other"
+          },
+          "labelMode": "auto"
+        },
+        {
+          "id": "ref-1",
+          "source": {
+            "kind": "node-field",
+            "nodeId": "source-5-0",
+            "field": "note",
+            "start": 3,
+            "end": 12,
+            "raw": "[[Other]]"
+          },
+          "target": {
+            "documentId": "other"
+          },
+          "labelMode": "auto"
+        }
+      ],
+      "relations": []
+    },
+    "connections": {
+      "references": {
+        "items": [
+          {
+            "status": "resolved",
+            "raw": "[[Other]]",
+            "target": {
+              "documentId": "other"
+            },
+            "field": "text"
+          },
+          {
+            "status": "resolved",
+            "raw": "[[Other]]",
+            "target": {
+              "documentId": "other"
+            },
+            "field": "note"
+          }
+        ],
+        "total": 2,
+        "truncated": false
+      },
+      "incoming": {
+        "items": [],
+        "total": 0,
+        "truncated": false
+      },
+      "relations": {
+        "items": [],
+        "total": 0,
+        "truncated": false
+      },
+      "truncated": false
+    }
+  },
+  {
+    "document": {
+      "id": "doc",
+      "title": "Title",
+      "createdAt": "2026-11-13T00:00:00.000Z",
+      "updatedAt": "2026-11-13T00:00:00.000Z",
+      "markdownSource": "# Title\n\n```js\n[[Other]]\n```\n\n- Real [[Other]]\n\n| A | B |\n| --- | --- |\n| [[Other]] | x |",
+      "markdownUpdatedAt": "2026-11-13T00:00:00.000Z",
+      "nodes": [
+        {
+          "id": "source-6-0",
+          "text": "代码块：js",
+          "note": "",
+          "checked": false,
+          "collapsed": false,
+          "color": "plain",
+          "children": [],
+          "headingLevel": 0,
+          "codeBlock": "[[Other]]",
+          "codeLanguage": "js",
+          "isTodo": false
+        },
+        {
+          "id": "source-6-1",
+          "text": "Real [[Other]]",
+          "note": "",
+          "checked": false,
+          "collapsed": false,
+          "color": "plain",
+          "children": [],
+          "headingLevel": 0,
+          "table": [
+            [
+              "A",
+              "B"
+            ],
+            [
+              "[[Other]]",
+              "x"
+            ]
+          ],
+          "isTodo": false
+        }
+      ],
+      "attachments": {
+        "version": 1,
+        "items": {
+          "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+            "mediaType": "application/octet-stream",
+            "byteLength": 1
+          }
+        }
+      },
+      "knowledge": {
+        "version": 1,
+        "references": [
+          {
+            "id": "ref-0",
+            "source": {
+              "kind": "markdown",
+              "start": 37,
+              "end": 46,
+              "raw": "[[Other]]"
+            },
+            "target": {
+              "documentId": "other"
+            },
+            "labelMode": "auto"
+          },
+          {
+            "id": "ref-1",
+            "source": {
+              "kind": "markdown",
+              "start": 74,
+              "end": 83,
+              "raw": "[[Other]]"
+            },
+            "target": {
+              "documentId": "other"
+            },
+            "labelMode": "auto"
+          }
+        ],
+        "relations": []
+      }
+    },
+    "workspace": {
+      "version": 3,
+      "activeDocumentId": "doc",
+      "documents": [
+        {
+          "id": "doc",
+          "title": "Title",
+          "createdAt": "2026-11-13T00:00:00.000Z",
+          "updatedAt": "2026-11-13T00:00:00.000Z",
+          "markdownSource": "# Title\n\n```js\n[[Other]]\n```\n\n- Real [[Other]]\n\n| A | B |\n| --- | --- |\n| [[Other]] | x |",
+          "markdownUpdatedAt": "2026-11-13T00:00:00.000Z",
+          "nodes": [
+            {
+              "id": "source-6-0",
+              "text": "代码块：js",
+              "note": "",
+              "checked": false,
+              "collapsed": false,
+              "color": "plain",
+              "children": [],
+              "headingLevel": 0,
+              "codeBlock": "[[Other]]",
+              "codeLanguage": "js",
+              "isTodo": false
+            },
+            {
+              "id": "source-6-1",
+              "text": "Real [[Other]]",
+              "note": "",
+              "checked": false,
+              "collapsed": false,
+              "color": "plain",
+              "children": [],
+              "headingLevel": 0,
+              "table": [
+                [
+                  "A",
+                  "B"
+                ],
+                [
+                  "[[Other]]",
+                  "x"
+                ]
+              ],
+              "isTodo": false
+            }
+          ],
+          "attachments": {
+            "version": 1,
+            "items": {
+              "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+                "mediaType": "application/octet-stream",
+                "byteLength": 1
+              }
+            }
+          },
+          "knowledge": {
+            "version": 1,
+            "references": [
+              {
+                "id": "ref-0",
+                "source": {
+                  "kind": "markdown",
+                  "start": 37,
+                  "end": 46,
+                  "raw": "[[Other]]"
+                },
+                "target": {
+                  "documentId": "other"
+                },
+                "labelMode": "auto"
+              },
+              {
+                "id": "ref-1",
+                "source": {
+                  "kind": "markdown",
+                  "start": 74,
+                  "end": 83,
+                  "raw": "[[Other]]"
+                },
+                "target": {
+                  "documentId": "other"
+                },
+                "labelMode": "auto"
+              }
+            ],
+            "relations": []
+          }
+        },
+        {
+          "id": "other",
+          "title": "Other",
+          "nodes": [
+            {
+              "id": "target",
+              "text": "Target",
+              "children": []
+            }
+          ]
+        }
+      ]
+    },
+    "expected": {
+      "version": 1,
+      "references": [
+        {
+          "id": "ref-0",
+          "source": {
+            "kind": "node-field",
+            "nodeId": "source-6-1",
+            "field": "text",
+            "start": 5,
+            "end": 14,
+            "raw": "[[Other]]"
+          },
+          "target": {
+            "documentId": "other"
+          },
+          "labelMode": "auto"
+        },
+        {
+          "id": "ref-1",
+          "source": {
+            "kind": "markdown",
+            "start": 74,
+            "end": 83,
+            "raw": "[[Other]]"
+          },
+          "target": {
+            "documentId": "other"
+          },
+          "labelMode": "auto"
+        }
+      ],
+      "relations": []
+    },
+    "connections": {
+      "references": {
+        "items": [
+          {
+            "status": "resolved",
+            "raw": "[[Other]]",
+            "target": {
+              "documentId": "other"
+            },
+            "field": "text"
+          },
+          {
+            "status": "resolved",
+            "raw": "[[Other]]",
+            "target": {
+              "documentId": "other"
+            },
+            "field": "markdown"
+          }
+        ],
+        "total": 2,
+        "truncated": false
+      },
+      "incoming": {
+        "items": [],
+        "total": 0,
+        "truncated": false
+      },
+      "relations": {
+        "items": [],
+        "total": 0,
+        "truncated": false
+      },
+      "truncated": false
+    }
+  }
+]

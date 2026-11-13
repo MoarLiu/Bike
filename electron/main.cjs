@@ -130,7 +130,7 @@ const backupService = () => {
         const assets = await attachmentIpc.library().copyWorkspaceAssets(workspace, path.join(directory, "attachments"));
         const manifestDirectory = path.join(directory, "attachment-manifests");
         await fs.mkdir(manifestDirectory, { recursive: true, mode: 0o700 });
-        await writeFileAtomically(path.join(manifestDirectory, `${revision}.json`), JSON.stringify({ version: 1, revision, assets }));
+        await writeFileAtomically(path.join(manifestDirectory, "current.json"), JSON.stringify({ version: 1, revision, assets }));
       },
       verifySavedSource: async (receipt) => {
         const origin = mainWindow;
@@ -138,6 +138,7 @@ const backupService = () => {
         return origin === mainWindow && valid;
       },
       requireSavedSources: true,
+      maintainAssets: require("./backup-maintenance.cjs").maintainBackupAssets,
       readPending: () => fs.readFile(path.join(app.getPath("userData"), "backup-pending.json"), "utf8").then(JSON.parse).catch((error) => {
         if (error.code === "ENOENT") return null;
         throw error;
@@ -253,6 +254,10 @@ const updates = () => {
     updater: autoUpdater,
     currentVersion: app.getVersion(),
     supported: app.isPackaged && process.platform === "darwin",
+    resolveRelease: require("./update-checker.cjs").fetchLatestRelease,
+    manualOnly: app.isPackaged && process.platform === "darwin" && !require("node:child_process").spawnSync(
+      "/usr/bin/codesign", ["-d", "--verbose=4", path.resolve(process.execPath, "../../..")], { encoding: "utf8", timeout: 5000 },
+    ).stderr?.includes("Authority=Developer ID Application:"),
     onState: (state) => {
       if (mainWindow && !mainWindow.webContents.isDestroyed()) mainWindow.webContents.send("update-state", state);
     },
@@ -269,10 +274,15 @@ const runUpdateDialog = async () => {
   const service = updates();
   let state = await service.check();
   const reportError = async () => {
-    await showMessageBox(focusedAppWindow(), { type: "warning", buttons: ["好"], title: "应用更新", message: state.error || "更新未完成，请稍后重试" });
+    const choice = await showMessageBox(focusedAppWindow(), { type: "warning", buttons: ["打开发布页手动下载", "关闭"], defaultId: 1, cancelId: 1, title: "应用更新", message: state.error || "更新未完成，请稍后重试" });
+    if (choice.response === 0) await shell.openExternal(DEFAULT_RELEASES_PAGE_URL);
   };
   if (["error", "unsupported"].includes(state.status)) {
     await reportError();
+  } else if (state.status === "manual") {
+    const choice = await showMessageBox(focusedAppWindow(), { type: "info", buttons: ["打开发布页下载", "稍后"], defaultId: 0, cancelId: 1,
+      title: "应用更新", message: `发现新版本 ${state.latestVersion}`, detail: "当前应用使用本地签名，请下载并替换安装；你的工作区会保留。" });
+    if (choice.response === 0) await shell.openExternal(DEFAULT_RELEASES_PAGE_URL);
   } else if (state.status === "not-available") {
     await showMessageBox(focusedAppWindow(), { type: "info", buttons: ["好"], title: "检查更新", message: "已是最新版本", detail: `当前版本 ${state.currentVersion}` });
   } else if (state.status === "available") {
@@ -413,7 +423,8 @@ const createAiEndpointUrl = (baseUrl, endpoint) => {
 
 const allowedSyncMethodForPath = (pathname, method) => {
   if (/^\/api\/v2\/(?:status|checkpoint|events)$/.test(pathname)) return method === "GET";
-  if (/^\/api\/v2\/(?:enable|operations)$/.test(pathname)) return method === "POST";
+  if (/^\/api\/v2\/(?:enable|operations|operation-chunks)$/.test(pathname)) return method === "POST";
+  if (/^\/api\/v2\/operation-chunks\/[^/]+\/\d+$/.test(pathname)) return method === "GET";
   if (/^\/api\/v2\/receipts\/[^/]+$/.test(pathname)) return method === "GET";
   if (pathname === "/api/sync/manifest") return method === "GET" || method === "PATCH";
   if (pathname === "/api/documents") return method === "GET";
@@ -439,11 +450,13 @@ const createSyncRequestUrl = (payload) => {
     throw new Error("同步服务地址不应包含用户名、密码、查询参数或锚点");
   }
   const parsedPath = new URL(rawPathname, "http://bike.local");
-  if (parsedPath.origin !== "http://bike.local" || parsedPath.hash || (parsedPath.search && !/^\/api\/v2\/(?:events|checkpoint)$/.test(parsedPath.pathname))) {
+  if (parsedPath.origin !== "http://bike.local" || parsedPath.hash) {
     throw new Error("同步 API 路径无效");
   }
   for (const [key, value] of parsedPath.searchParams) {
-    if (!["after", "limit", "expectedCursor"].includes(key) || !/^\d{1,16}$/.test(value)) throw new Error("同步分页参数无效");
+    if (key === "bikeOrdering" && value === "2" && parsedPath.pathname.startsWith("/api/v2/")) continue;
+    if (!/^\/api\/v2\/(?:events|checkpoint)$/.test(parsedPath.pathname) ||
+        !["after", "limit", "expectedCursor"].includes(key) || !/^\d{1,16}$/.test(value)) throw new Error("同步分页参数无效");
   }
   const pathname = parsedPath.pathname;
   if (!allowedSyncMethodForPath(pathname, method)) {
@@ -479,6 +492,14 @@ const isAllowedAppUrl = (value) => {
 };
 
 const installContentSecurityPolicy = () => {
+  const permissionAllowed = (contents, permission, details) =>
+    Boolean(contents) && contents === mainWindow?.webContents && details?.isMainFrame === true &&
+    isAllowedAppUrl(details.requestingUrl ?? contents.getURL()) &&
+    ["clipboard-sanitized-write", "fullscreen"].includes(permission);
+  session.defaultSession.setPermissionRequestHandler((contents, permission, callback, details) =>
+    callback(permissionAllowed(contents, permission, details)));
+  session.defaultSession.setPermissionCheckHandler((contents, permission, _origin, details) =>
+    permissionAllowed(contents, permission, details));
   if (isDev) return;
   session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
     callback({
@@ -490,27 +511,9 @@ const installContentSecurityPolicy = () => {
   });
 };
 
-const pruneStampedBackups = async (directory, prefix = stampedBackupPrefix) => {
-  const entries = await fs.readdir(directory, { withFileTypes: true });
-  const backups = await Promise.all(
-    entries
-      .filter((entry) => entry.isFile() && entry.name.startsWith(prefix) && entry.name.endsWith(".json"))
-      .map(async (entry) => {
-        const filePath = path.join(directory, entry.name);
-        const stats = await fs.stat(filePath);
-        return { filePath, modifiedAt: stats.mtimeMs };
-      }),
-  );
-  await Promise.all(
-    backups
-      .sort((a, b) => b.modifiedAt - a.modifiedAt)
-      .slice(maxStampedBackups)
-      .map((backup) => fs.rm(backup.filePath, { force: true })),
-  );
-};
-
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   if (!ownsInstance) return;
+  await fs.rm(path.join(app.getPath("userData"), "live-mcp.json"), { force: true });
   removeLegacySyncSecret().catch((error) => {
     console.warn("Failed to remove legacy sync secret:", error);
   });

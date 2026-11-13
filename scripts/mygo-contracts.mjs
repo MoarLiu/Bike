@@ -10,7 +10,8 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { createBikeMcpServer } from '../mcp/bike-server.mjs';
 import { buildWorkspaceIndex, documentToMarkdown, exportDocumentForMcp, getDocument, getNode, listDocuments, migrateWorkspace, searchOutline } from '../mcp/bike-core.mjs';
 import { WorkspaceStore, appendChildrenForMcp, createDocumentForMcp, createNodeForMcp, deleteNodeForMcp, moveNodeForMcp, setNodeCheckedForMcp, updateDocumentTitleForMcp, updateNodeForMcp } from '../mcp/bike-core.mjs';
-import { scanLinks, summarizeKnowledge } from '../shared/bike-knowledge.mjs';
+import { scanLinks, summarizeKnowledge, anchorMarkdownReferences } from '../shared/bike-knowledge.mjs';
+import { parseMarkdownDocument } from '../shared/bike-markdown.mjs';
 import * as limits from '../shared/bike-limits.mjs';
 import * as attachments from '../shared/bike-attachments.mjs';
 import { canonicalJson, OPERATION_LIMITS, OPERATION_PROTOCOL } from '../shared/bike-operations.mjs';
@@ -19,6 +20,7 @@ import * as network from '../shared/bike-network.mjs';
 import { BIKE_TEMPLATES } from '../shared/bike-templates.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
+const productVersion = JSON.parse(await fs.readFile(path.join(root, 'package.json'), 'utf8')).version;
 const write = process.argv.includes('--write');
 const output = async (relative, value) => {
   const file = path.join(root, relative);
@@ -92,6 +94,27 @@ const readCases = [readWorkspace, explicitWorkspace, markdownWorkspace].map((wor
   })(),
 }));
 await output('desktop-mygo/tests/fixtures/mcp-read-vectors.json', readCases);
+const anchorCases = [
+  '# Title\n\n- duplicate [[Other]]\n- duplicate [[Other]]',
+  '# Title [[Other]]\n\n- Same [[Other]]',
+  '# Title\n\n- Root\n  [file](bike-attachment:sha256:' + 'a'.repeat(64) + ')\n  > attached note [[Other]]',
+  '# Title\n\n- Root\n  > first [[Other]]\n  > next [[Other#Target]]\n- Root\n  > first [[Other]]',
+  '# Title\n\n## Heading [[Other]]\n\nparagraph [[Other]]\ncontinued [[Other#Target|x]]\n\n- Nested\n  continuation [[Other]]',
+  '\ufeff# Title\r\n\r\n- escaped \\*word\\* [[Other]]\r\n  > 🙂 [[Other]]',
+  '# Title\n\n```js\n[[Other]]\n```\n\n- Real [[Other]]\n\n| A | B |\n| --- | --- |\n| [[Other]] | x |',
+].map((source, caseIndex) => {
+  const attachments = { version: 1, items: { ['sha256:' + 'a'.repeat(64)]: { mediaType: 'application/octet-stream', byteLength: 1 } } };
+  const document = parseMarkdownDocument(source, { documentId: 'doc', now: '2026-11-13T00:00:00.000Z', previousDocument: { id: 'doc', title: 'Title', nodes: [], attachments } });
+  document.attachments = attachments;
+  let index = 0;
+  const identify = nodes => nodes.forEach(node => { node.id = `source-${caseIndex}-${index++}`; identify(node.children); });
+  identify(document.nodes);
+  document.knowledge = { version: 1, references: scanLinks(document.markdownSource).map((link,index) => ({ id:`ref-${index}`,source:{kind:'markdown',start:link.start,end:link.end,raw:link.raw},target:{documentId:'other'},labelMode:'auto' })), relations:[] };
+  const workspace = { version: 3, activeDocumentId: 'doc', documents: [document, { id: 'other', title: 'Other', nodes: [{ id: 'target', text: 'Target', children: [] }] }] };
+  return {document, workspace, expected:anchorMarkdownReferences(document), connections:summarizeKnowledge(workspace, document)};
+});
+await output('desktop-mygo/tests/fixtures/markdown-anchors.json', anchorCases);
+
 const writeCases = [];
 const writeFunctions = {
   create_document: createDocumentForMcp, update_document_title: updateDocumentTitleForMcp,
@@ -280,8 +303,8 @@ const server = await createBikeMcpServer({ store: {
   config: { mode: 'readonly' },
   async load() { return { workspace: { documents: [] } }; },
   async status() { throw new Error('manifest extraction only'); },
-}, version: '2.0.0' });
-const client = new Client({ name: 'bike-mygo-contract-extractor', version: '2.0.0' });
+}, version: productVersion });
+const client = new Client({ name: 'bike-mygo-contract-extractor', version: productVersion });
 const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
 try {
   await server.connect(serverTransport);

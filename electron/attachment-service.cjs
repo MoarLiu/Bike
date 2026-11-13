@@ -5,6 +5,13 @@ const path = require("node:path");
 const { withWorkspaceWriteLock, writeFileAtomically } = require("./workspace-lock.cjs");
 
 const contracts = () => import("../shared/bike-attachments.mjs");
+const verifiedObjects = new Map();
+const fingerprint = (stat) => [stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs].join(":");
+const rememberVerified = (target, stat, metadata) => {
+  verifiedObjects.delete(target);
+  verifiedObjects.set(target, { fingerprint: fingerprint(stat), metadata });
+  while (verifiedObjects.size > 4096) verifiedObjects.delete(verifiedObjects.keys().next().value);
+};
 
 // Read dimensions before allowing an image decoder to allocate pixel memory.
 const imageDimensions = (bytes, mediaType) => {
@@ -217,6 +224,12 @@ const createAttachmentService = ({ directory }) => {
     try {
       const stat = await handle.stat();
       if (!stat.isFile() || stat.size !== expected.byteLength) throw Object.assign(new Error("本机附件长度与清单不一致"), { code: "ATTACHMENT_INTEGRITY" });
+      const identity = await handle.stat({ bigint: true });
+      const cached = verifiedObjects.get(target);
+      if (cached?.fingerprint === fingerprint(identity) && ["byteLength", "mediaType", "width", "height"].every(key => cached.metadata[key] === expected[key])) {
+        signal?.throwIfAborted();
+        return target;
+      }
       const hash = crypto.createHash("sha256");
       for await (const chunk of handle.createReadStream({ autoClose: false })) { signal?.throwIfAborted(); hash.update(chunk); }
       if (hash.digest("hex") !== attachmentDigest(assetId)) throw Object.assign(new Error("本机附件哈希校验失败"), { code: "ATTACHMENT_INTEGRITY" });
@@ -224,6 +237,9 @@ const createAttachmentService = ({ directory }) => {
       await handle.read(header, 0, header.length, 0);
       const actual = { ...metadataFor(header), byteLength: stat.size };
       if (["mediaType", "width", "height"].some((key) => actual[key] !== expected[key])) throw Object.assign(new Error("本机附件格式与清单不一致"), { code: "ATTACHMENT_INTEGRITY" });
+      const finalIdentity = await handle.stat({ bigint: true });
+      if (fingerprint(identity) !== fingerprint(finalIdentity)) throw Object.assign(new Error("校验期间附件发生变化"), { code: "ATTACHMENT_INTEGRITY" });
+      rememberVerified(target, finalIdentity, actual);
       return target;
     } finally { await handle.close(); }
   };
@@ -232,6 +248,9 @@ const createAttachmentService = ({ directory }) => {
     const assets = workspaceAttachmentAssets(workspace);
     const target = createAttachmentService({ directory: destination });
     for (const { assetId, metadata } of assets) {
+      try { await target.transferSource(assetId, metadata); continue; }
+      catch (error) { if (error.code !== "ENOENT") throw error; }
+      await transferSource(assetId, metadata);
       const bytes = await read(assetId, metadata);
       const installed = await target.putBytes(bytes);
       if (installed.assetId !== assetId) throw new Error("备份附件摘要不一致");
@@ -248,7 +267,8 @@ const createAttachmentService = ({ directory }) => {
       if (!/^[a-f0-9]{2}$/u.test(directory.name)) continue;
       if (!directory.isDirectory() || directory.isSymbolicLink()) throw new Error("附件库结构无效，已停止清理");
       for (const entry of await fs.readdir(path.join(root, directory.name), { withFileTypes: true })) {
-        if (!/^[a-f0-9]{64}$/u.test(entry.name) || !entry.name.startsWith(directory.name) || !entry.isFile() || entry.isSymbolicLink()) throw new Error("附件对象无效，已停止清理");
+        if (!/^[a-f0-9]{64}$/u.test(entry.name)) continue; // unrelated files are never cleanup candidates
+        if (!entry.name.startsWith(directory.name) || !entry.isFile() || entry.isSymbolicLink()) throw new Error("附件对象无效，已停止清理");
         const assetId = `sha256:${entry.name}`;
         if (protectedIds.has(assetId)) continue;
         const stat = await fs.lstat(path.join(root, directory.name, entry.name));
@@ -287,7 +307,8 @@ const createAttachmentService = ({ directory }) => {
       const folder = path.dirname(await quarantinePath(`sha256:${"0".repeat(64)}`));
       let removed = 0;
       for (const entry of await fs.readdir(folder, { withFileTypes: true })) {
-        if (!/^[a-f0-9]{64}$/u.test(entry.name) || !entry.isFile() || entry.isSymbolicLink()) throw new Error("隔离区内容无效，已停止清理");
+        if (!/^[a-f0-9]{64}$/u.test(entry.name)) continue;
+        if (!entry.isFile() || entry.isSymbolicLink()) throw new Error("隔离区内容无效，已停止清理");
         const assetId = `sha256:${entry.name}`;
         const filename = path.join(folder, entry.name);
         const stat = await fs.lstat(filename);

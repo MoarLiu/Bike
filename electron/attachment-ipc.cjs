@@ -1,4 +1,10 @@
 const fs = require("node:fs/promises");
+const { promisify } = require("node:util");
+const execFileAsync = promisify(require("node:child_process").execFile);
+const quarantineAttachment = async (filename) => {
+  if (process.platform !== "darwin") return;
+  await execFileAsync("/usr/bin/xattr", ["-w", "com.apple.quarantine", `0083;${Math.floor(Date.now() / 1000).toString(16)};Bike;`, filename], { timeout: 5000 });
+};
 const path = require("node:path");
 const { createAttachmentService, metadataFor } = require("./attachment-service.cjs");
 const { exportWorkspaceArchive, importWorkspaceArchive } = require("./workspace-archive.cjs");
@@ -17,6 +23,7 @@ const installAttachmentIpc = ({ registerIpc, app, dialog, nativeImage, shell, ge
   const imports = new Map();
   const scans = new Map();
   const openDirectories = new Set();
+  void require("./temporary-files.cjs").cleanupOpenFiles(app.getPath("temp")).catch(() => {});
   app.once("will-quit", () => { for (const directory of openDirectories) void fs.rm(directory, { recursive: true, force: true }); });
   const library = () => service ??= createAttachmentService({ directory: path.join(app.getPath("userData"), "attachments") });
   const handle = (channel, callback) => registerIpc(channel, async (_event, payload) => {
@@ -99,6 +106,7 @@ const installAttachmentIpc = ({ registerIpc, app, dialog, nativeImage, shell, ge
     const choice = await showSave({ title: "另存附件", defaultPath: path.basename(typeof name === "string" ? name : "附件") });
     if (choice.canceled || !choice.filePath) return { cancelled: true };
     await writeFileAtomically(choice.filePath, bytes);
+    await quarantineAttachment(choice.filePath);
     return { path: choice.filePath };
   });
   handle("attachment-open", async ({ assetId, name }) => {
@@ -107,6 +115,7 @@ const installAttachmentIpc = ({ registerIpc, app, dialog, nativeImage, shell, ge
     const target = path.join(directory, path.basename(typeof name === "string" && name.trim() ? name : "附件"));
     try {
       await writeFileAtomically(target, bytes);
+      await quarantineAttachment(target);
       const error = await shell.openPath(target);
       if (error) throw new Error(error);
       openDirectories.add(directory);

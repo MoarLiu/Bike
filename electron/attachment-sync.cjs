@@ -130,7 +130,7 @@ const createAttachmentSync = ({ library, directory, onProgress = () => {} }) => 
     if (active) throw new Error('附件同步仍在进行');
     const controller = new AbortController();
     active = controller;
-    try { return await transfer(options, controller); }
+    try { await require("./temporary-files.cjs").cleanupTransferFiles(directory); return await transfer(options, controller); }
     finally { active = null; }
   };
   return { run, cancel };

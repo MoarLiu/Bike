@@ -1,5 +1,7 @@
 import { downloadBlob } from "./exporters";
 import { loadAttachmentImage } from "./attachmentImages";
+import { isPreviewableImage } from "../shared/bike-attachments.mjs";
+import { xmlText } from "./xmlText";
 import type { OutlineDocument } from "./types";
 
 const namespace = "http://www.w3.org/2000/svg";
@@ -58,7 +60,7 @@ export const exportMindMap = async (outline: OutlineDocument, format: "svg" | "p
     const reference = nodes.get(card.id || "")?.attachmentRefs?.[0];
     if (reference) {
       const metadata = outline.attachments?.items[reference.assetId];
-      if (metadata?.mediaType.startsWith("image/")) {
+      if (isPreviewableImage(metadata)) {
         let url = images.get(reference.assetId);
         if (!url) {
           const image = await loadAttachmentImage(reference.assetId);
@@ -75,7 +77,7 @@ export const exportMindMap = async (outline: OutlineDocument, format: "svg" | "p
     }
     svg.append(card.group);
   }
-  const content = new XMLSerializer().serializeToString(svg);
+  const content = xmlText(new XMLSerializer().serializeToString(svg));
   const blob = new Blob([content], { type: "image/svg+xml" });
   const filename = outline.title.replace(/[/\\:*?"<>|]/gu, "_").slice(0, 100) || "mindmap";
   if (format === "svg") { downloadBlob(`${filename}.svg`, blob); return; }
@@ -96,5 +98,7 @@ export const exportMindMap = async (outline: OutlineDocument, format: "svg" | "p
     context.drawImage(image, 0, 0);
     const png = await new Promise<Blob>((resolve, reject) => canvas.toBlob((value) => value ? resolve(value) : reject(new Error("PNG 编码失败")), "image/png"));
     downloadBlob(`${filename}.png`, png);
+  } catch (error) {
+    throw new Error(`PNG 导出失败，请检查图片或改用 SVG：${error instanceof Error ? error.message : "图片无法解码"}`);
   } finally { image.src = ""; canvas.width = 0; canvas.height = 0; }
 };
